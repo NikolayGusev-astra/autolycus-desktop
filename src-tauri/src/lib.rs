@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 
 struct AppState {
     backend_process: Mutex<Option<std::process::Child>>,
@@ -25,7 +25,7 @@ fn start_backend(state: State<AppState>, app_handle: tauri::AppHandle) -> Result
         .path()
         .resource_dir()
         .map(|d| d.join("bin").join("autolycus-backend"))
-        .filter(|p| p.exists())
+        .map(|p| if p.exists() { p } else { std::path::PathBuf::from("autolycus-backend") })
         .unwrap_or_else(|_| std::path::PathBuf::from("autolycus-backend"));
 
     let mut child = Command::new(&python_backend)
