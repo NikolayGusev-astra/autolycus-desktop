@@ -1,38 +1,52 @@
-# Autolycus Desktop — Build Environment
-FROM ubuntu:22.04
+# Autolycus Desktop — Full Build Dockerfile
+# Build: docker build -t autolycus-desktop .
+# Extract: docker run --rm -v "$(pwd)/output:/output" autolycus-desktop
+
+FROM ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies for Tauri + Node.js
+# System deps
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    wget \
-    file \
-    pkg-config \
-    libssl-dev \
-    libwebkit2gtk-4.1-dev \
-    libgtk-3-dev \
-    libayatana-appindicator3-dev \
-    librsvg2-dev \
-    patchelf \
-    libdbus-1-dev \
-    libglib2.0-dev \
+    build-essential curl wget file pkg-config \
+    libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+    libayatana-appindicator3-dev librsvg2-dev patchelf \
+    libdbus-1-dev libglib2.0-dev xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20
+# Node.js 20
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust
+# Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install Tauri CLI
+# Tauri CLI
 RUN cargo install tauri-cli@^2
 
 WORKDIR /app
 
-# Default: show help
-CMD ["echo", "Usage: docker compose run build"]
+# Copy package files first (cache layer)
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy frontend source
+COPY tsconfig.json tsconfig.node.json vite.config.ts index.html ./
+COPY src/ src/
+
+# Build frontend
+RUN npx vite build
+
+# Copy Tauri source
+COPY src-tauri/ src-tauri/
+
+# Build Tauri app
+RUN cd src-tauri && cargo tauri build --debug
+
+# Final image with just the built artifacts
+FROM ubuntu:22.04
+COPY --from=builder /app/src-tauri/target/debug/bundle/ /bundle/
+COPY --from=builder /app/src-tauri/target/debug/autolycus-desktop /usr/local/bin/
+CMD ["bash"]
