@@ -42,13 +42,14 @@ export function App() {
         setAgentStatus("streaming");
         break;
 
+      case "token":
       case "message.chunk": {
-        const chunk = payload?.text as string | undefined;
-        if (chunk) {
+        const content = payload?.content as string | undefined;
+        if (content) {
           addMessage({
             id: `msg-${Date.now()}`,
             role: "assistant",
-            content: chunk,
+            content,
             timestamp: Date.now(),
             isStreaming: true,
           });
@@ -56,12 +57,41 @@ export function App() {
         break;
       }
 
-      case "message.end":
+      case "reasoning": {
+        const content = payload?.content as string | undefined;
+        if (content) {
+          addMessage({
+            id: `thinking-${Date.now()}`,
+            role: "assistant",
+            content: `[Thinking] ${content}`,
+            timestamp: Date.now(),
+            isStreaming: true,
+          });
+        }
+        break;
+      }
+
+      case "tool_progress": {
+        const tool = payload?.tool as string | undefined;
+        const status = payload?.status as string | undefined;
+        if (tool && status) {
+          addMessage({
+            id: `tool-${Date.now()}`,
+            role: "tool",
+            content: `${status === "done" ? "✅" : "🔧"} ${tool}`,
+            timestamp: Date.now(),
+          });
+        }
+        setAgentStatus("tool_calling");
+        break;
+      }
+
+      case "done":
         setAgentStatus("idle");
         break;
 
-      case "tool.start":
-        setAgentStatus("tool_calling");
+      case "error":
+        setAgentStatus("error");
         break;
 
       case "gateway.exited":

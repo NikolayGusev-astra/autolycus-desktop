@@ -2,10 +2,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Child, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -18,11 +17,68 @@ pub struct AgentConfig {
     pub remote_port: Option<u16>,
 }
 
+/// Typed stream events from backend (adapted from hermes-express)
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum StreamEvent {
+    /// Text token delta from the model
+    #[serde(rename = "token")]
+    Token { content: String },
+    /// Reasoning/thinking delta
+    #[serde(rename = "reasoning")]
+    Reasoning { content: String },
+    /// Tool status update
+    #[serde(rename = "tool_progress")]
+    ToolProgress {
+        tool: String,
+        status: String,
+        emoji: String,
+        label: String,
+        #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+    },
+    /// Stream complete
+    #[serde(rename = "done")]
+    Done,
+    /// Error during streaming
+    #[serde(rename = "error")]
+    Error { content: String },
+    /// Status update
+    #[serde(rename = "status")]
+    Status { status: String },
+    /// Raw JSON event (fallback)
+    #[serde(rename = "raw")]
+    Raw { payload: serde_json::Value },
+}
+
+/// Legacy AgentEvent for backward compatibility
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentEvent {
     pub event_type: String,
     pub payload: serde_json::Value,
     pub session_id: Option<String>,
+}
+
+impl From<StreamEvent> for AgentEvent {
+    fn from(event: StreamEvent) -> Self {
+        let (event_type, payload) = match &event {
+            StreamEvent::Token { content } => ("token".to_string(), serde_json::json!({ "content": content })),
+            StreamEvent::Reasoning { content } => ("reasoning".to_string(), serde_json::json!({ "content": content })),
+            StreamEvent::ToolProgress { tool, status, emoji, label, tool_call_id } => (
+                "tool_progress".to_string(),
+                serde_json::json!({ "tool": tool, "status": status, "emoji": emoji, "label": label, "toolCallId": tool_call_id }),
+            ),
+            StreamEvent::Done => ("done".to_string(), serde_json::json!({})),
+            StreamEvent::Error { content } => ("error".to_string(), serde_json::json!({ "content": content })),
+            StreamEvent::Status { status } => ("status".to_string(), serde_json::json!({ "status": status })),
+            StreamEvent::Raw { payload } => ("raw".to_string(), payload.clone()),
+        };
+        AgentEvent {
+            event_type,
+            payload,
+            session_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -42,8 +98,6 @@ struct AgentState {
     child: Mutex<Option<Child>>,
     stdin_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     config: Mutex<Option<AgentConfig>>,
-    // Pending requests: id -> response sender
-    pending: Mutex<HashMap<String, std::sync::mpsc::Sender<serde_json::Value>>>,
 }
 
 impl AgentState {
@@ -52,7 +106,6 @@ impl AgentState {
             child: Mutex::new(None),
             stdin_tx: Mutex::new(None),
             config: Mutex::new(None),
-            pending: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -116,9 +169,104 @@ fn get_tui_gateway_module(_instance: &str) -> &'static str {
     "tui_gateway.entry"
 }
 
+/// Check if a line is a JSON-RPC message (not a log line)
 fn is_json_rpc(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.starts_with('{') && (trimmed.contains("\"jsonrpc\"") || trimmed.contains("\"method\"") || trimmed.contains("\"id\""))
+    trimmed.starts_with('{') && (
+        trimmed.contains("\"jsonrpc\"") ||
+        trimmed.contains("\"method\"") ||
+        (trimmed.contains("\"id\"") && trimmed.contains("\"result\""))
+    )
+}
+
+/// Parse a JSON-RPC line into a StreamEvent
+fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
+    // Check for event type in params.type
+    let event_type = value
+        .get("params")
+        .and_then(|p| p.get("type"))
+        .or_else(|| value.get("method"))
+        .and_then(|t| t.as_str())?;
+
+    match event_type {
+        "gateway.ready" => Some(StreamEvent::Status { status: "ready".to_string() }),
+        "status.update" => {
+            let status = value
+                .get("params")
+                .and_then(|p| p.get("text"))
+                .or_else(|| value.get("params").and_then(|p| p.get("kind")))
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            Some(StreamEvent::Status { status })
+        }
+        "message.start" => Some(StreamEvent::Status { status: "streaming".to_string() }),
+        "message.chunk" | "thinking.delta" | "reasoning.delta" => {
+            let content = value
+                .get("params")
+                .and_then(|p| p.get("text"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            if event_type.starts_with("reasoning") || event_type.starts_with("thinking") {
+                Some(StreamEvent::Reasoning { content })
+            } else {
+                Some(StreamEvent::Token { content })
+            }
+        }
+        "message.end" => Some(StreamEvent::Done),
+        "tool.start" | "tool.progress" | "tool.generating" => {
+            let name = value
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            Some(StreamEvent::ToolProgress {
+                tool: name,
+                status: "running".to_string(),
+                emoji: "🔧".to_string(),
+                label: "Executing...".to_string(),
+                tool_call_id: None,
+            })
+        }
+        "tool.complete" => {
+            let name = value
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            Some(StreamEvent::ToolProgress {
+                tool: name,
+                status: "done".to_string(),
+                emoji: "✅".to_string(),
+                label: "Complete".to_string(),
+                tool_call_id: None,
+            })
+        }
+        "error" => {
+            let content = value
+                .get("params")
+                .and_then(|p| p.get("message"))
+                .or_else(|| value.get("error").and_then(|e| e.get("message")))
+                .and_then(|s| s.as_str())
+                .unwrap_or("Unknown error")
+                .to_string();
+            Some(StreamEvent::Error { content })
+        }
+        "gateway.stderr" => {
+            let line = value
+                .get("params")
+                .and_then(|p| p.get("line"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(StreamEvent::Error { content: line })
+        }
+        "gateway.exited" => Some(StreamEvent::Error { content: "Backend process exited".to_string() }),
+        _ => None,
+    }
 }
 
 // ── Event reader ───────────────────────────────────────────────────────
@@ -129,7 +277,15 @@ fn spawn_event_reader(app_handle: AppHandle, mut reader: BufReader<std::process:
         loop {
             line.clear();
             match reader.read_line(&mut line) {
-                Ok(0) => break, // EOF
+                Ok(0) => {
+                    // EOF — backend exited
+                    let _ = app_handle.emit("agent_event", AgentEvent {
+                        event_type: "gateway.exited".to_string(),
+                        payload: serde_json::json!({ "reason": "EOF" }),
+                        session_id: None,
+                    });
+                    break;
+                }
                 Ok(_) => {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
@@ -142,29 +298,32 @@ fn spawn_event_reader(app_handle: AppHandle, mut reader: BufReader<std::process:
                     }
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        // Emit event to frontend
-                        let event_type = value
-                            .get("params")
-                            .and_then(|p| p.get("type"))
-                            .or_else(|| value.get("method"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
+                        // Try to parse as typed StreamEvent
+                        if let Some(stream_event) = parse_stream_event(&value) {
+                            let agent_event: AgentEvent = stream_event.into();
+                            let _ = app_handle.emit("agent_event", agent_event);
+                        } else {
+                            // Fallback: emit as raw event
+                            let event_type = value
+                                .get("params")
+                                .and_then(|p| p.get("type"))
+                                .or_else(|| value.get("method"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
 
-                        let session_id = value
-                            .get("params")
-                            .and_then(|p| p.get("session_id"))
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.to_string());
+                            let session_id = value
+                                .get("params")
+                                .and_then(|p| p.get("session_id"))
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string());
 
-                        let _ = app_handle.emit(
-                            "agent_event",
-                            AgentEvent {
+                            let _ = app_handle.emit("agent_event", AgentEvent {
                                 event_type,
                                 payload: value,
                                 session_id,
-                            },
-                        );
+                            });
+                        }
                     }
                 }
                 Err(_) => break,
@@ -261,7 +420,6 @@ async fn stop_agent(state: State<'_, AgentState>) -> Result<(), String> {
         let _ = child.kill();
         let _ = child.wait();
     }
-    state.pending.lock().unwrap().clear();
     *state.config.lock().unwrap() = None;
     Ok(())
 }
@@ -293,8 +451,7 @@ async fn send_rpc(
     tx.send(line)
         .map_err(|e| format!("Failed to send: {}", e))?;
 
-    // Note: Response will come through the event reader and pending map
-    // For now, return status — frontend should listen for events
+    // Response will come through the event reader
     Ok(serde_json::json!({"status": "sent"}))
 }
 

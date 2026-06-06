@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autolycus Desktop — Архитектура</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', -apple-system, sans-serif; background: #0a0a0a; color: #f0ece4; line-height: 1.6; }
+.container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
+h1 { font-family: 'Cormorant Garamond', serif; font-size: 42px; color: #d4a843; margin-bottom: 8px; }
+.subtitle { color: #8a8578; font-size: 14px; margin-bottom: 48px; }
+h2 { font-size: 24px; color: #d4a843; margin: 40px 0 20px; border-bottom: 1px solid #1a1a1a; padding-bottom: 12px; }
+h3 { font-size: 18px; color: #f0ece4; margin: 24px 0 12px; }
+p { margin-bottom: 16px; color: #c0bbb3; }
+ul { margin: 12px 0 24px 24px; color: #c0bbb3; }
+li { margin-bottom: 8px; }
+code { background: #111; padding: 2px 8px; border-radius: 4px; font-size: 13px; color: #d4a843; }
+pre { background: #111; padding: 20px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 16px 0; border: 1px solid #1a1a1a; }
+pre code { background: none; padding: 0; }
+.arch-box { background: #111; border: 1px solid #1a1a1a; border-radius: 12px; padding: 24px; margin: 20px 0; }
+.arch-box h4 { color: #d4a843; margin-bottom: 16px; font-size: 16px; }
+.flow { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; margin: 24px 0; }
+.flow-box { background: #111; border: 1px solid #1a1a1a; border-radius: 8px; padding: 16px 24px; text-align: center; min-width: 140px; }
+.flow-box .icon { font-size: 28px; margin-bottom: 8px; }
+.flow-box .label { font-size: 13px; color: #f0ece4; font-weight: 600; }
+.flow-box .sub { font-size: 11px; color: #8a8578; margin-top: 4px; }
+.flow-arrow { color: #d4a843; font-size: 24px; }
+.comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 24px 0; }
+@media (max-width: 768px) { .comparison { grid-template-columns: 1fr; } }
+.card { background: #111; border: 1px solid #1a1a1a; border-radius: 12px; padding: 24px; }
+.card h4 { color: #d4a843; margin-bottom: 16px; }
+.card.bad { border-color: #f8717140; }
+.card.bad h4 { color: #f87171; }
+.card.good { border-color: #4ade8040; }
+.card.good h4 { color: #4ade80; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin: 2px; }
+.tag-red { background: #f8717120; color: #f87171; }
+.tag-green { background: #4ade8020; color: #4ade80; }
+.tag-yellow { background: #fbbf2420; color: #fbbf24; }
+.tag-blue { background: #60a5fa20; color: #60a5fa; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+th { text-align: left; padding: 12px; color: #8a8578; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #1a1a1a; }
+td { padding: 12px; border-bottom: 1px solid #1a1a1a; color: #c0bbb3; }
+tr:hover td { background: #ffffff04; }
+.footer { text-align: center; margin-top: 60px; padding-top: 24px; border-top: 1px solid #1a1a1a; color: #8a8578; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Autolycus Desktop</h1>
+<p class="subtitle">Архитектура десктопного клиента для Hermes Agent</p>
+
+<h2>Текущая архитектура (v0.2.0)</h2>
+
+<div class="flow">
+  <div class="flow-box">
+    <div class="icon">⚛️</div>
+    <div class="label">React Frontend</div>
+    <div class="sub">TypeScript + Zustand</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="icon">🔌</div>
+    <div class="label">Tauri IPC</div>
+    <div class="sub">invoke / listen</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="icon">🦀</div>
+    <div class="label">Rust Backend</div>
+    <div class="sub">Child process + stdio</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="icon">🐍</div>
+    <div class="label">Python Backend</div>
+    <div class="sub">tui_gateway.entry</div>
+  </div>
+</div>
+
+<div class="arch-box">
+  <h4>Поток данных</h4>
+  <ol>
+    <li>Frontend вызывает <code>invoke('send_rpc', { method: 'prompt.submit', params })</code></li>
+    <li>Rust пишет JSON-RPC в stdin Python процесса</li>
+    <li>Python обрабатывает через <code>tui_gateway.server.dispatch()</code></li>
+    <li>Python пишет JSON-RPC ответы и события в stdout</li>
+    <li>Rust читает stdout, парсит JSON, пушит события через <code>app.emit('agent_event')</code></li>
+    <li>Frontend слушает события через <code>listen('agent_event')</code></li>
+  </ol>
+</div>
+
+<h2>Проблемы текущей архитектуры</h2>
+
+<div class="comparison">
+  <div class="card bad">
+    <h4>❌ Сейчас</h4>
+    <ul>
+      <li>Сырой JSON из stdout — нет типизации событий</li>
+      <li>Нет разделения ответов и событий</li>
+      <li>Нет streaming — ответ приходит целиком</li>
+      <li>Нет обработки tool calls в реальном времени</li>
+      <li>Нет reconnect при падении процесса</li>
+      <li>Child process handle leaked</li>
+    </ul>
+  </div>
+  <div class="card good">
+    <h4>✅ С доработкой (из hermes-express)</h4>
+    <ul>
+      <li>Типизированные <code>StreamEvent</code> (Token, ToolProgress, Done, Error)</li>
+      <li>SSE streaming через <code>Channel&lt;StreamEvent&gt;</code></li>
+      <li>Разделение команд и событий</li>
+      <li>Автоматический reconnect</li>
+      <li>Graceful shutdown child process</li>
+      <li>Health check + auth check</li>
+    </ul>
+  </div>
+</div>
+
+<h2>Предлагаемая архитектура</h2>
+
+<div class="flow">
+  <div class="flow-box">
+    <div class="icon">⚛️</div>
+    <div class="label">React Frontend</div>
+    <div class="sub">Zustand stores</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="icon">🔌</div>
+    <div class="label">Tauri Commands</div>
+    <div class="sub">stream_chat, health_check</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="icon">🦀</div>
+    <div class="label">GatewayClient</div>
+    <div class="sub">HTTP + SSE</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="icon">🌐</div>
+    <div class="label">Hermes Gateway</div>
+    <div class="sub">localhost:8642</div>
+  </div>
+</div>
+
+<div class="arch-box">
+  <h4>Ключевые изменения</h4>
+  <table>
+    <tr><th>Компонент</th><th>Было</th><th>Стало</th></tr>
+    <tr><td>Транспорт</td><td>stdio pipe (JSON-RPC)</td><td>HTTP + SSE (Gateway API)</td></tr>
+    <tr><td>События</td><td>Сырой JSON из stdout</td><td>StreamEvent enum (Rust)</td></tr>
+    <tr><td>Streaming</td><td>Нет (ответ целиком)</td><td>Да (токены по мере генерации)</td></tr>
+    <tr><td>Tool calls</td><td>Нет</td><td>ToolProgress события</td></tr>
+    <tr><td>Reconnect</td><td>Нет</td><td>Автоматический</td></tr>
+    <tr><td>Health check</td><td>Нет</td><td>gateway_health()</td></tr>
+    <tr><td>Auth</td><td>Нет</td><td>API key + auth_check()</td></tr>
+  </table>
+</div>
+
+<h2>StreamEvent — типы событий</h2>
+
+<pre><code class="language-rust">#[derive(Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum StreamEvent {
+    #[serde(rename = "token")]
+    Token { content: String },
+    
+    #[serde(rename = "reasoning")]
+    Reasoning { content: String },
+    
+    #[serde(rename = "tool_progress")]
+    ToolProgress {
+        tool: String,
+        status: String,
+        emoji: String,
+        label: String,
+        tool_call_id: Option<String>,
+    },
+    
+    #[serde(rename = "done")]
+    Done,
+    
+    #[serde(rename = "error")]
+    Error { content: String },
+    
+    #[serde(rename = "status")]
+    Status { status: String },
+}</code></pre>
+
+<h2>Сравнение подходов</h2>
+
+<table>
+  <tr><th>Критерий</th><th>stdio pipe (сейчас)</th><th>Gateway HTTP + SSE</th></tr>
+  <tr><td>Сложность</td><td><span class="tag tag-green">Низкая</span></td><td><span class="tag tag-yellow">Средняя</span></td></tr>
+  <tr><td>Типизация событий</td><td><span class="tag tag-red">Нет</span></td><td><span class="tag tag-green">Да</span></td></tr>
+  <tr><td>Streaming</td><td><span class="tag tag-red">Нет</span></td><td><span class="tag tag-green">Да</span></td></tr>
+  <tr><td>Remote подключение</td><td><span class="tag tag-red">Нет</span></td><td><span class="tag tag-green">Да (HTTP)</span></td></tr>
+  <tr><td>Зависимости</td><td><span class="tag tag-green">Минимум</span></td><td><span class="tag tag-yellow">reqwest, tokio</span></td></tr>
+  <tr><td>Совместимость с TUI</td><td><span class="tag tag-green">100%</span></td><td><span class="tag tag-yellow">Нужен адаптер</span></td></tr>
+</table>
+
+<h2>Что можно взять из hermes-express</h2>
+
+<div class="arch-box">
+  <h4>Готовые компоненты</h4>
+  <ul>
+    <li><code>gateway.rs</code> — GatewayClient с SSE streaming, rate limiter, health check</li>
+    <li><code>commands_gateway.rs</code> — Tauri команды: stream_chat, health_check, gateway_auth_check</li>
+    <li><code>state.rs</code> — AppState с GatewayClient, Database, ProcessManager</li>
+    <li><code>db.rs</code> — SQLite для хранения сессий и сообщений</li>
+    <li><code>process.rs</code> — управление процессами (spawn, kill, health)</li>
+  </ul>
+</div>
+
+<h2>План миграции</h2>
+
+<ol>
+  <li>Добавить <code>GatewayClient</code> из hermes-express в проект</li>
+  <li>Реализовать <code>stream_chat</code> команду с <code>Channel&lt;StreamEvent&gt;</code></li>
+  <li>Добавить health_check и auth_check</li>
+  <li>Обновить frontend для работы с типизированными событиями</li>
+  <li>Добавить reconnect при потере соединения</li>
+  <li>Протестировать локально и на удалённом сервере</li>
+</ol>
+
+<div class="footer">
+  Autolycus Desktop v0.2.0 — <a href="https://github.com/NikolayGusev-astra/autolycus-desktop" style="color:#d4a843">GitHub</a>
+</div>
+
+</div>
+</body>
+</html>
