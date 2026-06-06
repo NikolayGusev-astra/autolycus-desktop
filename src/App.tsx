@@ -46,15 +46,15 @@ export function App() {
       case "message.chunk": {
         const content = payload?.content as string | undefined;
         if (content) {
-          // Append to last streaming message or create new one
           const messages = useGatewayStore.getState().messages;
-          const lastMsg = messages[messages.length - 1];
+          const lastIdx = messages.length - 1;
+          const lastMsg = messages[lastIdx];
           if (lastMsg && lastMsg.isStreaming && lastMsg.role === "assistant") {
-            // Append to existing streaming message
-            lastMsg.content += content;
-            useGatewayStore.setState({ messages: [...messages] });
+            // Immutable update: create new array with updated last message
+            const updated = [...messages];
+            updated[lastIdx] = { ...lastMsg, content: lastMsg.content + content };
+            useGatewayStore.setState({ messages: updated });
           } else {
-            // Create new streaming message
             addMessage({
               id: `msg-${Date.now()}`,
               role: "assistant",
@@ -73,7 +73,7 @@ export function App() {
           addMessage({
             id: `thinking-${Date.now()}`,
             role: "assistant",
-            content: `[Thinking] ${content}`,
+            content,
             timestamp: Date.now(),
             isStreaming: true,
           });
@@ -96,9 +96,19 @@ export function App() {
         break;
       }
 
-      case "done":
+      case "done": {
+        // Mark last streaming message as complete
+        const messages = useGatewayStore.getState().messages;
+        const lastIdx = messages.length - 1;
+        const lastMsg = messages[lastIdx];
+        if (lastMsg && lastMsg.isStreaming) {
+          const updated = [...messages];
+          updated[lastIdx] = { ...lastMsg, isStreaming: false };
+          useGatewayStore.setState({ messages: updated });
+        }
         setAgentStatus("idle");
         break;
+      }
 
       case "error":
         setAgentStatus("error");
