@@ -419,6 +419,26 @@ async fn start_agent(
         }
     });
 
+    // Spawn watchdog — monitor process exit and emit event
+    let app_handle_watch = app_handle.clone();
+    let child_id = child.id();
+    thread::spawn(move || {
+        // We can't directly wait on child here (ownership), so we poll via kill -0
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            // Check if process is still alive (kill -0)
+            let alive = unsafe { libc::kill(child_id as i32, 0) == 0 };
+            if !alive {
+                let _ = app_handle_watch.emit("agent_event", AgentEvent {
+                    event_type: "gateway.crashed".to_string(),
+                    payload: serde_json::json!({ "pid": child_id }),
+                    session_id: None,
+                });
+                break;
+            }
+        }
+    });
+
     *state.child.lock().unwrap() = Some(child);
     *state.stdin_tx.lock().unwrap() = Some(tx);
     *state.config.lock().unwrap() = Some(config);

@@ -115,6 +115,7 @@ export function App() {
         break;
 
       case "gateway.exited":
+      case "gateway.crashed":
         setAgentStatus("error");
         setConnected(false);
         break;
