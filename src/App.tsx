@@ -111,7 +111,6 @@ export function App() {
   if (!connected) {
     return (
       <ConnectScreen
-        onConnectLocal={handleConnectLocal}
         onStartLocal={handleStartLocal}
         connecting={connecting}
         starting={starting}

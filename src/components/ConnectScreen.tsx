@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Server, Wifi, Loader, FolderOpen, Play, Check, X } from "lucide-react";
+import { Server, Loader, Play, Check, X, FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
 interface InstanceInfo {
@@ -9,7 +9,6 @@ interface InstanceInfo {
 }
 
 interface ConnectScreenProps {
-  onConnectLocal: (pythonPath: string) => void;
   onStartLocal: (pythonPath: string) => void;
   connecting: boolean;
   starting: boolean;
@@ -17,7 +16,6 @@ interface ConnectScreenProps {
 }
 
 export function ConnectScreen({
-  onConnectLocal,
   onStartLocal,
   connecting,
   starting,
