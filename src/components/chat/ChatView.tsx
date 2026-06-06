@@ -4,12 +4,23 @@ import { ChatInput } from "./ChatInput";
 import { useGatewayStore } from "../../stores/gatewayStore";
 
 export function ChatView() {
-  const { client, currentSessionId } = useGatewayStore();
+  const { client, currentSessionId, addMessage } = useGatewayStore();
 
   const handleSend = useCallback(
     async (text: string) => {
       if (!client || !text.trim()) return;
+
+      // Add user message to UI immediately
+      const userMsg = {
+        id: `user-${Date.now()}`,
+        role: "user" as const,
+        content: text.trim(),
+        timestamp: Date.now(),
+      };
+      addMessage(userMsg);
+
       try {
+        // Use prompt.submit — this is the correct method for chat in tui_gateway
         await client.call("prompt.submit", {
           text: text.trim(),
           session_id: currentSessionId,
@@ -18,7 +29,7 @@ export function ChatView() {
         console.error("Failed to send message:", err);
       }
     },
-    [client, currentSessionId]
+    [client, currentSessionId, addMessage]
   );
 
   return (

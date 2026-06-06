@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Child, Stdio};
 use std::sync::Mutex;
 use std::thread;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -10,9 +11,9 @@ use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    pub mode: String,          // "local" | "remote"
+    pub mode: String,
     pub python_path: Option<String>,
-    pub instance: Option<String>, // "hermes" | "autolycus" | "hermes-agent"
+    pub instance: Option<String>,
     pub remote_host: Option<String>,
     pub remote_port: Option<u16>,
 }
@@ -30,10 +31,19 @@ pub struct ConnectionInfo {
     pub instance: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct InstanceInfo {
+    pub path: String,
+    pub instance: String,
+    pub exists: bool,
+}
+
 struct AgentState {
     child: Mutex<Option<Child>>,
     stdin_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     config: Mutex<Option<AgentConfig>>,
+    // Pending requests: id -> response sender
+    pending: Mutex<HashMap<String, std::sync::mpsc::Sender<serde_json::Value>>>,
 }
 
 impl AgentState {
@@ -42,35 +52,41 @@ impl AgentState {
             child: Mutex::new(None),
             stdin_tx: Mutex::new(None),
             config: Mutex::new(None),
+            pending: Mutex::new(HashMap::new()),
         }
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return path.replacen("~", &home.to_string_lossy(), 1);
+        }
+    }
+    path.to_string()
+}
+
 fn find_instance(config: &AgentConfig) -> Result<(String, String), String> {
-    // If user specified python_path, use it directly
     if let Some(ref path) = config.python_path {
-        let p = std::path::PathBuf::from(path);
+        let expanded = expand_tilde(path);
+        let p = std::path::PathBuf::from(&expanded);
         if p.exists() {
             let instance = detect_instance_type(&p);
-            return Ok((path.clone(), instance));
+            return Ok((expanded, instance));
         }
-        return Err(format!("Python not found at: {}", path));
+        return Err(format!("Python not found at: {}", expanded));
     }
 
-    // Auto-detect installed instances
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
 
     let candidates: Vec<(std::path::PathBuf, String)> = vec![
-        // Autolycus venv
         (home.join("autolycus/venv/bin/python"), "autolycus".to_string()),
         (home.join("autolycus/venv/bin/python3"), "autolycus".to_string()),
         (home.join(".autolycus/venv/bin/python"), "autolycus".to_string()),
-        // Hermes venv
         (home.join(".hermes/venv/bin/python"), "hermes".to_string()),
         (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent".to_string()),
-        // System
         (std::path::PathBuf::from("/usr/local/bin/python3"), "system".to_string()),
     ];
 
@@ -84,7 +100,6 @@ fn find_instance(config: &AgentConfig) -> Result<(String, String), String> {
 }
 
 fn detect_instance_type(python_path: &std::path::PathBuf) -> String {
-    // Try to detect which instance this python belongs to
     let path_str = python_path.to_string_lossy();
     if path_str.contains("autolycus") {
         "autolycus".to_string()
@@ -97,16 +112,16 @@ fn detect_instance_type(python_path: &std::path::PathBuf) -> String {
     }
 }
 
-fn get_tui_gateway_module(instance: &str) -> &'static str {
-    match instance {
-        "autolycus" => "tui_gateway.entry",
-        "hermes" => "tui_gateway.entry",
-        "hermes-agent" => "tui_gateway.entry",
-        _ => "tui_gateway.entry",
-    }
+fn get_tui_gateway_module(_instance: &str) -> &'static str {
+    "tui_gateway.entry"
 }
 
-// ── Event reader ──────────────────────────────────────────────────────
+fn is_json_rpc(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('{') && (trimmed.contains("\"jsonrpc\"") || trimmed.contains("\"method\"") || trimmed.contains("\"id\""))
+}
+
+// ── Event reader ───────────────────────────────────────────────────────
 
 fn spawn_event_reader(app_handle: AppHandle, mut reader: BufReader<std::process::ChildStdout>) {
     thread::spawn(move || {
@@ -121,11 +136,25 @@ fn spawn_event_reader(app_handle: AppHandle, mut reader: BufReader<std::process:
                         continue;
                     }
 
-                    // Parse JSON-RPC event
+                    // Only parse JSON-RPC messages (skip logs, errors, etc.)
+                    if !is_json_rpc(trimmed) {
+                        continue;
+                    }
+
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        // Check if this is a response to a pending request
+                        if let Some(id) = value.get("id").and_then(|i| i.as_str()) {
+                            let mut pending = app_handle.state::<AgentState>().pending.lock().unwrap();
+                            if let Some(tx) = pending.remove(id) {
+                                let _ = tx.send(value.clone());
+                            }
+                        }
+
+                        // Emit event to frontend
                         let event_type = value
-                            .get("type")
-                            .or_else(|| value.get("params").and_then(|p| p.get("type")))
+                            .get("params")
+                            .and_then(|p| p.get("type"))
+                            .or_else(|| value.get("method"))
                             .and_then(|t| t.as_str())
                             .unwrap_or("unknown")
                             .to_string();
@@ -166,6 +195,13 @@ async fn start_agent(
     let (python_path, instance) = find_instance(&config)?;
     let module = get_tui_gateway_module(&instance);
 
+    // Determine HERMES_PYTHON_SRC_ROOT from python path
+    let src_root = std::path::PathBuf::from(&python_path)
+        .parent() // bin/
+        .and_then(|p| p.parent()) // venv/
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     // Spawn child process: python -m tui_gateway.entry
     let mut child = Command::new(&python_path)
         .arg("-m")
@@ -173,7 +209,8 @@ async fn start_agent(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("HERMES_PYTHON_SRC_ROOT", std::path::PathBuf::from(&python_path).parent().unwrap().parent().unwrap())
+        .env("HERMES_PYTHON_SRC_ROOT", &src_root)
+        .env("PYTHONUNBUFFERED", "1")
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {}", instance, e))?;
 
@@ -181,6 +218,27 @@ async fn start_agent(
     let stdout = child.stdout.take().ok_or("No stdout")?;
     let reader = BufReader::new(stdout);
     spawn_event_reader(app_handle, reader);
+
+    // Set up stderr reader — emit errors as events
+    let stderr = child.stderr.take().ok_or("No stderr")?;
+    let stderr_reader = BufReader::new(stderr);
+    let app_handle_stderr = app_handle.clone();
+    thread::spawn(move || {
+        for line in stderr_reader.lines() {
+            if let Ok(text) = line {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let _ = app_handle_stderr.emit("agent_event", AgentEvent {
+                        event_type: "gateway.stderr".to_string(),
+                        payload: serde_json::json!({"line": trimmed}),
+                        session_id: None,
+                    });
+                }
+            } else {
+                break;
+            }
+        }
+    });
 
     // Set up stdin writer channel
     let stdin = child.stdin.take().ok_or("No stdin")?;
@@ -211,6 +269,7 @@ async fn stop_agent(state: State<'_, AgentState>) -> Result<(), String> {
         let _ = child.kill();
         let _ = child.wait();
     }
+    state.pending.lock().unwrap().clear();
     *state.config.lock().unwrap() = None;
     Ok(())
 }
@@ -228,9 +287,10 @@ async fn send_rpc(
         .clone()
         .ok_or("Not connected to backend")?;
 
+    let id = format!("{}", std::process::id());
     let request = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": format!("{}", std::process::id()),
+        "id": id,
         "method": method,
         "params": params,
     });
@@ -241,7 +301,40 @@ async fn send_rpc(
     tx.send(line)
         .map_err(|e| format!("Failed to send: {}", e))?;
 
+    // Note: Response will come through the event reader and pending map
+    // For now, return status — frontend should listen for events
     Ok(serde_json::json!({"status": "sent"}))
+}
+
+#[tauri::command]
+async fn check_python_path(path: String) -> Result<bool, String> {
+    let expanded = expand_tilde(&path);
+    Ok(std::path::PathBuf::from(&expanded).exists())
+}
+
+#[tauri::command]
+async fn detect_instances() -> Result<Vec<InstanceInfo>, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+
+    let candidates: Vec<(std::path::PathBuf, String)> = vec![
+        (home.join("autolycus/venv/bin/python"), "autolycus".to_string()),
+        (home.join("autolycus/venv/bin/python3"), "autolycus".to_string()),
+        (home.join(".autolycus/venv/bin/python"), "autolycus".to_string()),
+        (home.join(".hermes/venv/bin/python"), "hermes".to_string()),
+        (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent".to_string()),
+        (std::path::PathBuf::from("/usr/local/bin/python3"), "system".to_string()),
+    ];
+
+    let mut result = Vec::new();
+    for (path, instance) in candidates {
+        result.push(InstanceInfo {
+            path: path.to_string_lossy().to_string(),
+            instance,
+            exists: path.exists(),
+        });
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -260,6 +353,8 @@ pub fn run() {
             start_agent,
             stop_agent,
             send_rpc,
+            check_python_path,
+            detect_instances,
             get_app_version,
         ])
         .run(tauri::generate_context!())
