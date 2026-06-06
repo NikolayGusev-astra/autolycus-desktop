@@ -22,12 +22,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:;"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:;"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": ["appimage", "deb", "msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -43,6 +43,11 @@
       "deb": {
         "depends": ["libwebkit2gtk-4.1-0", "libssl3"]
       }
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
     }
   },
   "plugins": {}

@@ -8,7 +8,8 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectScreen } from "./components/ConnectScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
-import { GatewayClient } from "./lib/gateway-client";
+import { AgentClient } from "./lib/agent-client";
+import type { AgentConfig } from "./lib/types";
 
 export function App() {
   const [activeTab, setActiveTab] = useState("chat");
@@ -16,7 +17,8 @@ export function App() {
   const [connecting, setConnecting] = useState(false);
   const [starting, setStarting] = useState(false);
   const { sidebarOpen } = useUIStore();
-  const { connected, error } = useGatewayStore();
+  const { connected, error, setClient, setConnected, setError, setPort, setMode, addEvent } =
+    useGatewayStore();
 
   // Try to connect from URL params on mount
   useEffect(() => {
@@ -25,60 +27,110 @@ export function App() {
     const port = params.get("port");
 
     if (backendUrl) {
-      handleConnect(backendUrl);
+      handleConnectRemote(backendUrl);
     } else if (port) {
-      handleConnect(`ws://127.0.0.1:${port}`);
+      handleConnectRemote(`127.0.0.1:${port}`);
     }
   }, []);
 
-  const handleConnect = useCallback(async (url: string) => {
+  const handleConnectLocal = useCallback(async (pythonPath: string) => {
     setConnecting(true);
-    try {
-      const c = new GatewayClient(url);
-      await c.connect();
-      useGatewayStore.setState({ client: c, connected: true, error: null });
+    setError(null);
 
-      c.onEvent((event) => {
-        const events = useGatewayStore.getState().events;
-        useGatewayStore.setState({ events: [...events, event] });
-        if (event.type === "status") {
-          useGatewayStore.setState({ agentStatus: event.status as any });
+    try {
+      const client = new AgentClient();
+      const config: AgentConfig = {
+        mode: "local",
+        python_path: pythonPath,
+      };
+      const info = await client.connect(config);
+
+      setClient(client);
+      setConnected(true);
+      setPort(info.port);
+      setMode("local");
+
+      // Subscribe to backend events
+      client.onEvent((event) => {
+        addEvent(event);
+        if (event.event_type === "status.update") {
+          const kind = (event.payload as Record<string, unknown>)?.kind as string | undefined;
+          if (kind) {
+            useGatewayStore.setState({ agentStatus: kind as any });
+          }
         }
       });
-    } catch (err: any) {
-      useGatewayStore.setState({ connected: false, error: err.message });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      setConnected(false);
     } finally {
       setConnecting(false);
     }
-  }, []);
+  }, [setClient, setConnected, setError, setPort, setMode, addEvent]);
+
+  const handleConnectRemote = useCallback(async (url: string) => {
+    setConnecting(true);
+    setError(null);
+
+    try {
+      // Parse host:port from URL
+      let host: string;
+      let port: number;
+
+      if (url.includes("://")) {
+        const parsed = new URL(url);
+        host = parsed.hostname;
+        port = parseInt(parsed.port, 10) || 8443;
+      } else {
+        const parts = url.split(":");
+        host = parts[0];
+        port = parseInt(parts[1], 10) || 8443;
+      }
+
+      const client = new AgentClient();
+      const config: AgentConfig = {
+        mode: "remote",
+        remote_host: host,
+        remote_port: port,
+      };
+      const info = await client.connect(config);
+
+      setClient(client);
+      setConnected(true);
+      setPort(info.port);
+      setMode("remote");
+
+      client.onEvent((event) => {
+        addEvent(event);
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      setConnected(false);
+    } finally {
+      setConnecting(false);
+    }
+  }, [setClient, setConnected, setError, setPort, setMode, addEvent]);
 
   const handleStartLocal = useCallback(async (pythonPath: string) => {
     setStarting(true);
     try {
-      // In Tauri mode, invoke Rust command to start backend
-      // For now (browser dev mode), show message
       if (typeof window !== "undefined" && (window as any).__TAURI__) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const port = await invoke<number>("start_backend", { pythonPath });
-        await handleConnect(`ws://127.0.0.1:${port}`);
+        await handleConnectLocal(pythonPath);
       } else {
-        // Dev mode: tell user to start backend manually
-        useGatewayStore.setState({
-          error: "Запустите backend: python tui_gateway/ws_server.py --port 8443",
-        });
+        setError("Запустите backend: python tui_gateway/tcp_server.py --port 8443");
       }
-    } catch (err: any) {
-      useGatewayStore.setState({ error: err.message });
     } finally {
       setStarting(false);
     }
-  }, [handleConnect]);
+  }, [handleConnectLocal, setError]);
 
-  // Show connect screen if not connected
   if (!connected) {
     return (
       <ConnectScreen
-        onConnect={handleConnect}
+        onConnectLocal={handleConnectLocal}
+        onConnectRemote={handleConnectRemote}
         onStartLocal={handleStartLocal}
         connecting={connecting}
         starting={starting}
@@ -87,7 +139,6 @@ export function App() {
     );
   }
 
-  // Main app
   return (
     <div className="flex h-full">
       {sidebarOpen && (
