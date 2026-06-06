@@ -1,7 +1,14 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Child, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+
+static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_request_id() -> String {
+    REQUEST_ID.fetch_add(1, Ordering::SeqCst).to_string()
+}
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -426,18 +433,31 @@ async fn start_agent(
 async fn stop_agent(state: State<'_, AgentState>) -> Result<(), String> {
     *state.stdin_tx.lock().unwrap() = None;
     if let Some(mut child) = state.child.lock().unwrap().take() {
-        // Graceful shutdown: SIGTERM first, then SIGKILL after timeout
         #[cfg(unix)]
         {
-            use std::process::Command;
             let pid = child.id();
-            // Send SIGTERM
-            let _ = Command::new("kill")
+            // Send SIGTERM first
+            let _ = std::process::Command::new("kill")
                 .arg("-TERM")
                 .arg(pid.to_string())
                 .output();
-            // Wait up to 3 seconds for graceful shutdown
-            let _ = child.wait();
+            // Wait with timeout (3 seconds)
+            let start = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break, // Process exited
+                    Ok(None) => {
+                        if start.elapsed().as_secs() >= 3 {
+                            // Timeout — force kill
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(_) => break,
+                }
+            }
         }
         #[cfg(not(unix))]
         {
@@ -462,7 +482,7 @@ async fn send_rpc(
         .clone()
         .ok_or("Not connected to backend")?;
 
-    let id = format!("{}", std::process::id());
+    let id = next_request_id();
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
