@@ -10,8 +10,8 @@ export function ChatView() {
     async (text: string) => {
       if (!client || !text.trim()) return;
       try {
-        await client.call("chat", {
-          message: text.trim(),
+        await client.call("prompt.submit", {
+          text: text.trim(),
           session_id: currentSessionId,
         });
       } catch (err) {
