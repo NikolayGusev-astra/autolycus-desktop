@@ -1,0 +1,72 @@
+import { memo } from "react";
+import { MarkdownRenderer } from "./MarkdownRenderer";
+import { ThinkingBlock } from "./ThinkingBlock";
+import { ToolOutput } from "./ToolOutput";
+import { StreamingText } from "./StreamingText";
+import type { Message } from "../../lib/types";
+
+interface MessageBubbleProps {
+  message: Message;
+}
+
+export const MessageBubble = memo(function MessageBubble({
+  message,
+}: MessageBubbleProps) {
+  const isUser = message.role === "user";
+  const isAssistant = message.role === "assistant";
+
+  if (isUser) {
+    return (
+      <div className="ac-msg ac-msg-user">
+        <div className="ac-msg-avatar ac-msg-avatar-user">Я</div>
+        <div className="ac-msg-body ac-msg-body-user">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
+
+  if (isAssistant) {
+    return (
+      <div className="ac-msg">
+        <div className="ac-msg-avatar ac-msg-avatar-assistant">A</div>
+        <div className="ac-msg-body ac-msg-body-assistant">
+          {message.thinking && <ThinkingBlock content={message.thinking} />}
+          {message.isStreaming ? (
+            <StreamingText content={message.content} />
+          ) : (
+            <MarkdownRenderer content={message.content} />
+          )}
+          {message.tools?.map((tool) => (
+            <ToolOutput key={tool.id} tool={tool} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (message.role === "tool") {
+    return (
+      <div className="ac-msg">
+        <div className="ac-msg-avatar ac-msg-avatar-assistant">T</div>
+        <div className="ac-msg-body ac-msg-body-assistant">
+          <ToolOutput
+            tool={{
+              id: message.id,
+              name: "tool",
+              input: "",
+              output: message.content,
+              status: "completed",
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="text-center text-ac-stone text-xs my-3">
+      {message.content}
+    </div>
+  );
+});

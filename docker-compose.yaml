@@ -1,0 +1,21 @@
+# Autolycus Desktop — Docker Build
+# Usage:
+#   docker compose build          # build the image
+#   docker compose run --rm build # build the app
+#   docker compose run --rm dev   # run dev server (requires X11)
+
+services:
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./src:/app/src:ro
+      - ./src-tauri:/app/src-tauri:ro
+      - ./package.json:/app/package.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.node.json:/app/tsconfig.node.json:ro
+      - ./vite.config.ts:/app/vite.config.ts:ro
+      - ./.tauri-build-cache:/app/src-tauri/target
+    command: cargo tauri build --debug
+    working_dir: /app/src-tauri
