@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -184,7 +184,7 @@ async fn start_agent(
 
     // Set up stdin writer channel
     let stdin = child.stdin.take().ok_or("No stdin")?;
-    let (tx, rx) = std::sync::mpsc::String::new();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
     thread::spawn(move || {
         let mut stdin = stdin;
         while let Ok(line) = rx.recv() {
