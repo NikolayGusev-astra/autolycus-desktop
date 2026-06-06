@@ -8,14 +8,20 @@ interface ChatInputProps {
 
 export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [text, setText] = useState("");
+  const [isSending, setIsSending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleSend = useCallback(() => {
-    if (text.trim() && !disabled) {
-      onSend(text.trim());
-      setText("");
+  const handleSend = useCallback(async () => {
+    if (text.trim() && !disabled && !isSending) {
+      setIsSending(true);
+      try {
+        await onSend(text.trim());
+        setText("");
+      } finally {
+        setIsSending(false);
+      }
     }
-  }, [text, disabled, onSend]);
+  }, [text, disabled, isSending, onSend]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -33,12 +39,12 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         onChange={(e) => setText(e.target.value)}
         onKeyDown={handleKeyDown}
         placeholder="Сообщение..."
-        disabled={disabled}
+        disabled={disabled || isSending}
         className="ac-input flex-1 px-3.5 py-2 text-sm"
       />
       <button
         onClick={handleSend}
-        disabled={!text.trim() || disabled}
+        disabled={!text.trim() || disabled || isSending}
         className="ac-btn px-4 py-2 text-sm disabled:opacity-30 disabled:cursor-not-allowed"
       >
         <Send className="w-4 h-4" />

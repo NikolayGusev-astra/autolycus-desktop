@@ -51,6 +51,11 @@ export function ConnectScreen({
     }
   };
 
+  const handleRetry = () => {
+    loadInstances();
+    handleStart();
+  };
+
   const existingInstances = instances.filter((i) => i.exists);
 
   return (
@@ -118,8 +123,14 @@ export function ConnectScreen({
           </div>
 
           {error && (
-            <div className="mb-3 px-3 py-2 bg-red-500/5 border border-red-500/20 text-ac-red text-xs">
-              {error}
+            <div className="mb-3 px-3 py-2 bg-red-500/5 border border-red-500/20 text-ac-red text-xs flex items-center justify-between">
+              <span>{error}</span>
+              <button
+                onClick={handleRetry}
+                className="text-ac-amber hover:underline text-[10px]"
+              >
+                Повторить
+              </button>
             </div>
           )}
 
