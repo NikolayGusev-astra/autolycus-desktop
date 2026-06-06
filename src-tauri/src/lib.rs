@@ -5,7 +5,7 @@ use std::thread;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -142,14 +142,6 @@ fn spawn_event_reader(app_handle: AppHandle, mut reader: BufReader<std::process:
                     }
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        // Check if this is a response to a pending request
-                        if let Some(id) = value.get("id").and_then(|i| i.as_str()) {
-                            let mut pending = app_handle.state::<AgentState>().pending.lock().unwrap();
-                            if let Some(tx) = pending.remove(id) {
-                                let _ = tx.send(value.clone());
-                            }
-                        }
-
                         // Emit event to frontend
                         let event_type = value
                             .get("params")
@@ -217,7 +209,7 @@ async fn start_agent(
     // Set up stdout reader
     let stdout = child.stdout.take().ok_or("No stdout")?;
     let reader = BufReader::new(stdout);
-    spawn_event_reader(app_handle, reader);
+    spawn_event_reader(app_handle.clone(), reader);
 
     // Set up stderr reader — emit errors as events
     let stderr = child.stderr.take().ok_or("No stderr")?;
