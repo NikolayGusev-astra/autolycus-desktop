@@ -1,33 +1,24 @@
 /**
  * Agent client — communicates with the Python backend via Tauri IPC.
  *
- * Replaces the old WebSocket-based GatewayClient.
- * All communication goes through Rust Tauri commands:
- *   - start_agent / stop_agent — lifecycle
- *   - send_rpc — JSON-RPC requests
- *   - "agent_event" — Tauri events from backend (streaming, status, etc.)
+ * The Python backend (tui_gateway.entry) runs as a child process.
+ * Communication:
+ *   - Frontend → invoke("send_rpc", {method, params}) → Rust → stdin → Python
+ *   - Python → stdout → Rust → listen("agent_event") → Frontend
  */
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AgentConfig, AgentEvent } from "./types";
 
-// ── Types (re-exported from types.ts) ─────────────────────────────────
-
 export type { AgentConfig, AgentEvent };
 
 export interface ConnectionInfo {
-  port: number;
   mode: string;
-}
-
-export interface RpcResponse {
-  status: string;
+  instance: string;
 }
 
 type JsonRpcParams = Record<string, unknown>;
-
-// ── AgentClient ───────────────────────────────────────────────────────
 
 export class AgentClient {
   private connected = false;
@@ -61,11 +52,11 @@ export class AgentClient {
     }
   }
 
-  async call(method: string, params?: JsonRpcParams): Promise<RpcResponse> {
+  async call(method: string, params?: JsonRpcParams): Promise<unknown> {
     if (!this.connected) {
       throw new Error("Not connected to backend");
     }
-    return invoke<RpcResponse>("send_rpc", {
+    return invoke<unknown>("send_rpc", {
       method,
       params: params ?? {},
     });
