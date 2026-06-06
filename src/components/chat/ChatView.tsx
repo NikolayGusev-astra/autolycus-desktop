@@ -10,6 +10,9 @@ export function ChatView() {
     async (text: string) => {
       if (!client || !text.trim()) return;
 
+      // Clear previous messages for new conversation
+      useGatewayStore.setState({ messages: [] });
+
       // Add user message to UI immediately
       const userMsg = {
         id: `user-${Date.now()}`,

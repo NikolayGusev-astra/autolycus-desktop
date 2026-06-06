@@ -426,8 +426,24 @@ async fn start_agent(
 async fn stop_agent(state: State<'_, AgentState>) -> Result<(), String> {
     *state.stdin_tx.lock().unwrap() = None;
     if let Some(mut child) = state.child.lock().unwrap().take() {
-        let _ = child.kill();
-        let _ = child.wait();
+        // Graceful shutdown: SIGTERM first, then SIGKILL after timeout
+        #[cfg(unix)]
+        {
+            use std::process::Command;
+            let pid = child.id();
+            // Send SIGTERM
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .output();
+            // Wait up to 3 seconds for graceful shutdown
+            let _ = child.wait();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
     *state.config.lock().unwrap() = None;
     Ok(())

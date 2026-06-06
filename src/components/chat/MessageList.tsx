@@ -21,11 +21,13 @@ export function MessageList() {
     overscan: 5,
   });
 
+  // Auto-scroll on new message OR content update
+  const lastContent = grouped.length > 0 ? grouped[grouped.length - 1].content : "";
   useEffect(() => {
     if (grouped.length > 0) {
       virtualizer.scrollToIndex(grouped.length - 1, { align: "end" });
     }
-  }, [grouped.length]);
+  }, [grouped.length, lastContent]);
 
   if (grouped.length === 0) {
     return (
