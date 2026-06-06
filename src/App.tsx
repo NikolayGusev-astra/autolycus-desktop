@@ -46,13 +46,23 @@ export function App() {
       case "message.chunk": {
         const content = payload?.content as string | undefined;
         if (content) {
-          addMessage({
-            id: `msg-${Date.now()}`,
-            role: "assistant",
-            content,
-            timestamp: Date.now(),
-            isStreaming: true,
-          });
+          // Append to last streaming message or create new one
+          const messages = useGatewayStore.getState().messages;
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg && lastMsg.isStreaming && lastMsg.role === "assistant") {
+            // Append to existing streaming message
+            lastMsg.content += content;
+            useGatewayStore.setState({ messages: [...messages] });
+          } else {
+            // Create new streaming message
+            addMessage({
+              id: `msg-${Date.now()}`,
+              role: "assistant",
+              content,
+              timestamp: Date.now(),
+              isStreaming: true,
+            });
+          }
         }
         break;
       }

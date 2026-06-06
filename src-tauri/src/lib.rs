@@ -172,24 +172,30 @@ fn get_tui_gateway_module(_instance: &str) -> &'static str {
 /// Check if a line is a JSON-RPC message (not a log line)
 fn is_json_rpc(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.starts_with('{') && (
-        trimmed.contains("\"jsonrpc\"") ||
-        trimmed.contains("\"method\"") ||
-        (trimmed.contains("\"id\"") && trimmed.contains("\"result\""))
-    )
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    // JSON-RPC responses: {"jsonrpc":"2.0","id":"...","result":{...}}
+    // JSON-RPC events: {"method":"event","params":{...}}
+    trimmed.contains("\"jsonrpc\"") || trimmed.contains("\"method\"")
 }
 
-/// Parse a JSON-RPC line into a StreamEvent
-fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
-    // Check for event type in params.type
+/// Parse a JSON-RPC line into a StreamEvent with session_id
+fn parse_stream_event(value: &serde_json::Value) -> Option<(StreamEvent, Option<String>)> {
     let event_type = value
         .get("params")
         .and_then(|p| p.get("type"))
         .or_else(|| value.get("method"))
         .and_then(|t| t.as_str())?;
 
-    match event_type {
-        "gateway.ready" => Some(StreamEvent::Status { status: "ready".to_string() }),
+    let session_id = value
+        .get("params")
+        .and_then(|p| p.get("session_id"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    let event = match event_type {
+        "gateway.ready" => StreamEvent::Status { status: "ready".to_string() },
         "status.update" => {
             let status = value
                 .get("params")
@@ -198,9 +204,9 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            Some(StreamEvent::Status { status })
+            StreamEvent::Status { status }
         }
-        "message.start" => Some(StreamEvent::Status { status: "streaming".to_string() }),
+        "message.start" => StreamEvent::Status { status: "streaming".to_string() },
         "message.chunk" | "thinking.delta" | "reasoning.delta" => {
             let content = value
                 .get("params")
@@ -209,12 +215,12 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
                 .unwrap_or("")
                 .to_string();
             if event_type.starts_with("reasoning") || event_type.starts_with("thinking") {
-                Some(StreamEvent::Reasoning { content })
+                StreamEvent::Reasoning { content }
             } else {
-                Some(StreamEvent::Token { content })
+                StreamEvent::Token { content }
             }
         }
-        "message.end" => Some(StreamEvent::Done),
+        "message.end" => StreamEvent::Done,
         "tool.start" | "tool.progress" | "tool.generating" => {
             let name = value
                 .get("params")
@@ -222,13 +228,13 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            Some(StreamEvent::ToolProgress {
+            StreamEvent::ToolProgress {
                 tool: name,
                 status: "running".to_string(),
                 emoji: "🔧".to_string(),
                 label: "Executing...".to_string(),
                 tool_call_id: None,
-            })
+            }
         }
         "tool.complete" => {
             let name = value
@@ -237,13 +243,13 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            Some(StreamEvent::ToolProgress {
+            StreamEvent::ToolProgress {
                 tool: name,
                 status: "done".to_string(),
                 emoji: "✅".to_string(),
                 label: "Complete".to_string(),
                 tool_call_id: None,
-            })
+            }
         }
         "error" => {
             let content = value
@@ -253,7 +259,7 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("Unknown error")
                 .to_string();
-            Some(StreamEvent::Error { content })
+            StreamEvent::Error { content }
         }
         "gateway.stderr" => {
             let line = value
@@ -262,11 +268,13 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<StreamEvent> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(StreamEvent::Error { content: line })
+            StreamEvent::Error { content: line }
         }
-        "gateway.exited" => Some(StreamEvent::Error { content: "Backend process exited".to_string() }),
-        _ => None,
-    }
+        "gateway.exited" => StreamEvent::Error { content: "Backend process exited".to_string() },
+        _ => return None,
+    };
+
+    Some((event, session_id))
 }
 
 // ── Event reader ───────────────────────────────────────────────────────
@@ -298,9 +306,10 @@ fn spawn_event_reader(app_handle: AppHandle, mut reader: BufReader<std::process:
                     }
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        // Try to parse as typed StreamEvent
-                        if let Some(stream_event) = parse_stream_event(&value) {
-                            let agent_event: AgentEvent = stream_event.into();
+                        // Try to parse as typed StreamEvent with session_id
+                        if let Some((stream_event, session_id)) = parse_stream_event(&value) {
+                            let mut agent_event: AgentEvent = stream_event.into();
+                            agent_event.session_id = session_id;
                             let _ = app_handle.emit("agent_event", agent_event);
                         } else {
                             // Fallback: emit as raw event
