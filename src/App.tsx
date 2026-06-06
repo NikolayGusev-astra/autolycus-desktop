@@ -1,46 +1,96 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Header } from "./components/layout/Header";
 import { ChatView } from "./components/chat/ChatView";
 import { SessionList } from "./components/sessions/SessionList";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { StatusBar } from "./components/layout/StatusBar";
+import { ConnectScreen } from "./components/ConnectScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
+import { GatewayClient } from "./lib/gateway-client";
 
 export function App() {
   const [activeTab, setActiveTab] = useState("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [starting, setStarting] = useState(false);
   const { sidebarOpen } = useUIStore();
   const { connected, error } = useGatewayStore();
 
-  // Parse backend URL from query params or use default
+  // Try to connect from URL params on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const port = params.get("port");
     const backendUrl = params.get("backend");
+    const port = params.get("port");
 
     if (backendUrl) {
-      // Remote mode: connect to specified backend
-      console.log(`Connecting to backend: ${backendUrl}`);
+      handleConnect(backendUrl);
     } else if (port) {
-      // Local mode: backend spawned by Tauri
-      console.log(`Connecting to localhost:${port}`);
+      handleConnect(`ws://127.0.0.1:${port}`);
     }
   }, []);
 
+  const handleConnect = useCallback(async (url: string) => {
+    setConnecting(true);
+    try {
+      const c = new GatewayClient(url);
+      await c.connect();
+      useGatewayStore.setState({ client: c, connected: true, error: null });
+
+      c.onEvent((event) => {
+        const events = useGatewayStore.getState().events;
+        useGatewayStore.setState({ events: [...events, event] });
+        if (event.type === "status") {
+          useGatewayStore.setState({ agentStatus: event.status as any });
+        }
+      });
+    } catch (err: any) {
+      useGatewayStore.setState({ connected: false, error: err.message });
+    } finally {
+      setConnecting(false);
+    }
+  }, []);
+
+  const handleStartLocal = useCallback(async (_path: string) => {
+    setStarting(true);
+    try {
+      // In a real Tauri app, this would invoke the Rust command:
+      // const port = await invoke<number>("start_backend");
+      // For now, we simulate by connecting to localhost
+      // The Rust backend will spawn Python and return the port
+      const url = "ws://127.0.0.1:8443";
+      await handleConnect(url);
+    } catch (err: any) {
+      useGatewayStore.setState({ error: err.message });
+    } finally {
+      setStarting(false);
+    }
+  }, [handleConnect]);
+
+  // Show connect screen if not connected
+  if (!connected) {
+    return (
+      <ConnectScreen
+        onConnect={handleConnect}
+        onStartLocal={handleStartLocal}
+        connecting={connecting}
+        starting={starting}
+        error={error}
+      />
+    );
+  }
+
+  // Main app
   return (
     <div className="flex h-full">
-      {/* Sidebar */}
       {sidebarOpen && (
         <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
       )}
 
-      {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <Header />
 
-        {/* Content area */}
         <div className="flex-1 overflow-hidden">
           {activeTab === "chat" && <ChatView />}
           {activeTab === "sessions" && <SessionList />}
@@ -49,32 +99,7 @@ export function App() {
         <StatusBar />
       </div>
 
-      {/* Settings modal */}
       {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
-
-      {/* Connection status overlay */}
-      {!connected && !error && (
-        <div className="fixed inset-0 bg-ac-pitch/80 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="text-center">
-            <div className="ac-display mb-2">Автолик</div>
-            <p className="sub text-sm">Подключение к агенту...</p>
-          </div>
-        </div>
-      )}
-
-      {/* Error overlay */}
-      {error && (
-        <div className="fixed inset-0 bg-ac-pitch/80 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="ac-modal">
-            <h3 className="text-base font-semibold text-ac-ivory mb-2">Ошибка подключения</h3>
-            <p className="text-sm text-ac-stone mb-4">{error}</p>
-            <p className="text-xs text-ac-stone">
-              Убедитесь что backend запущен. Запуск:{" "}
-              <code className="bg-ac-surface px-1.5 py-0.5 text-ac-amber">autolycus-desktop --mode=websocket</code>
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

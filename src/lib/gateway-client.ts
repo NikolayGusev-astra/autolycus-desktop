@@ -25,8 +25,12 @@ export class GatewayClient {
   private reconnectTimer: number | null = null;
   private url: string;
 
-  constructor(port: number) {
-    this.url = `ws://127.0.0.1:${port}`;
+  constructor(urlOrPort: string | number) {
+    if (typeof urlOrPort === "number") {
+      this.url = `ws://127.0.0.1:${urlOrPort}`;
+    } else {
+      this.url = urlOrPort;
+    }
   }
 
   async connect(): Promise<void> {
