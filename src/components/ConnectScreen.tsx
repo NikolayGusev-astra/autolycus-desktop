@@ -3,13 +3,14 @@ import { Server, Wifi, Loader, FolderOpen, Play } from "lucide-react";
 
 interface FoundBackend {
   path: string;
-  type: "autolycus" | "hermes" | "python";
+  pythonPath: string;
   label: string;
+  type: "autolycus" | "hermes";
 }
 
 interface ConnectScreenProps {
   onConnect: (url: string) => void;
-  onStartLocal: (path: string) => void;
+  onStartLocal: (pythonPath: string) => void;
   connecting: boolean;
   starting: boolean;
   error: string | null;
@@ -19,24 +20,20 @@ export function ConnectScreen({ onConnect, onStartLocal, connecting, starting, e
   const [url, setUrl] = useState("ws://127.0.0.1:8443");
   const [mode, setMode] = useState<"local" | "remote">("local");
   const [foundBackends, setFoundBackends] = useState<FoundBackend[]>([]);
-  const [selectedBackend, setSelectedBackend] = useState<string | null>(null);
+  const [selectedBackend, setSelectedBackend] = useState<number>(0);
 
-  // Auto-detect local backends on mount
   useEffect(() => {
     detectLocalBackends();
   }, []);
 
   const detectLocalBackends = () => {
-    // These paths will be checked by the Rust backend
-    const commonPaths = [
-      { path: "~/autolycus/venv/bin/autolycus", type: "autolycus" as const, label: "Autolycus (autolycus/venv)" },
-      { path: "~/autolycus/venv/bin/hermes", type: "hermes" as const, label: "Hermes (autolycus/venv)" },
-      { path: "~/.autolycus/venv/bin/autolycus", type: "autolycus" as const, label: "Autolycus (.autolycus/venv)" },
-      { path: "~/.hermes/venv/bin/hermes", type: "hermes" as const, label: "Hermes (.hermes/venv)" },
-      { path: "/usr/local/bin/autolycus", type: "autolycus" as const, label: "Autolycus (system)" },
-      { path: "/usr/local/bin/hermes", type: "hermes" as const, label: "Hermes (system)" },
+    const home = ""; // Will be resolved by Rust backend
+    const candidates: FoundBackend[] = [
+      { path: `${home}/autolycus`, pythonPath: `${home}/autolycus/venv/bin/python`, label: "Autolycus (autolycus/venv)", type: "autolycus" },
+      { path: `${home}/.autolycus`, pythonPath: `${home}/.autolycus/venv/bin/python`, label: "Autolycus (.autolycus/venv)", type: "autolycus" },
+      { path: `${home}/.hermes`, pythonPath: `${home}/.hermes/venv/bin/python`, label: "Hermes (.hermes/venv)", type: "hermes" },
     ];
-    setFoundBackends(commonPaths);
+    setFoundBackends(candidates);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -47,8 +44,8 @@ export function ConnectScreen({ onConnect, onStartLocal, connecting, starting, e
   };
 
   const handleStartLocal = () => {
-    if (selectedBackend) {
-      onStartLocal(selectedBackend);
+    if (foundBackends[selectedBackend]) {
+      onStartLocal(foundBackends[selectedBackend].pythonPath);
     }
   };
 
@@ -90,14 +87,14 @@ export function ConnectScreen({ onConnect, onStartLocal, connecting, starting, e
             <>
               {/* Auto-detect backends */}
               <div className="mb-4">
-                <label className="text-[11px] text-ac-stone mb-2 block">Найденные бэкенды:</label>
-                <div className="space-y-1.5 max-h-32 overflow-y-auto">
-                  {foundBackends.map((backend) => (
+                <label className="text-[11px] text-ac-stone mb-2 block">Найденные установки:</label>
+                <div className="space-y-1.5 max-h-28 overflow-y-auto">
+                  {foundBackends.map((backend, idx) => (
                     <button
                       key={backend.path}
-                      onClick={() => setSelectedBackend(backend.path)}
+                      onClick={() => setSelectedBackend(idx)}
                       className={`w-full text-left px-3 py-2 text-xs border transition-colors flex items-center gap-2 ${
-                        selectedBackend === backend.path
+                        selectedBackend === idx
                           ? "border-ac-amber/30 bg-ac-amber/8 text-ac-amber"
                           : "border-ac-border text-ac-stone hover:border-ac-stone/30"
                       }`}
@@ -113,7 +110,7 @@ export function ConnectScreen({ onConnect, onStartLocal, connecting, starting, e
               {/* Start local button */}
               <button
                 onClick={handleStartLocal}
-                disabled={!selectedBackend || starting}
+                disabled={starting}
                 className="ac-btn w-full py-2.5 text-sm flex items-center justify-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed mb-3"
               >
                 {starting ? (

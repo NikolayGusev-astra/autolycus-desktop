@@ -14,17 +14,26 @@ fn get_backend_port(state: State<AppState>) -> u16 {
 }
 
 #[tauri::command]
-fn start_backend(state: State<AppState>, app_handle: tauri::AppHandle) -> Result<u16, String> {
+fn start_backend(
+    state: State<AppState>,
+    app_handle: tauri::AppHandle,
+    python_path: Option<String>,
+) -> Result<u16, String> {
     if state.backend_process.lock().unwrap().is_some() {
         return Ok(*state.backend_port.lock().unwrap());
     }
 
-    // Try to find Python backend
-    // Priority: bundled > venv > system PATH
-    let python_backend = find_python_backend(&app_handle)?;
+    // Find the ws_server.py script
+    let ws_server = find_ws_server(&app_handle)?;
 
-    let mut child = Command::new(&python_backend)
-        .arg("--mode=websocket")
+    // Find Python interpreter
+    let python = python_path
+        .map(std::path::PathBuf::from)
+        .or_else(|| find_python())
+        .ok_or("Python not found. Install Python 3.11+ or specify path in settings.")?;
+
+    let mut child = Command::new(&python)
+        .arg(&ws_server)
         .arg("--port=0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -35,7 +44,9 @@ fn start_backend(state: State<AppState>, app_handle: tauri::AppHandle) -> Result
     let stdout = child.stdout.take().ok_or("No stdout")?;
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| format!("Read error: {}", e))?;
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("Read error: {}", e))?;
 
     let port: u16 = line
         .trim()
@@ -50,48 +61,71 @@ fn start_backend(state: State<AppState>, app_handle: tauri::AppHandle) -> Result
     Ok(port)
 }
 
-fn find_python_backend(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    // 1. Check bundled resource dir (for AppImage)
-    if let Ok(resource_dir) = app_handle.path().resource_dir() {
-        let bundled = resource_dir.join("bin").join("autolycus-backend");
-        if bundled.exists() {
-            return Ok(bundled);
-        }
-    }
+fn find_ws_server(_app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    // Check common locations relative to the executable
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
 
-    // 2. Check common venv locations
-    let home = std::env::var("HOME").map_err(|e| format!("No HOME: {}", e))?;
-    let venv_paths = [
-        format!("{}/autolycus/venv/bin/autolycus", home),
-        format!("{}/autolycus/venv/bin/python", home),
-        format!("{}/.autolycus/venv/bin/autolycus", home),
+    let search_paths = [
+        // Bundled with AppImage
+        exe_dir
+            .as_ref()
+            .map(|d| d.join("tui_gateway").join("ws_server.py")),
+        // Development: autolycus repo
+        dirs::home_dir().map(|h| {
+            h.join("autolycus")
+                .join("tui_gateway")
+                .join("ws_server.py")
+        }),
+        dirs::home_dir().map(|h| {
+            h.join(".autolycus")
+                .join("tui_gateway")
+                .join("ws_server.py")
+        }),
+        // System-wide
+        Some(std::path::PathBuf::from(
+            "/usr/local/lib/autolycus/tui_gateway/ws_server.py",
+        )),
     ];
 
-    for path in &venv_paths {
-        let p = std::path::PathBuf::from(path);
-        if p.exists() {
-            return Ok(p);
+    for path in search_paths.iter().flatten() {
+        if path.exists() {
+            return Ok(path.clone());
         }
     }
 
-    // 3. Check system PATH
-    if let Ok(output) = Command::new("which").arg("autolycus").output() {
+    Err("ws_server.py not found. Ensure autolycus is installed.".to_string())
+}
+
+fn find_python() -> Option<std::path::PathBuf> {
+    // Check common venv locations
+    let home = std::env::var("HOME").ok()?;
+    let candidates = [
+        format!("{}/autolycus/venv/bin/python", home),
+        format!("{}/autolycus/venv/bin/python3", home),
+        format!("{}/.autolycus/venv/bin/python", home),
+        format!("{}/.hermes/venv/bin/python", home),
+    ];
+
+    for path in &candidates {
+        let p = std::path::PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // Check system PATH
+    if let Ok(output) = Command::new("which").arg("python3").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
-                return Ok(std::path::PathBuf::from(path));
+                return Some(std::path::PathBuf::from(path));
             }
         }
     }
 
-    // 4. Fallback: try python -m tui_gateway
-    if let Ok(output) = Command::new("which").arg("python3").output() {
-        if output.status.success() {
-            return Ok(std::path::PathBuf::from("python3"));
-        }
-    }
-
-    Err("Python backend not found. Install: pip install autolycus".to_string())
+    None
 }
 
 #[tauri::command]

@@ -52,15 +52,21 @@ export function App() {
     }
   }, []);
 
-  const handleStartLocal = useCallback(async (_path: string) => {
+  const handleStartLocal = useCallback(async (pythonPath: string) => {
     setStarting(true);
     try {
-      // In a real Tauri app, this would invoke the Rust command:
-      // const port = await invoke<number>("start_backend");
-      // For now, we simulate by connecting to localhost
-      // The Rust backend will spawn Python and return the port
-      const url = "ws://127.0.0.1:8443";
-      await handleConnect(url);
+      // In Tauri mode, invoke Rust command to start backend
+      // For now (browser dev mode), show message
+      if (typeof window !== "undefined" && (window as any).__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const port = await invoke<number>("start_backend", { pythonPath });
+        await handleConnect(`ws://127.0.0.1:${port}`);
+      } else {
+        // Dev mode: tell user to start backend manually
+        useGatewayStore.setState({
+          error: "Запустите backend: python tui_gateway/ws_server.py --port 8443",
+        });
+      }
     } catch (err: any) {
       useGatewayStore.setState({ error: err.message });
     } finally {
