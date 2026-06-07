@@ -518,15 +518,22 @@ async fn start_agent(
         }
     });
 
-    // Spawn watchdog — monitor process exit and emit event
+    // Spawn watchdog — monitor process exit and emit event (cross-platform)
     let app_handle_watch = app_handle.clone();
     let child_id = child.id();
     thread::spawn(move || {
-        // We can't directly wait on child here (ownership), so we poll via kill -0
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            // Check if process is still alive (kill -0)
+            #[cfg(unix)]
             let alive = unsafe { libc::kill(child_id as i32, 0) == 0 };
+            #[cfg(windows)]
+            let alive = {
+                // On Windows, try_wait via a second handle is not available from Child id alone,
+                // so we rely on the main thread's wait in start_agent to detect exit.
+                // This watchdog simply keeps the thread alive; crash detection is best-effort.
+                let _ = app_handle_watch.clone();
+                true // keep polling; actual exit handled elsewhere
+            };
             if !alive {
                 let _ = app_handle_watch.emit("agent_event", AgentEvent {
                     event_type: "gateway.crashed".to_string(),
