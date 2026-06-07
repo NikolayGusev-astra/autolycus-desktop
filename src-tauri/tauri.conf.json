@@ -41,13 +41,24 @@
     "longDescription": "Autolycus Desktop — native desktop AI assistant powered by Hermes Agent",
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.0-37", "libssl3", "libgtk-3-0", "librsvg2-2"]
+        "depends": [
+          "libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0",
+          "libssl3 | libssl1.1",
+          "libgtk-3-0",
+          "librsvg2-2"
+        ]
       }
     },
     "windows": {
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
-      "timestampUrl": ""
+      "timestampUrl": "",
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "perMachine",
+        "languages": ["English", "Russian"],
+        "displayLanguageSelector": false
+      }
     }
   },
   "plugins": {}
