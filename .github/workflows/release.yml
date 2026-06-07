@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build
 
 on:
   push:
@@ -12,16 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
 
       - name: Install Linux dependencies
         run: |
@@ -31,78 +25,61 @@ jobs:
             libssl-dev \
             libgtk-3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            pkg-config
 
-      - name: Install npm dependencies
-        run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
-      - name: Build
-        run: npm run tauri build -- --target x86_64-unknown-linux-gnu
+      - name: Build AppImage
+        uses: tauri-apps/tauri-action@v0
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npm run tauri
+          args: --target x86_64-unknown-linux-gnu
+          includeRelease: false
+          includeDebug: false
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: linux-deb
-          path: src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+          path: src-tauri/target/release/bundle/deb/*.deb
 
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install npm dependencies
-        run: npm ci
-
       - name: Build MSI
-        run: npm run tauri build -- --target x86_64-pc-windows-msvc
+        uses: tauri-apps/tauri-action@v0
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npm run tauri
+          args: --target x86_64-pc-windows-msvc
+          includeRelease: false
+          includeDebug: false
 
       - name: Upload MSI
         uses: actions/upload-artifact@v4
         with:
           name: windows-msi
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-
-  release:
-    needs: [build-linux, build-windows]
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: artifacts/*
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          path: src-tauri/target/release/bundle/msi/*.msi
