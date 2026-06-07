@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb", "msi"],
+    "targets": ["appimage", "deb", "msi", "nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -54,10 +54,7 @@
       "digestAlgorithm": "sha256",
       "timestampUrl": "",
       "nsis": {
-        "installerIcon": "icons/icon.ico",
-        "installMode": "perMachine",
-        "languages": ["English", "Russian"],
-        "displayLanguageSelector": false
+        "installerIcon": "icons/icon.ico"
       }
     }
   },
