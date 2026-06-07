@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { AgentClient } from "../lib/agent-client";
-import type { AgentStatus, Session, Message, AgentEvent } from "../lib/types";
+import type { AgentStatus, Session, Message, AgentEvent, ApprovalRequest, PipelineStatus } from "../lib/types";
 
 const MAX_EVENTS = 1000;
 
@@ -16,6 +16,10 @@ interface GatewayState {
   messages: Message[];
   events: AgentEvent[];
 
+  // ── v0.3.0 new state ──
+  pendingApproval: ApprovalRequest | null;
+  pipelineStatus: PipelineStatus;
+
   setClient: (client: AgentClient | null) => void;
   setConnected: (connected: boolean) => void;
   setPort: (port: number | null) => void;
@@ -27,7 +31,19 @@ interface GatewayState {
   setCurrentSession: (id: string | null) => void;
   setSessions: (sessions: Session[]) => void;
   reset: () => void;
+
+  // ── v0.3.0 new actions ──
+  setPendingApproval: (approval: ApprovalRequest | null) => void;
+  setPipelineStatus: (status: PipelineStatus) => void;
 }
+
+const INITIAL_PIPELINE_STATUS: PipelineStatus = {
+  backend: "disconnected",
+  model: undefined,
+  tokensUsed: undefined,
+  tokensLimit: undefined,
+  costUsd: undefined,
+};
 
 export const useGatewayStore = create<GatewayState>()((set) => ({
   client: null,
@@ -40,6 +56,10 @@ export const useGatewayStore = create<GatewayState>()((set) => ({
   currentSessionId: null,
   messages: [],
   events: [],
+
+  // ── v0.3.0 initial state ──
+  pendingApproval: null,
+  pipelineStatus: INITIAL_PIPELINE_STATUS,
 
   setClient: (client: AgentClient | null) => set({ client }),
   setConnected: (connected: boolean) => set({ connected }),
@@ -63,6 +83,13 @@ export const useGatewayStore = create<GatewayState>()((set) => ({
   setCurrentSession: (id: string | null) => set({ currentSessionId: id }),
   setSessions: (sessions: Session[]) => set({ sessions }),
 
+  // ── v0.3.0 new actions ──
+  setPendingApproval: (approval: ApprovalRequest | null) =>
+    set({ pendingApproval: approval }),
+
+  setPipelineStatus: (status: PipelineStatus) =>
+    set({ pipelineStatus: status }),
+
   reset: () =>
     set({
       connected: false,
@@ -72,6 +99,8 @@ export const useGatewayStore = create<GatewayState>()((set) => ({
       messages: [],
       events: [],
       currentSessionId: null,
+      pendingApproval: null,
+      pipelineStatus: INITIAL_PIPELINE_STATUS,
     }),
 }));
 

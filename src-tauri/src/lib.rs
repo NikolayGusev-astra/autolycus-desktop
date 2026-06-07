@@ -34,7 +34,7 @@ pub enum StreamEvent {
     /// Reasoning/thinking delta
     #[serde(rename = "reasoning")]
     Reasoning { content: String },
-    /// Tool status update
+    /// Tool status update (legacy — prefer ToolResult)
     #[serde(rename = "tool_progress")]
     ToolProgress {
         tool: String,
@@ -43,6 +43,50 @@ pub enum StreamEvent {
         label: String,
         #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<String>,
+    },
+    /// Structured tool execution result (replaces tool_progress for detailed view)
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        #[serde(rename = "toolCallId")]
+        tool_call_id: String,
+        name: String,
+        input: String,
+        output: String,
+        #[serde(rename = "durationMs")]
+        duration_ms: u64,
+        status: String, // "ok" | "error"
+    },
+    /// Approval request — tool execution needs user confirmation
+    #[serde(rename = "approval_request")]
+    ApprovalRequest {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        #[serde(rename = "toolInput")]
+        tool_input: String,
+        action: String,
+        #[serde(rename = "commandClass")]
+        command_class: String, // "read" | "write" | "network" | "install" | "destructive"
+    },
+    /// Approval decision received from user
+    #[serde(rename = "approval_decision")]
+    ApprovalDecision {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        decision: String, // "approved" | "denied" | "approved_always"
+    },
+    /// Pipeline status for Header (connection, model, tokens, cost)
+    #[serde(rename = "pipeline_status")]
+    PipelineStatus {
+        backend: String, // "connected" | "disconnected" | "error"
+        model: Option<String>,
+        #[serde(rename = "tokensUsed")]
+        tokens_used: Option<u64>,
+        #[serde(rename = "tokensLimit")]
+        tokens_limit: Option<u64>,
+        #[serde(rename = "costUsd")]
+        cost_usd: Option<f64>,
     },
     /// Stream complete
     #[serde(rename = "done")]
@@ -74,6 +118,22 @@ impl From<StreamEvent> for AgentEvent {
             StreamEvent::ToolProgress { tool, status, emoji, label, tool_call_id } => (
                 "tool_progress".to_string(),
                 serde_json::json!({ "tool": tool, "status": status, "emoji": emoji, "label": label, "toolCallId": tool_call_id }),
+            ),
+            StreamEvent::ToolResult { tool_call_id, name, input, output, duration_ms, status } => (
+                "tool_result".to_string(),
+                serde_json::json!({ "toolCallId": tool_call_id, "name": name, "input": input, "output": output, "durationMs": duration_ms, "status": status }),
+            ),
+            StreamEvent::ApprovalRequest { request_id, tool_name, tool_input, action, command_class } => (
+                "approval_request".to_string(),
+                serde_json::json!({ "requestId": request_id, "toolName": tool_name, "toolInput": tool_input, "action": action, "commandClass": command_class }),
+            ),
+            StreamEvent::ApprovalDecision { request_id, decision } => (
+                "approval_decision".to_string(),
+                serde_json::json!({ "requestId": request_id, "decision": decision }),
+            ),
+            StreamEvent::PipelineStatus { backend, model, tokens_used, tokens_limit, cost_usd } => (
+                "pipeline_status".to_string(),
+                serde_json::json!({ "backend": backend, "model": model, "tokensUsed": tokens_used, "tokensLimit": tokens_limit, "costUsd": cost_usd }),
             ),
             StreamEvent::Done => ("done".to_string(), serde_json::json!({})),
             StreamEvent::Error { content } => ("error".to_string(), serde_json::json!({ "content": content })),
@@ -256,6 +316,45 @@ fn parse_stream_event(value: &serde_json::Value) -> Option<(StreamEvent, Option<
                 emoji: "✅".to_string(),
                 label: "Complete".to_string(),
                 tool_call_id: None,
+            }
+        }
+        // ── New v0.3.0 events ──
+        "tool_result" => {
+            let params = value.get("params").unwrap_or(value);
+            StreamEvent::ToolResult {
+                tool_call_id: params.get("toolCallId").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                name: params.get("name").and_then(|s| s.as_str()).unwrap_or("unknown").to_string(),
+                input: params.get("input").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                output: params.get("output").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                duration_ms: params.get("durationMs").and_then(|n| n.as_u64()).unwrap_or(0),
+                status: params.get("status").and_then(|s| s.as_str()).unwrap_or("ok").to_string(),
+            }
+        }
+        "approval_request" => {
+            let params = value.get("params").unwrap_or(value);
+            StreamEvent::ApprovalRequest {
+                request_id: params.get("requestId").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                tool_name: params.get("toolName").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                tool_input: params.get("toolInput").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                action: params.get("action").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                command_class: params.get("commandClass").and_then(|s| s.as_str()).unwrap_or("write").to_string(),
+            }
+        }
+        "approval_decision" => {
+            let params = value.get("params").unwrap_or(value);
+            StreamEvent::ApprovalDecision {
+                request_id: params.get("requestId").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                decision: params.get("decision").and_then(|s| s.as_str()).unwrap_or("denied").to_string(),
+            }
+        }
+        "pipeline_status" => {
+            let params = value.get("params").unwrap_or(value);
+            StreamEvent::PipelineStatus {
+                backend: params.get("backend").and_then(|s| s.as_str()).unwrap_or("disconnected").to_string(),
+                model: params.get("model").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                tokens_used: params.get("tokensUsed").and_then(|n| n.as_u64()),
+                tokens_limit: params.get("tokensLimit").and_then(|n| n.as_u64()),
+                cost_usd: params.get("costUsd").and_then(|n| n.as_f64()),
             }
         }
         "error" => {

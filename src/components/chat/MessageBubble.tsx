@@ -2,11 +2,19 @@ import { memo } from "react";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolOutput } from "./ToolOutput";
+import { ToolResultCard } from "./ToolResult";
 import { StreamingText } from "./StreamingText";
 import type { Message } from "../../lib/types";
 
 interface MessageBubbleProps {
   message: Message;
+}
+
+/** Check if message has full ToolResult data (v0.3.0+) vs legacy tool_progress */
+function hasToolResult(message: Message): boolean {
+  if (message.role !== "tool") return false;
+  const msg = message as Message & { toolResult?: unknown };
+  return !!(msg.toolResult && typeof msg.toolResult === "object");
 }
 
 export const MessageBubble = memo(function MessageBubble({
@@ -19,9 +27,7 @@ export const MessageBubble = memo(function MessageBubble({
     return (
       <div className="ac-msg ac-msg-user">
         <div className="ac-msg-avatar ac-msg-avatar-user">Я</div>
-        <div className="ac-msg-body ac-msg-body-user">
-          {message.content}
-        </div>
+        <div className="ac-msg-body ac-msg-body-user">{message.content}</div>
       </div>
     );
   }
@@ -46,6 +52,29 @@ export const MessageBubble = memo(function MessageBubble({
   }
 
   if (message.role === "tool") {
+    // v0.3.0+ structured tool result
+    if (hasToolResult(message)) {
+      const msg = message as Message & { toolResult: any };
+      return (
+        <div className="ac-msg">
+          <div className="ac-msg-avatar ac-msg-avatar-assistant">T</div>
+          <div className="ac-msg-body ac-msg-body-assistant">
+            <ToolResultCard
+              result={{
+                tool_call_id: msg.toolResult.tool_call_id || message.id,
+                name: msg.toolResult.name || "tool",
+                input: msg.toolResult.input || "",
+                output: msg.toolResult.output || message.content,
+                durationMs: msg.toolResult.durationMs || 0,
+                status: msg.toolResult.status || "ok",
+              }}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    // Legacy tool_progress fallback
     return (
       <div className="ac-msg">
         <div className="ac-msg-avatar ac-msg-avatar-assistant">T</div>

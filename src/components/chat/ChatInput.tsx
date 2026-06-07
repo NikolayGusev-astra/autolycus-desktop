@@ -1,18 +1,31 @@
 import { useState, useRef, useCallback, type KeyboardEvent } from "react";
 import { Send } from "lucide-react";
+import type { AgentStatus } from "../../lib/types";
 
 interface ChatInputProps {
   onSend: (message: string) => void;
   disabled?: boolean;
+  agentStatus?: AgentStatus;
 }
 
-export function ChatInput({ onSend, disabled }: ChatInputProps) {
+const STATUS_PLACEHOLDER: Record<AgentStatus, string> = {
+  idle: "Сообщение...",
+  thinking: "Агент думает...",
+  streaming: "Агент отвечает...",
+  tool_calling: "Выполняет команду...",
+  error: "Ошибка — попробуйте ещё раз",
+};
+
+export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputProps) {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const isBlocked = disabled || isSending || agentStatus === "thinking" || agentStatus === "streaming" || agentStatus === "tool_calling";
+  const placeholder = STATUS_PLACEHOLDER[agentStatus] || "Сообщение...";
+
   const handleSend = useCallback(async () => {
-    if (text.trim() && !disabled && !isSending) {
+    if (text.trim() && !isBlocked) {
       setIsSending(true);
       try {
         await onSend(text.trim());
@@ -21,7 +34,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         setIsSending(false);
       }
     }
-  }, [text, disabled, isSending, onSend]);
+  }, [text, isBlocked, onSend]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -38,13 +51,13 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="Сообщение..."
-        disabled={disabled || isSending}
+        placeholder={placeholder}
+        disabled={isBlocked}
         className="ac-input flex-1 px-3.5 py-2 text-sm"
       />
       <button
         onClick={handleSend}
-        disabled={!text.trim() || disabled || isSending}
+        disabled={!text.trim() || isBlocked}
         className="ac-btn px-4 py-2 text-sm disabled:opacity-30 disabled:cursor-not-allowed"
       >
         <Send className="w-4 h-4" />

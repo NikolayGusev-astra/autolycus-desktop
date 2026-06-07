@@ -1,9 +1,15 @@
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { invoke } from "@tauri-apps/api/core";
-import { Power } from "lucide-react";
+import { Power, Cpu } from "lucide-react";
 
 export function Header() {
-  const { agentStatus, connected, setConnected, setAgentStatus } = useGatewayStore();
+  const {
+    agentStatus,
+    connected,
+    setConnected,
+    setAgentStatus,
+    pipelineStatus,
+  } = useGatewayStore();
 
   const statusLabel = {
     idle: "готов",
@@ -19,6 +25,20 @@ export function Header() {
     setAgentStatus("idle");
   };
 
+  const modelName = pipelineStatus.model || "—";
+  const tokensDisplay =
+    pipelineStatus.tokensUsed !== undefined
+      ? `${(pipelineStatus.tokensUsed / 1000).toFixed(1)}K${
+          pipelineStatus.tokensLimit
+            ? `/${(pipelineStatus.tokensLimit / 1000).toFixed(0)}K`
+            : ""
+        }`
+      : "";
+  const costDisplay =
+    pipelineStatus.costUsd !== undefined
+      ? `$${pipelineStatus.costUsd.toFixed(3)}`
+      : "";
+
   return (
     <header className="px-5 py-1.5 flex items-center border-b border-ac-border bg-ac-pitch/70 backdrop-blur-sm gap-3">
       {/* Session tabs */}
@@ -26,10 +46,26 @@ export function Header() {
         <button className="ac-tab active">Основной</button>
       </div>
 
+      {/* Pipeline info (v0.3.0) */}
+      {connected && (
+        <div className="flex items-center gap-2 text-[11px] text-ac-stone ml-2">
+          <Cpu className="w-3 h-3" />
+          <span className="font-mono truncate max-w-[120px]">{modelName}</span>
+          {tokensDisplay && (
+            <span className="opacity-60">{tokensDisplay}</span>
+          )}
+          {costDisplay && <span className="opacity-60">{costDisplay}</span>}
+        </div>
+      )}
+
       {/* Right side */}
       <div className="ml-auto flex items-center gap-2.5 text-[11px] text-ac-stone">
         <div className="flex items-center gap-1.5">
-          <span className={connected ? "ac-pulse" : "ac-pulse ac-pulse-off"} />
+          <span
+            className={
+              connected ? "ac-pulse" : "ac-pulse ac-pulse-off"
+            }
+          />
           <span>{connected ? statusLabel : "отключено"}</span>
         </div>
         {connected && (

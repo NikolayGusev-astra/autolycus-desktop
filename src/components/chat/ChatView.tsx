@@ -4,7 +4,7 @@ import { ChatInput } from "./ChatInput";
 import { useGatewayStore } from "../../stores/gatewayStore";
 
 export function ChatView() {
-  const { client, currentSessionId, addMessage } = useGatewayStore();
+  const { client, currentSessionId, addMessage, agentStatus } = useGatewayStore();
 
   const handleSend = useCallback(
     async (text: string) => {
@@ -40,7 +40,7 @@ export function ChatView() {
       <div className="flex-1 overflow-hidden">
         <MessageList />
       </div>
-      <ChatInput onSend={handleSend} />
+      <ChatInput onSend={handleSend} agentStatus={agentStatus} />
     </div>
   );
 }
