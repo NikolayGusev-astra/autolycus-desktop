@@ -20,7 +20,7 @@ export function Header() {
   }[agentStatus];
 
   const handleDisconnect = async () => {
-    await invoke("stop_agent");
+    await invoke("stop_gateway_cmd", { profile: null });
     setConnected(false);
     setAgentStatus("idle");
   };
