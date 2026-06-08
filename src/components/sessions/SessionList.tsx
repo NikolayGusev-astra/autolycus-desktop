@@ -1,86 +1,188 @@
-import { useMemo } from "react";
-import { MessageSquare, Plus } from "lucide-react";
-import { useGatewayStore } from "../../stores/gatewayStore";
-import type { Session } from "../../lib/types";
+// src/components/sessions/SessionList.tsx
+// v0.4.0: Session list from SQLite via Rust backend
 
-interface SessionListProps {
-  sessions?: Session[];
-  currentSessionId?: string | null;
-  onSelect?: (id: string) => void;
-  onNew?: () => void;
+import { useState, useEffect, useCallback } from "react";
+import { Search, Trash2, MessageSquare, Loader } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+
+interface SessionSummary {
+  id: string;
+  source: string;
+  started_at: number;
+  ended_at: number | null;
+  message_count: number;
+  model: string;
+  title: string | null;
+  preview: string;
 }
 
-function groupByDate(sessions: Session[]): Map<string, Session[]> {
-  const groups = new Map<string, Session[]>();
-  const now = Date.now();
-  const day = 86400000;
+export function SessionList() {
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  for (const s of sessions) {
-    let label: string;
-    if (now - s.updatedAt < day) label = "Today";
-    else if (now - s.updatedAt < 2 * day) label = "Yesterday";
-    else if (now - s.updatedAt < 7 * day) label = "This Week";
-    else if (now - s.updatedAt < 30 * day) label = "This Month";
-    else label = "Older";
+  const loadSessions = useCallback(async () => {
+    try {
+      setLoading(true);
+      const result = await invoke<SessionSummary[]>("list_sessions_cmd", {
+        profile: null,
+        limit: 50,
+        offset: 0,
+      });
+      setSessions(result);
+    } catch (err) {
+      console.error("Failed to load sessions:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-    if (!groups.has(label)) groups.set(label, []);
-    groups.get(label)!.push(s);
-  }
-  return groups;
-}
+  useEffect(() => {
+    loadSessions();
+  }, [loadSessions]);
 
-export function SessionList({
-  sessions: propSessions,
-  currentSessionId: propCurrentId,
-  onSelect,
-  onNew,
-}: SessionListProps) {
-  const storeSessions = useGatewayStore((s) => s.sessions);
-  const storeCurrentId = useGatewayStore((s) => s.currentSessionId);
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) {
+      loadSessions();
+      return;
+    }
 
-  const sessions = propSessions ?? storeSessions;
-  const currentId = propCurrentId ?? storeCurrentId;
+    try {
+      setLoading(true);
+      const result = await invoke<SessionSummary[]>("search_sessions_cmd", {
+        query: searchQuery,
+        limit: 20,
+        profile: null,
+      });
+      setSessions(result);
+    } catch (err) {
+      console.error("Search failed:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const grouped = useMemo(() => groupByDate(sessions), [sessions]);
+  const handleDelete = async (sessionId: string) => {
+    try {
+      await invoke("delete_session_cmd", { sessionId, profile: null });
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    } catch (err) {
+      console.error("Delete failed:", err);
+    }
+  };
+
+  const formatDate = (timestamp: number) => {
+    if (!timestamp) return "—";
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  const filteredSessions = searchQuery
+    ? sessions.filter(
+        (s) =>
+          s.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          s.preview.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          s.id.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : sessions;
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="p-2">
-        <button
-          onClick={onNew}
-          className="flex items-center gap-2 w-full px-3 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          New Chat
-        </button>
-      </div>
-      <div className="flex-1 overflow-y-auto px-2">
-        {sessions.length === 0 && (
-          <div className="px-3 py-8 text-center text-gray-400 text-sm">
-            No sessions yet. Start a new chat!
+    <div className="flex h-full flex-col">
+      {/* Search bar */}
+      <div className="px-4 py-3 border-b border-ac-border">
+        <div className="flex gap-2">
+          <div className="flex-1 relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ac-stone" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+              placeholder="Поиск сессий..."
+              className="ac-input w-full pl-9 pr-3 py-2 text-sm"
+            />
           </div>
-        )}
-        {Array.from(grouped.entries()).map(([label, items]) => (
-          <div key={label} className="mb-4">
-            <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-              {label}
-            </div>
-            {items.map((session) => (
-              <button
+          <button
+            onClick={handleSearch}
+            className="ac-btn px-4 py-2 text-sm"
+          >
+            Найти
+          </button>
+        </div>
+      </div>
+
+      {/* Session list */}
+      <div className="flex-1 overflow-y-auto">
+        {loading ? (
+          <div className="flex items-center justify-center h-32">
+            <Loader className="w-5 h-5 text-ac-amber animate-spin" />
+          </div>
+        ) : filteredSessions.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-32 text-ac-stone text-sm">
+            <MessageSquare className="w-8 h-8 mb-2 opacity-30" />
+            <p>Нет сессий</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-ac-border/30">
+            {filteredSessions.map((session) => (
+              <div
                 key={session.id}
-                onClick={() => onSelect?.(session.id)}
-                className={`flex items-center gap-2 w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
-                  session.id === currentId
-                    ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                    : "hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300"
+                className={`px-4 py-3 cursor-pointer transition-colors ${
+                  selectedId === session.id
+                    ? "bg-ac-amber/5 border-l-2 border-ac-amber"
+                    : "hover:bg-ac-pitch/50 border-l-2 border-transparent"
                 }`}
+                onClick={() => setSelectedId(session.id)}
               >
-                <MessageSquare className="w-4 h-4 flex-shrink-0" />
-                <span className="truncate">{session.title || "New Chat"}</span>
-              </button>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-medium text-ac-ivory truncate">
+                        {session.title || session.id.slice(0, 16)}
+                      </span>
+                      {session.model && (
+                        <span className="text-[10px] px-1.5 py-0.5 bg-ac-amber/10 text-ac-amber rounded">
+                          {session.model}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-ac-stone truncate">
+                      {session.preview || "Пустой чат"}
+                    </p>
+                    <div className="flex items-center gap-3 mt-1 text-[10px] text-ac-stone/50">
+                      <span>{formatDate(session.started_at)}</span>
+                      <span>{session.message_count} сообщений</span>
+                      <span className="truncate max-w-[120px]">{session.source}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDelete(session.id);
+                    }}
+                    className="text-ac-stone/30 hover:text-ac-red transition-colors p-1"
+                    title="Удалить сессию"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
-        ))}
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-stone/50 flex justify-between">
+        <span>{sessions.length} сессий</span>
+        <span>SQLite state.db</span>
       </div>
     </div>
   );

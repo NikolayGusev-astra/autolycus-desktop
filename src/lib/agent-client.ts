@@ -1,11 +1,6 @@
-/**
- * Agent client — communicates with the Python backend via Tauri IPC.
- *
- * The Python backend (tui_gateway.entry) runs as a child process.
- * Communication:
- *   - Frontend → invoke("send_rpc", {method, params}) → Rust → stdin → Python
- *   - Python → stdout → Rust → listen("agent_event") → Frontend
- */
+// src/lib/agent-client.ts
+// Agent client — communicates with the Rust backend via Tauri IPC.
+// v0.4.0: Updated for new connection modes (local/remote/ssh) and chat events.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -16,6 +11,7 @@ export type { AgentConfig, AgentEvent };
 export interface ConnectionInfo {
   mode: string;
   instance: string;
+  port?: number;
 }
 
 type JsonRpcParams = Record<string, unknown>;
