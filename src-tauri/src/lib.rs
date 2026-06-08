@@ -4,8 +4,11 @@
 
 mod chat;
 mod config;
+mod cronjobs;
 mod gateway;
+mod memory;
 mod models;
+mod mcp;
 mod profiles;
 mod sessions;
 mod skills;
