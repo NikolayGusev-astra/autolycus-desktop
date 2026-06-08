@@ -8,6 +8,7 @@ mod gateway;
 mod models;
 mod profiles;
 mod sessions;
+mod skills;
 mod ssh;
 
 use std::path::PathBuf;
@@ -520,6 +521,54 @@ async fn set_model_config_cmd(
     config::set_model_config(&hermes_home, profile.as_deref(), &provider, &model, &base_url)
 }
 
+// ── Skills Commands ───────────────────────────────────────────────────────
+
+/// List installed skills
+#[tauri::command]
+async fn list_installed_skills_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<skills::InstalledSkill>, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+
+    Ok(skills::list_installed_skills(&hermes_home, profile.as_deref()))
+}
+
+/// Get skill content
+#[tauri::command]
+async fn get_skill_content_cmd(
+    skill_path: String,
+) -> Result<String, String> {
+    skills::get_skill_content(&skill_path)
+}
+
+/// Install skill
+#[tauri::command]
+async fn install_skill_cmd(
+    state: State<'_, AppState>,
+    identifier: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+
+    skills::install_skill(&hermes_home, profile.as_deref(), &identifier)
+}
+
+/// Uninstall skill
+#[tauri::command]
+async fn uninstall_skill_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+
+    skills::uninstall_skill(&hermes_home, profile.as_deref(), &name)
+}
+
 // ── SSH Commands ──────────────────────────────────────────────────────────
 
 /// Start SSH tunnel
@@ -593,6 +642,11 @@ pub fn run() {
             set_env_cmd,
             get_model_config_cmd,
             set_model_config_cmd,
+            // Skills
+            list_installed_skills_cmd,
+            get_skill_content_cmd,
+            install_skill_cmd,
+            uninstall_skill_cmd,
             // SSH
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
