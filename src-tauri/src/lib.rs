@@ -18,6 +18,7 @@ mod registry;
 mod sessions;
 mod skills;
 mod ssh;
+mod telegram;
 mod terminal;
 mod validation;
 
@@ -607,6 +608,48 @@ async fn ssh_tunnel_status_cmd(
     Ok(ssh::is_tunnel_active(&state.ssh))
 }
 
+// ── Telegram Commands ─────────────────────────────────────────────────────
+
+/// Send Telegram message
+#[tauri::command]
+async fn send_telegram_message_cmd(
+    state: State<'_, AppState>,
+    bot_token: String,
+    chat_id: String,
+    text: String,
+) -> Result<telegram::TelegramResult, String> {
+    Ok(telegram::send_message(&bot_token, &chat_id, &text).await)
+}
+
+/// Validate Telegram bot token
+#[tauri::command]
+async fn validate_telegram_bot_token_cmd(
+    bot_token: String,
+) -> Result<telegram::TelegramResult, String> {
+    Ok(telegram::validate_bot_token(&bot_token).await)
+}
+
+/// Save Telegram config
+#[tauri::command]
+async fn save_telegram_config_cmd(
+    state: State<'_, AppState>,
+    config: telegram::TelegramConfig,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    telegram::save_config(&hermes_home, &config)
+}
+
+/// Load Telegram config
+#[tauri::command]
+async fn load_telegram_config_cmd(
+    state: State<'_, AppState>,
+) -> Result<telegram::TelegramConfig, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    Ok(telegram::load_config(&hermes_home))
+}
+
 // ── Media Commands ────────────────────────────────────────────────────────
 
 /// Get media info for a file
@@ -888,6 +931,11 @@ pub fn run() {
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
             ssh_tunnel_status_cmd,
+            // Telegram
+            send_telegram_message_cmd,
+            validate_telegram_bot_token_cmd,
+            save_telegram_config_cmd,
+            load_telegram_config_cmd,
             // Media
             get_media_info_cmd,
             read_media_data_url_cmd,
