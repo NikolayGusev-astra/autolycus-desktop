@@ -6,6 +6,7 @@ mod chat;
 mod config;
 mod cronjobs;
 mod gateway;
+mod kanban;
 mod memory;
 mod models;
 mod mcp;
@@ -13,6 +14,7 @@ mod profiles;
 mod sessions;
 mod skills;
 mod ssh;
+mod validation;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -600,6 +602,136 @@ async fn ssh_tunnel_status_cmd(
     Ok(ssh::is_tunnel_active(&state.ssh))
 }
 
+// ── Kanban Commands ───────────────────────────────────────────────────────
+
+/// List kanban boards
+#[tauri::command]
+async fn list_kanban_boards_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<kanban::KanbanBoard>, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::list_boards(&hermes_home, profile.as_deref())
+}
+
+/// Create a kanban board
+#[tauri::command]
+async fn create_kanban_board_cmd(
+    state: State<'_, AppState>,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    profile: Option<String>,
+) -> Result<kanban::KanbanBoard, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::create_board(&hermes_home, profile.as_deref(), &slug, &name, description.as_deref())
+}
+
+/// Delete a kanban board
+#[tauri::command]
+async fn delete_kanban_board_cmd(
+    state: State<'_, AppState>,
+    slug: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::delete_board(&hermes_home, profile.as_deref(), &slug)
+}
+
+/// List tasks for a board
+#[tauri::command]
+async fn list_kanban_tasks_cmd(
+    state: State<'_, AppState>,
+    board_slug: String,
+    profile: Option<String>,
+) -> Result<kanban::KanbanBoardView, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::list_tasks(&hermes_home, profile.as_deref(), &board_slug)
+}
+
+/// Create a kanban task
+#[tauri::command]
+async fn create_kanban_task_cmd(
+    state: State<'_, AppState>,
+    board_slug: String,
+    title: String,
+    body: Option<String>,
+    status: String,
+    profile: Option<String>,
+) -> Result<kanban::KanbanTask, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::create_task(&hermes_home, profile.as_deref(), &board_slug, &title, body.as_deref(), &status)
+}
+
+/// Update a kanban task
+#[tauri::command]
+async fn update_kanban_task_cmd(
+    state: State<'_, AppState>,
+    task_id: String,
+    fields: std::collections::HashMap<String, String>,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::update_task(&hermes_home, profile.as_deref(), &task_id, &fields)
+}
+
+/// Delete a kanban task
+#[tauri::command]
+async fn delete_kanban_task_cmd(
+    state: State<'_, AppState>,
+    task_id: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::delete_task(&hermes_home, profile.as_deref(), &task_id)
+}
+
+/// Move a task to a different status
+#[tauri::command]
+async fn move_kanban_task_cmd(
+    state: State<'_, AppState>,
+    task_id: String,
+    new_status: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    kanban::move_task(&hermes_home, profile.as_deref(), &task_id, &new_status)
+}
+
+// ── Config Health Commands ────────────────────────────────────────────────
+
+/// Run config health check
+#[tauri::command]
+async fn config_health_check_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<config::ConfigHealthReport, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    Ok(config::run_config_health_check(&hermes_home, profile.as_deref()))
+}
+
+// ── Validation Commands ───────────────────────────────────────────────────
+
+/// Validate chat readiness — pre-send check
+#[tauri::command]
+async fn validate_chat_readiness_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<validation::ChatReadiness, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    Ok(validation::validate_chat_readiness(&hermes_home, profile.as_deref()))
+}
+
 // ── Entry Point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -654,6 +786,19 @@ pub fn run() {
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
             ssh_tunnel_status_cmd,
+            // Kanban
+            list_kanban_boards_cmd,
+            create_kanban_board_cmd,
+            delete_kanban_board_cmd,
+            list_kanban_tasks_cmd,
+            create_kanban_task_cmd,
+            update_kanban_task_cmd,
+            delete_kanban_task_cmd,
+            move_kanban_task_cmd,
+            // Validation
+            validate_chat_readiness_cmd,
+            // Config Health
+            config_health_check_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

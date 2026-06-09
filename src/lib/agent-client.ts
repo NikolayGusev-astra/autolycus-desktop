@@ -1,12 +1,31 @@
 // src/lib/agent-client.ts
 // Agent client — communicates with the Rust backend via Tauri IPC.
-// v0.4.0: Updated for new connection modes (local/remote/ssh) and chat events.
+// v0.5.0: Added validation (pre-send chat readiness check).
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AgentConfig, AgentEvent } from "./types";
 
 export type { AgentConfig, AgentEvent };
+
+// ── Validation Types ──────────────────────────────────────────────────────
+
+export type ChatReadinessCode =
+  | "NO_ACTIVE_MODEL"
+  | "NO_PROVIDER"
+  | "NO_BASE_URL"
+  | "MISSING_API_KEY"
+  | "GATEWAY_DOWN";
+
+export type FixLocation = "providers" | "models" | "gateway" | "setup";
+
+export interface ChatReadiness {
+  ok: boolean;
+  code?: ChatReadinessCode;
+  message?: string;
+  fix_location?: FixLocation;
+  expected_env_key?: string;
+}
 
 export interface ConnectionInfo {
   mode: string;
@@ -56,6 +75,10 @@ export class AgentClient {
       method,
       params: params ?? {},
     });
+  }
+
+  async validateChatReadiness(profile?: string): Promise<ChatReadiness> {
+    return invoke<ChatReadiness>("validate_chat_readiness_cmd", { profile });
   }
 
   onEvent(listener: (event: AgentEvent) => void): () => void {

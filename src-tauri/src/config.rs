@@ -361,6 +361,110 @@ pub fn profile_home(hermes_home: &Path, profile: Option<&str>) -> PathBuf {
     }
 }
 
+// ── URL → Env Key mapping ─────────────────────────────────────────────────
+
+/// Given a base URL, return the expected env var name for the API key.
+/// Falls back to CUSTOM_API_KEY for unknown URLs.
+pub fn expected_env_key_for_url(url: &str) -> &str {
+    let url_lower = url.to_lowercase();
+    if url_lower.contains("openrouter.ai") { return "OPENROUTER_API_KEY"; }
+    if url_lower.contains("anthropic.com") { return "ANTHROPIC_API_KEY"; }
+    if url_lower.contains("openai.com") { return "OPENAI_API_KEY"; }
+    if url_lower.contains("ollama.com") { return "OLLAMA_API_KEY"; }
+    if url_lower.contains("huggingface.co") { return "HF_TOKEN"; }
+    if url_lower.contains("api.groq.com") { return "GROQ_API_KEY"; }
+    if url_lower.contains("api.deepseek.com") { return "DEEPSEEK_API_KEY"; }
+    if url_lower.contains("api.together.xyz") { return "TOGETHER_API_KEY"; }
+    if url_lower.contains("api.fireworks.ai") { return "FIREWORKS_API_KEY"; }
+    if url_lower.contains("api.cerebras.ai") { return "CEREBRAS_API_KEY"; }
+    if url_lower.contains("api.mistral.ai") { return "MISTRAL_API_KEY"; }
+    if url_lower.contains("api.perplexity.ai") { return "PERPLEXITY_API_KEY"; }
+    if url_lower.contains("api.xiaomimimo.com") { return "XIAOMI_API_KEY"; }
+    "CUSTOM_API_KEY"
+}
+
+/// Returns true if the URL points to a local/private host.
+pub fn is_local_base_url(url: &str) -> bool {
+    let url_lower = url.to_lowercase();
+    url_lower.starts_with("http://localhost")
+        || url_lower.starts_with("http://127.0.0.1")
+        || url_lower.starts_with("http://0.0.0.0")
+        || url_lower.starts_with("http://[::1]")
+        || url_lower.starts_with("http://192.168.")
+        || url_lower.starts_with("http://10.")
+        || url_lower.starts_with("http://172.16.")
+        || url_lower.starts_with("http://172.17.")
+        || url_lower.starts_with("http://172.18.")
+        || url_lower.starts_with("http://172.19.")
+        || url_lower.starts_with("http://172.2")
+        || url_lower.starts_with("http://172.30.")
+        || url_lower.starts_with("http://172.31.")
+}
+
+/// Provider IDs that authenticate via OAuth only (no API key variant).
+const OAUTH_PROVIDERS: &[&str] = &[
+    "openai-codex",
+    "xai-oauth",
+    "qwen-oauth",
+    "google-gemini-cli",
+    "minimax-oauth",
+    "kimi-coding",
+];
+
+/// Provider IDs that don't need an API key at all.
+const NO_KEY_PROVIDERS: &[&str] = &["auto"];
+
+/// Check if the env var for the given provider+URL is set.
+/// Returns true if the key is present or if the check is not applicable.
+pub fn has_api_key_for_provider(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    provider: &str,
+    base_url: &str,
+) -> bool {
+    let provider_lower = provider.to_lowercase();
+
+    // Auto provider — skip check
+    if NO_KEY_PROVIDERS.contains(&provider_lower.as_str()) {
+        return true;
+    }
+
+    // OAuth-only providers — skip check
+    if OAUTH_PROVIDERS.contains(&provider_lower.as_str()) {
+        return true;
+    }
+
+    // Local URLs — skip check
+    if is_local_base_url(base_url) {
+        return true;
+    }
+
+    // Check the expected env var
+    let expected_key = expected_env_key_for_url(base_url);
+    if expected_key.is_empty() || expected_key == "CUSTOM_API_KEY" {
+        // Unknown provider+URL — fail open
+        return true;
+    }
+
+    let env = read_env(hermes_home, profile);
+    let value = env.get(expected_key).map(|v| v.trim().to_string()).unwrap_or_default();
+    if !value.is_empty() {
+        return true;
+    }
+
+    // Fallback: check common alternative keys
+    let fallback_keys = ["OPENAI_API_KEY", "CUSTOM_API_KEY"];
+    for key in &fallback_keys {
+        if let Some(v) = env.get(*key) {
+            if !v.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 pub fn looks_like_hermes_home(dir: &Path) -> bool {
     if !dir.exists() {
         return false;
@@ -370,4 +474,216 @@ pub fn looks_like_hermes_home(dir: &Path) -> bool {
         || dir.join("config.yaml").exists()
         || dir.join("active_profile").exists()
         || dir.join(".env").exists()
+}
+
+// ── Config Health Check ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigHealthIssue {
+    pub code: String,
+    pub severity: String, // "error" | "warning" | "info"
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub locations: Vec<String>,
+    pub auto_fixable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_location: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigHealthReport {
+    pub ran_at: i64,
+    pub profile: String,
+    pub issues: Vec<ConfigHealthIssue>,
+    pub summary: ConfigHealthSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigHealthSummary {
+    pub errors: usize,
+    pub warnings: usize,
+    pub infos: usize,
+}
+
+impl Default for ConfigHealthSummary {
+    fn default() -> Self {
+        Self { errors: 0, warnings: 0, infos: 0 }
+    }
+}
+
+/// Run config health check — returns a report of issues found.
+/// Never throws; returns empty report on total failure.
+pub fn run_config_health_check(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> ConfigHealthReport {
+    let profile_name = profile.unwrap_or("default").to_string();
+    let mut report = ConfigHealthReport {
+        ran_at: chrono::Utc::now().timestamp(),
+        profile: profile_name,
+        issues: Vec::new(),
+        summary: ConfigHealthSummary::default(),
+    };
+
+    // Check 1: Active model key presence
+    if let Some(issue) = check_model_key_presence(hermes_home, profile) {
+        report.issues.push(issue);
+    }
+
+    // Check 2: Non-ASCII credentials
+    if let Some(issue) = check_non_ascii_credentials(hermes_home, profile) {
+        report.issues.push(issue);
+    }
+
+    // Check 3: Empty API server key
+    if let Some(issue) = check_api_server_key(hermes_home, profile) {
+        report.issues.push(issue);
+    }
+
+    // Summarize
+    for issue in &report.issues {
+        match issue.severity.as_str() {
+            "error" => report.summary.errors += 1,
+            "warning" => report.summary.warnings += 1,
+            _ => report.summary.infos += 1,
+        }
+    }
+
+    report
+}
+
+/// Check: active model is configured but its expected provider key isn't in .env.
+fn check_model_key_presence(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Option<ConfigHealthIssue> {
+    let mc = get_model_config(hermes_home, profile);
+    let provider = mc.provider.trim().to_lowercase();
+    let model = mc.model.trim();
+    let base_url = mc.base_url.trim();
+
+    if provider.is_empty() || provider == "auto" {
+        return None;
+    }
+    if model.is_empty() {
+        return None;
+    }
+    if is_local_base_url(base_url) {
+        return None;
+    }
+
+    let expected_key = expected_env_key_for_url(base_url);
+    if expected_key == "CUSTOM_API_KEY" {
+        return None;
+    }
+
+    let env = read_env(hermes_home, profile);
+    let value = env.get(expected_key).map(|v| v.trim().to_string()).unwrap_or_default();
+    if !value.is_empty() {
+        return None;
+    }
+
+    // Check fallback keys
+    for fallback in &["OPENAI_API_KEY", "CUSTOM_API_KEY"] {
+        if let Some(v) = env.get(*fallback) {
+            if !v.trim().is_empty() {
+                return None;
+            }
+        }
+    }
+
+    let env_path = profile_env_path(hermes_home, profile);
+    Some(ConfigHealthIssue {
+        code: "MODEL_KEY_MISSING".to_string(),
+        severity: "warning".to_string(),
+        message: format!(
+            "Active model uses {} but {} is not set in .env.",
+            provider, expected_key
+        ),
+        detail: Some(
+            "Chat will fail with an upstream auth error until the key is configured.".to_string(),
+        ),
+        locations: vec![env_path.to_string_lossy().to_string()],
+        auto_fixable: false,
+        fix_description: None,
+        fix_location: Some("providers".to_string()),
+    })
+}
+
+/// Check: non-ASCII characters in credential values.
+fn check_non_ascii_credentials(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Option<ConfigHealthIssue> {
+    let env = read_env(hermes_home, profile);
+    let mut offenders = Vec::new();
+
+    for (key, value) in &env {
+        if !key.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+            continue;
+        }
+        if !key.ends_with("_API_KEY") && !key.ends_with("_TOKEN") && key != "API_SERVER_KEY" {
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        if value.chars().any(|c| !c.is_ascii() || (c as u32) < 0x20 || (c as u32) > 0x7e) {
+            offenders.push(key.clone());
+        }
+    }
+
+    if offenders.is_empty() {
+        return None;
+    }
+
+    let env_path = profile_env_path(hermes_home, profile);
+    Some(ConfigHealthIssue {
+        code: "NON_ASCII_CREDENTIAL".to_string(),
+        severity: "info".to_string(),
+        message: format!("Non-ASCII characters detected in: {}.", offenders.join(", ")),
+        detail: Some(
+            "Common cause: a smart-quote or trailing newline from a paste.".to_string(),
+        ),
+        locations: vec![env_path.to_string_lossy().to_string()],
+        auto_fixable: true,
+        fix_description: Some("Strip non-ASCII characters from the values.".to_string()),
+        fix_location: Some(".env".to_string()),
+    })
+}
+
+/// Check: API server key presence.
+fn check_api_server_key(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Option<ConfigHealthIssue> {
+    let env = read_env(hermes_home, profile);
+    let env_key = env.get("API_SERVER_KEY").map(|v| v.trim().to_string()).unwrap_or_default();
+
+    if !env_key.is_empty() {
+        return None;
+    }
+
+    // Check if config.yaml exists — if not, this is a fresh install, skip
+    let config_path = profile_config_path(hermes_home, profile);
+    if !config_path.exists() {
+        return None;
+    }
+
+    let env_path = profile_env_path(hermes_home, profile);
+    Some(ConfigHealthIssue {
+        code: "EMPTY_API_SERVER_KEY".to_string(),
+        severity: "warning".to_string(),
+        message: "No API_SERVER_KEY is set — chat will fail because the Hermes gateway requires auth.".to_string(),
+        detail: Some(
+            "API_SERVER_KEY is mandatory for Hermes API access. Set it in .env.".to_string(),
+        ),
+        locations: vec![env_path.to_string_lossy().to_string()],
+        auto_fixable: false,
+        fix_description: None,
+        fix_location: Some("setup".to_string()),
+    })
 }
