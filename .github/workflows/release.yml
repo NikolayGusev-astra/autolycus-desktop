@@ -74,7 +74,7 @@ jobs:
         run: |
           cargo clean
           rm -rf node_modules/.vite dist
-          npm run build -- --force
+          npm run build
           npx tauri build --target x86_64-pc-windows-msvc
 
       - name: Upload MSI
