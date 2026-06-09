@@ -10,7 +10,7 @@ export function StatusBar() {
 
   return (
     <footer className="px-5 py-1 flex items-center justify-between border-t border-ac-border bg-ac-pitch text-[11px] text-ac-stone">
-      <span>Autolycus Desktop v0.5.0</span>
+      <span>Autolycus Desktop v0.6.0</span>
       <div className="flex items-center gap-3">
         {pipelineStatus.model && (
           <span className="opacity-60">{pipelineStatus.model}</span>
