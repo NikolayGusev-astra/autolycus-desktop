@@ -72,6 +72,8 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          cargo clean
+          npm run build -- --force
           npx tauri build --target x86_64-pc-windows-msvc
 
       - name: Upload MSI
