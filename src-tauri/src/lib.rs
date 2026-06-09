@@ -7,14 +7,18 @@ mod config;
 mod cronjobs;
 mod gateway;
 mod kanban;
+mod media;
 mod memory;
+mod model_discovery;
 mod models;
 mod mcp;
 mod profiles;
+mod provider_registry;
 mod registry;
 mod sessions;
 mod skills;
 mod ssh;
+mod terminal;
 mod validation;
 
 use std::path::PathBuf;
@@ -603,6 +607,72 @@ async fn ssh_tunnel_status_cmd(
     Ok(ssh::is_tunnel_active(&state.ssh))
 }
 
+// ── Media Commands ────────────────────────────────────────────────────────
+
+/// Get media info for a file
+#[tauri::command]
+async fn get_media_info_cmd(path: String) -> Result<Option<media::MediaInfo>, String> {
+    Ok(media::get_media_info(&path))
+}
+
+/// Read file as base64 data URL
+#[tauri::command]
+async fn read_media_data_url_cmd(path: String) -> Result<Option<String>, String> {
+    Ok(media::read_as_data_url(&path))
+}
+
+/// List media files in directory
+#[tauri::command]
+async fn list_media_files_cmd(dir: String) -> Result<Vec<media::MediaInfo>, String> {
+    Ok(media::list_media_files(&dir))
+}
+
+// ── Model Discovery Commands ──────────────────────────────────────────────
+
+/// Discover models from provider
+#[tauri::command]
+async fn discover_models_cmd(
+    provider: String,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<model_discovery::DiscoveryResult, String> {
+    Ok(model_discovery::discover_models(&provider, base_url.as_deref(), api_key.as_deref()).await)
+}
+
+/// Check if provider supports model discovery
+#[tauri::command]
+async fn is_discoverable_cmd(provider: String) -> Result<bool, String> {
+    Ok(model_discovery::is_discoverable(&provider))
+}
+
+/// Get OAuth provider models
+#[tauri::command]
+async fn get_oauth_models_cmd(provider: String) -> Result<Vec<model_discovery::DiscoveredModel>, String> {
+    Ok(model_discovery::get_oauth_models(&provider))
+}
+
+// ── Terminal Commands ─────────────────────────────────────────────────────
+
+/// Open terminal in directory
+#[tauri::command]
+async fn open_terminal_cmd(cwd: String) -> Result<terminal::TerminalResult, String> {
+    Ok(terminal::open_terminal(&cwd))
+}
+
+// ── Provider Registry Commands ────────────────────────────────────────────
+
+/// Get canonical base URL for provider
+#[tauri::command]
+async fn get_provider_base_url_cmd(provider: String) -> Result<Option<String>, String> {
+    Ok(provider_registry::canonical_base_url(&provider).map(|s| s.to_string()))
+}
+
+/// Get all provider base URLs
+#[tauri::command]
+async fn get_all_provider_urls_cmd() -> Result<std::collections::HashMap<String, String>, String> {
+    Ok(provider_registry::all_provider_urls())
+}
+
 // ── Registry Commands ─────────────────────────────────────────────────────
 
 /// Fetch registry catalog from GitHub
@@ -818,6 +888,19 @@ pub fn run() {
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
             ssh_tunnel_status_cmd,
+            // Media
+            get_media_info_cmd,
+            read_media_data_url_cmd,
+            list_media_files_cmd,
+            // Model Discovery
+            discover_models_cmd,
+            is_discoverable_cmd,
+            get_oauth_models_cmd,
+            // Terminal
+            open_terminal_cmd,
+            // Provider Registry
+            get_provider_base_url_cmd,
+            get_all_provider_urls_cmd,
             // Registry
             fetch_registry_catalog_cmd,
             get_installed_registry_cmd,
