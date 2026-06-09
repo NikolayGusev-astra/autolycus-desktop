@@ -37,6 +37,8 @@ jobs:
 
       - name: Build
         run: |
+          rm -rf node_modules/.vite
+          npx vite build
           npx tauri build --target x86_64-unknown-linux-gnu
 
       - name: Upload AppImage
@@ -70,11 +72,9 @@ jobs:
       - run: npm install
 
       - name: Build
-        shell: bash
         run: |
-          cargo clean
-          rm -rf node_modules/.vite dist
-          npm run build
+          rm -rf node_modules/.vite
+          npx vite build
           npx tauri build --target x86_64-pc-windows-msvc
 
       - name: Upload MSI
