@@ -11,6 +11,7 @@ mod memory;
 mod models;
 mod mcp;
 mod profiles;
+mod registry;
 mod sessions;
 mod skills;
 mod ssh;
@@ -602,6 +603,37 @@ async fn ssh_tunnel_status_cmd(
     Ok(ssh::is_tunnel_active(&state.ssh))
 }
 
+// ── Registry Commands ─────────────────────────────────────────────────────
+
+/// Fetch registry catalog from GitHub
+#[tauri::command]
+async fn fetch_registry_catalog_cmd() -> Result<registry::RegistryCatalog, String> {
+    registry::fetch_catalog().await
+}
+
+/// Get installed registry items
+#[tauri::command]
+async fn get_installed_registry_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<registry::InstalledRegistry, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    Ok(registry::get_installed(&hermes_home, profile.as_deref()))
+}
+
+/// Install from registry
+#[tauri::command]
+async fn install_from_registry_cmd(
+    state: State<'_, AppState>,
+    item: registry::RegistryItem,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    registry::install_from_registry(&hermes_home, profile.as_deref(), &item)
+}
+
 // ── Kanban Commands ───────────────────────────────────────────────────────
 
 /// List kanban boards
@@ -786,6 +818,10 @@ pub fn run() {
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
             ssh_tunnel_status_cmd,
+            // Registry
+            fetch_registry_catalog_cmd,
+            get_installed_registry_cmd,
+            install_from_registry_cmd,
             // Kanban
             list_kanban_boards_cmd,
             create_kanban_board_cmd,

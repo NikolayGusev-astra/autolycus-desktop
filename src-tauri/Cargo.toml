@@ -22,7 +22,7 @@ dirs = "5"
 libc = "0.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
 futures = "0.3"
 ssh2 = "0.9"
 yaml-rust2 = "0.8"
