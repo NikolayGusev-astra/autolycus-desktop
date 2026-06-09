@@ -1,10 +1,11 @@
 // src-tauri/src/lib.rs
-// Autolycus Desktop v0.4.0 — Rust backend
+// Autolycus Desktop v0.5.0 — Rust backend
 // Ported from fathah/hermes-desktop (v0.5.8)
 
 mod chat;
 mod config;
 mod cronjobs;
+mod discovery;
 mod gateway;
 mod kanban;
 mod media;
@@ -127,6 +128,12 @@ async fn detect_instances() -> Result<Vec<InstanceInfo>, String> {
 async fn check_python_path(path: String) -> Result<bool, String> {
     let expanded = config::expand_tilde(&path);
     Ok(PathBuf::from(&expanded).exists())
+}
+
+/// Detect local instances with version, gateway status, etc.
+#[tauri::command]
+async fn detect_local_instances_cmd() -> Result<Vec<discovery::DetectedInstance>, String> {
+    Ok(discovery::detect_local_instances())
 }
 
 /// Get app version
@@ -580,6 +587,68 @@ async fn uninstall_skill_cmd(
     skills::uninstall_skill(&hermes_home, profile.as_deref(), &name)
 }
 
+// ── Memory Commands ──────────────────────────────────────────────────────
+
+/// Read memory (memory.md + user.md + stats)
+#[tauri::command]
+async fn read_memory_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<memory::MemoryReadResult, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    Ok(memory::read_memory(&hermes_home, profile.as_deref()))
+}
+
+/// Write user profile (user.md)
+#[tauri::command]
+async fn write_user_profile_cmd(
+    state: State<'_, AppState>,
+    content: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    memory::write_user_profile(&hermes_home, profile.as_deref(), &content)
+}
+
+/// Add memory entry
+#[tauri::command]
+async fn add_memory_entry_cmd(
+    state: State<'_, AppState>,
+    content: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    memory::add_memory_entry(&hermes_home, profile.as_deref(), &content)
+}
+
+/// Update memory entry
+#[tauri::command]
+async fn update_memory_entry_cmd(
+    state: State<'_, AppState>,
+    index: usize,
+    content: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    memory::update_memory_entry(&hermes_home, profile.as_deref(), index, &content)
+}
+
+/// Remove memory entry
+#[tauri::command]
+async fn remove_memory_entry_cmd(
+    state: State<'_, AppState>,
+    index: usize,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    memory::remove_memory_entry(&hermes_home, profile.as_deref(), index)
+}
+
 // ── SSH Commands ──────────────────────────────────────────────────────────
 
 /// Start SSH tunnel
@@ -877,6 +946,83 @@ async fn validate_chat_readiness_cmd(
     Ok(validation::validate_chat_readiness(&hermes_home, profile.as_deref()))
 }
 
+// ── Cron Jobs Commands ───────────────────────────────────────────────────
+
+/// List cron jobs
+#[tauri::command]
+async fn list_cron_jobs_cmd(
+    state: State<'_, AppState>,
+    include_disabled: Option<bool>,
+    profile: Option<String>,
+) -> Result<Vec<cronjobs::CronJob>, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    Ok(cronjobs::list_cron_jobs(&hermes_home, profile.as_deref(), include_disabled.unwrap_or(true)))
+}
+
+/// Create cron job
+#[tauri::command]
+async fn create_cron_job_cmd(
+    state: State<'_, AppState>,
+    schedule: String,
+    prompt: Option<String>,
+    name: Option<String>,
+    deliver: Option<String>,
+    profile: Option<String>,
+) -> Result<cronjobs::CronJob, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    cronjobs::create_cron_job(&hermes_home, profile.as_deref(), &schedule, prompt.as_deref(), name.as_deref(), deliver.as_deref())
+}
+
+/// Remove cron job
+#[tauri::command]
+async fn remove_cron_job_cmd(
+    state: State<'_, AppState>,
+    job_id: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    cronjobs::remove_cron_job(&hermes_home, profile.as_deref(), &job_id)
+}
+
+/// Pause cron job
+#[tauri::command]
+async fn pause_cron_job_cmd(
+    state: State<'_, AppState>,
+    job_id: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    cronjobs::pause_cron_job(&hermes_home, profile.as_deref(), &job_id)
+}
+
+/// Resume cron job
+#[tauri::command]
+async fn resume_cron_job_cmd(
+    state: State<'_, AppState>,
+    job_id: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    cronjobs::resume_cron_job(&hermes_home, profile.as_deref(), &job_id)
+}
+
+/// Trigger cron job
+#[tauri::command]
+async fn trigger_cron_job_cmd(
+    state: State<'_, AppState>,
+    job_id: String,
+    profile: Option<String>,
+) -> Result<String, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    cronjobs::trigger_cron_job(&hermes_home, profile.as_deref(), &job_id)
+}
+
 // ── Entry Point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -889,6 +1035,7 @@ pub fn run() {
             init_app,
             detect_instances,
             check_python_path,
+            detect_local_instances_cmd,
             get_app_version,
             // Connection
             get_connection_config,
@@ -927,6 +1074,12 @@ pub fn run() {
             get_skill_content_cmd,
             install_skill_cmd,
             uninstall_skill_cmd,
+            // Memory
+            read_memory_cmd,
+            write_user_profile_cmd,
+            add_memory_entry_cmd,
+            update_memory_entry_cmd,
+            remove_memory_entry_cmd,
             // SSH
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
@@ -964,6 +1117,13 @@ pub fn run() {
             move_kanban_task_cmd,
             // Validation
             validate_chat_readiness_cmd,
+            // Cron Jobs
+            list_cron_jobs_cmd,
+            create_cron_job_cmd,
+            remove_cron_job_cmd,
+            pause_cron_job_cmd,
+            resume_cron_job_cmd,
+            trigger_cron_job_cmd,
             // Config Health
             config_health_check_cmd,
         ])

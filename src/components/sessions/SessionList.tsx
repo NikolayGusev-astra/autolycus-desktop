@@ -4,6 +4,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Search, Trash2, MessageSquare, Loader } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface SessionSummary {
   id: string;
@@ -21,6 +22,7 @@ export function SessionList() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const { t } = useTranslation();
 
   const loadSessions = useCallback(async () => {
     try {
@@ -105,7 +107,7 @@ export function SessionList() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              placeholder="Поиск сессий..."
+              placeholder={t("session_search_placeholder")}
               className="ac-input w-full pl-9 pr-3 py-2 text-sm"
             />
           </div>
@@ -113,7 +115,7 @@ export function SessionList() {
             onClick={handleSearch}
             className="ac-btn px-4 py-2 text-sm"
           >
-            Найти
+            {t("session_search_button")}
           </button>
         </div>
       </div>
@@ -127,7 +129,7 @@ export function SessionList() {
         ) : filteredSessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-ac-stone text-sm">
             <MessageSquare className="w-8 h-8 mb-2 opacity-30" />
-            <p>Нет сессий</p>
+            <p>{t("no_sessions")}</p>
           </div>
         ) : (
           <div className="divide-y divide-ac-border/30">
@@ -154,11 +156,11 @@ export function SessionList() {
                       )}
                     </div>
                     <p className="text-xs text-ac-stone truncate">
-                      {session.preview || "Пустой чат"}
+                      {session.preview || t("empty_chat")}
                     </p>
                     <div className="flex items-center gap-3 mt-1 text-[10px] text-ac-stone/50">
                       <span>{formatDate(session.started_at)}</span>
-                      <span>{session.message_count} сообщений</span>
+                      <span>{session.message_count} {t("messages_count")}</span>
                       <span className="truncate max-w-[120px]">{session.source}</span>
                     </div>
                   </div>
@@ -168,7 +170,7 @@ export function SessionList() {
                       handleDelete(session.id);
                     }}
                     className="text-ac-stone/30 hover:text-ac-red transition-colors p-1"
-                    title="Удалить сессию"
+                    title={t("delete_session")}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -181,7 +183,7 @@ export function SessionList() {
 
       {/* Footer */}
       <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-stone/50 flex justify-between">
-        <span>{sessions.length} сессий</span>
+        <span>{sessions.length} {t("sessions_count")}</span>
         <span>SQLite state.db</span>
       </div>
     </div>

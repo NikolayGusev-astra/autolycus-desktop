@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, type KeyboardEvent } from "react";
 import { Send } from "lucide-react";
 import type { AgentStatus } from "../../lib/types";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface ChatInputProps {
   onSend: (message: string) => void;
@@ -8,21 +9,22 @@ interface ChatInputProps {
   agentStatus?: AgentStatus;
 }
 
-const STATUS_PLACEHOLDER: Record<AgentStatus, string> = {
-  idle: "Сообщение...",
-  thinking: "Агент думает...",
-  streaming: "Агент отвечает...",
-  tool_calling: "Выполняет команду...",
-  error: "Ошибка — попробуйте ещё раз",
+const STATUS_PLACEHOLDER_KEY: Record<AgentStatus, string> = {
+  idle: "chat_placeholder_idle",
+  thinking: "chat_placeholder_thinking",
+  streaming: "chat_placeholder_streaming",
+  tool_calling: "chat_placeholder_tool_calling",
+  error: "chat_placeholder_error",
 };
 
 export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputProps) {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { t } = useTranslation();
 
   const isBlocked = disabled || isSending || agentStatus === "thinking" || agentStatus === "streaming" || agentStatus === "tool_calling";
-  const placeholder = STATUS_PLACEHOLDER[agentStatus] || "Сообщение...";
+  const placeholder = t(STATUS_PLACEHOLDER_KEY[agentStatus] || "chat_placeholder_idle");
 
   const handleSend = useCallback(async () => {
     if (text.trim() && !isBlocked) {

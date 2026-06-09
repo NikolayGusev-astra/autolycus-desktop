@@ -1,6 +1,7 @@
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { invoke } from "@tauri-apps/api/core";
 import { Power, Cpu, Settings } from "lucide-react";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface HeaderProps {
   onSettingsClick: () => void;
@@ -14,13 +15,14 @@ export function Header({ onSettingsClick }: HeaderProps) {
     setAgentStatus,
     pipelineStatus,
   } = useGatewayStore();
+  const { t } = useTranslation();
 
   const statusLabel = {
-    idle: "готов",
-    thinking: "думает",
-    streaming: "отвечает",
-    tool_calling: "выполняет",
-    error: "ошибка",
+    idle: t("header_ready"),
+    thinking: t("header_thinking"),
+    streaming: t("header_streaming"),
+    tool_calling: t("header_tool_calling"),
+    error: t("header_error"),
   }[agentStatus];
 
   const handleDisconnect = async () => {
@@ -30,12 +32,12 @@ export function Header({ onSettingsClick }: HeaderProps) {
   };
 
   const modelName = pipelineStatus.model || "—";
+  const tokensUsed = pipelineStatus.tokensUsed ?? 0;
+  const tokensLimit = pipelineStatus.tokensLimit ?? 0;
   const tokensDisplay =
     pipelineStatus.tokensUsed !== undefined
-      ? `${(pipelineStatus.tokensUsed / 1000).toFixed(1)}K${
-          pipelineStatus.tokensLimit
-            ? `/${(pipelineStatus.tokensLimit / 1000).toFixed(0)}K`
-            : ""
+      ? `${(tokensUsed / 1000).toFixed(1)}K${
+          tokensLimit ? `/${(tokensLimit / 1000).toFixed(0)}K` : ""
         }`
       : "";
   const costDisplay =
@@ -43,11 +45,21 @@ export function Header({ onSettingsClick }: HeaderProps) {
       ? `$${pipelineStatus.costUsd.toFixed(3)}`
       : "";
 
+  // Context gauge: percentage of context used
+  const contextPercent =
+    tokensLimit > 0 ? Math.min((tokensUsed / tokensLimit) * 100, 100) : 0;
+  const gaugeColor =
+    contextPercent > 90
+      ? "bg-red-500"
+      : contextPercent > 70
+        ? "bg-yellow-500"
+        : "bg-emerald-500";
+
   return (
     <header className="px-5 py-1.5 flex items-center border-b border-ac-border bg-ac-pitch/70 backdrop-blur-sm gap-3">
       {/* Session tabs */}
       <div className="flex gap-0.5">
-        <button className="ac-tab active">Основной</button>
+        <button className="ac-tab active">{t("main_tab")}</button>
       </div>
 
       {/* Pipeline info */}
@@ -59,6 +71,21 @@ export function Header({ onSettingsClick }: HeaderProps) {
             <span className="opacity-60">{tokensDisplay}</span>
           )}
           {costDisplay && <span className="opacity-60">{costDisplay}</span>}
+
+          {/* Context gauge */}
+          {tokensLimit > 0 && (
+            <div className="flex items-center gap-1.5 ml-1">
+              <div className="w-16 h-1.5 bg-ac-pitch rounded-full overflow-hidden border border-ac-border/30">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${gaugeColor}`}
+                  style={{ width: `${contextPercent}%` }}
+                />
+              </div>
+              <span className="text-[10px] font-mono opacity-60">
+                {contextPercent.toFixed(0)}%
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -67,7 +94,7 @@ export function Header({ onSettingsClick }: HeaderProps) {
         <button
           onClick={onSettingsClick}
           className="text-ac-stone hover:text-ac-ivory transition-colors"
-          title="Настройки"
+          title={t("header_settings")}
         >
           <Settings className="w-3.5 h-3.5" />
         </button>
@@ -77,13 +104,13 @@ export function Header({ onSettingsClick }: HeaderProps) {
               connected ? "ac-pulse" : "ac-pulse ac-pulse-off"
             }
           />
-          <span>{connected ? statusLabel : "отключено"}</span>
+          <span>{connected ? statusLabel : t("header_disconnected")}</span>
         </div>
         {connected && (
           <button
             onClick={handleDisconnect}
             className="text-ac-stone hover:text-ac-red transition-colors"
-            title="Отключиться"
+            title={t("header_disconnect")}
           >
             <Power className="w-3.5 h-3.5" />
           </button>

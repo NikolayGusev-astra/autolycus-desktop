@@ -5,6 +5,7 @@ import { ToolOutput } from "./ToolOutput";
 import { ToolResultCard } from "./ToolResult";
 import { StreamingText } from "./StreamingText";
 import type { Message } from "../../lib/types";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface MessageBubbleProps {
   message: Message;
@@ -20,13 +21,14 @@ function hasToolResult(message: Message): boolean {
 export const MessageBubble = memo(function MessageBubble({
   message,
 }: MessageBubbleProps) {
+  const { t } = useTranslation();
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
 
   if (isUser) {
     return (
       <div className="ac-msg ac-msg-user">
-        <div className="ac-msg-avatar ac-msg-avatar-user">Я</div>
+        <div className="ac-msg-avatar ac-msg-avatar-user">{t("user_avatar")}</div>
         <div className="ac-msg-body ac-msg-body-user">{message.content}</div>
       </div>
     );

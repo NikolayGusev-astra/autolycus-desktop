@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Server, Loader, Play, Check, X, FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { useTranslation } from "../hooks/useTranslation";
 
 interface InstanceInfo {
   path: string;
@@ -24,6 +25,7 @@ export function ConnectScreen({
   const [instances, setInstances] = useState<InstanceInfo[]>([]);
   const [selectedIdx, setSelectedIdx] = useState<number>(-1);
   const [customPath, setCustomPath] = useState("");
+  const { t } = useTranslation();
 
   useEffect(() => {
     loadInstances();
@@ -62,21 +64,21 @@ export function ConnectScreen({
     <div className="fixed inset-0 bg-ac-pitch flex items-center justify-center">
       <div className="w-full max-w-md px-6">
         <div className="text-center mb-8">
-          <div className="ac-display mb-2">Автолик</div>
-          <p className="text-sm text-ac-stone">AI Ассистент</p>
+          <div className="ac-display mb-2">{t("autolycus_title")}</div>
+          <p className="text-sm text-ac-stone">{t("ai_assistant")}</p>
         </div>
 
         <div className="ac-card">
           <div className="flex items-center gap-2 mb-4">
             <Server className="w-4 h-4 text-ac-amber" />
-            <span className="ac-section-title">Подключение к агенту</span>
+            <span className="ac-section-title">{t("connect_title")}</span>
           </div>
 
           {/* Auto-detected instances */}
           {existingInstances.length > 0 && (
             <div className="mb-4">
               <label className="text-[11px] text-ac-stone mb-2 block">
-                Найденные установки:
+                {t("found_instances")}
               </label>
               <div className="space-y-1.5 max-h-32 overflow-y-auto">
                 {instances.map((inst, idx) => (
@@ -111,7 +113,7 @@ export function ConnectScreen({
           {/* Custom path input */}
           <div className="mb-4">
             <label className="text-[11px] text-ac-stone mb-1 block">
-              Или укажите путь к Python:
+              {t("or_specify_path")}
             </label>
             <input
               type="text"
@@ -129,7 +131,7 @@ export function ConnectScreen({
                 onClick={handleRetry}
                 className="text-ac-amber hover:underline text-[10px]"
               >
-                Повторить
+                {t("retry")}
               </button>
             </div>
           )}
@@ -146,12 +148,12 @@ export function ConnectScreen({
             {starting || connecting ? (
               <>
                 <Loader className="w-4 h-4 animate-spin" />
-                Запуск...
+                {t("starting")}
               </>
             ) : (
               <>
                 <Play className="w-4 h-4" />
-                Запустить
+                {t("start")}
               </>
             )}
           </button>
@@ -159,7 +161,7 @@ export function ConnectScreen({
 
         <div className="mt-4 text-center">
           <p className="text-[11px] text-ac-stone/50">
-            Автозапуск: desktop запустит Python backend и подключится к нему
+            {t("autostart_info")}
           </p>
         </div>
       </div>

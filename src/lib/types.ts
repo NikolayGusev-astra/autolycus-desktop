@@ -65,6 +65,27 @@ export interface ApprovalDecision {
   decision: "approved" | "denied" | "approved_always";
 }
 
+// ── Profile types ─────────────────────────────────────────────────────────
+
+export interface ProfileInfo {
+  name: string;
+  path: string;
+  is_default: boolean;
+  is_active: boolean;
+  model: string;
+  provider: string;
+  has_env: boolean;
+  has_soul: boolean;
+  skill_count: number;
+  gateway_running: boolean;
+}
+
+export interface ModelConfig {
+  provider: string;
+  model: string;
+  base_url: string;
+}
+
 export interface PipelineStatus {
   backend: "connected" | "disconnected" | "error";
   model?: string;

@@ -21,20 +21,31 @@ export interface ConnectionConfig {
   ssh: SshConfig;
 }
 
+export interface GatewayStatus {
+  connected: boolean;
+  model?: string;
+  tokensUsed?: number;
+  tokensLimit?: number;
+  costUsd?: number;
+}
+
 interface ConnectionStore {
   config: ConnectionConfig;
   loading: boolean;
   error: string | null;
+  gatewayStatus: GatewayStatus;
   loadConfig: () => Promise<void>;
   saveConfig: (config: Partial<ConnectionConfig>) => Promise<boolean>;
   testConnection: (mode: ConnectionMode, url?: string, ssh?: SshConfig) => Promise<boolean>;
+  fetchGatewayStatus: () => Promise<void>;
+  setGatewayStatus: (status: GatewayStatus) => void;
 }
 
 const DEFAULT_SSH: SshConfig = {
   host: "",
   port: 22,
-  username: "root",
-  key_path: "~/.ssh/id_rsa",
+  username: "",
+  key_path: "",
   remote_port: 8642,
   local_port: 18642,
 };
@@ -47,10 +58,19 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   ssh: DEFAULT_SSH,
 };
 
+const DEFAULT_GATEWAY_STATUS: GatewayStatus = {
+  connected: false,
+  model: undefined,
+  tokensUsed: undefined,
+  tokensLimit: undefined,
+  costUsd: undefined,
+};
+
 export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   config: DEFAULT_CONFIG,
   loading: false,
   error: null,
+  gatewayStatus: DEFAULT_GATEWAY_STATUS,
 
   loadConfig: async () => {
     try {
@@ -98,4 +118,30 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       return false;
     }
   },
+
+  fetchGatewayStatus: async () => {
+    try {
+      const status = await invoke<{
+        model?: string;
+        tokens_used?: number;
+        tokens_limit?: number;
+        cost_usd?: number;
+      }>("gateway_status_cmd");
+      if (status) {
+        set({
+          gatewayStatus: {
+            connected: true,
+            model: status.model,
+            tokensUsed: status.tokens_used,
+            tokensLimit: status.tokens_limit,
+            costUsd: status.cost_usd,
+          },
+        });
+      }
+    } catch {
+      // gateway_status_cmd may not exist yet
+    }
+  },
+
+  setGatewayStatus: (gatewayStatus) => set({ gatewayStatus }),
 }));

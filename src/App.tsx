@@ -1,5 +1,6 @@
 // src/App.tsx
 // v0.5.0: Multi-mode connection, kanban, extended settings
+// Flow: Splash → Welcome → Connection → Main
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -12,10 +13,35 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { KanbanBoard } from "./components/kanban/KanbanBoard";
+import { MemoryScreen } from "./components/memory/MemoryScreen";
+import { SkillsScreen } from "./components/skills/SkillsScreen";
+import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
+import { ProfilesScreen } from "./components/profiles/ProfilesScreen";
+import { SplashScreen } from "./components/SplashScreen";
+import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
+import { useTranslation } from "./hooks/useTranslation";
+
+type AppScreen = "splash" | "welcome" | "connection" | "main";
+
+/** Placeholder for sidebar tabs that don't have a real component yet */
+function ComingSoon({ tab }: { tab: string }) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-center">
+        <p className="text-lg font-medium text-ac-stone mb-1 capitalize">
+          {tab}
+        </p>
+        <p className="text-sm text-ac-stone/50">{t("misc.comingSoon")}</p>
+      </div>
+    </div>
+  );
+}
 
 export function App() {
+  const [screen, setScreen] = useState<AppScreen>("splash");
   const [activeTab, setActiveTab] = useState("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { sidebarOpen } = useUIStore();
@@ -32,7 +58,9 @@ export function App() {
   useEffect(() => {
     const init = async () => {
       try {
-        const result = await invoke<{ hermes_home: string; version: string }>("init_app");
+        const result = await invoke<{ hermes_home: string; version: string }>(
+          "init_app"
+        );
         setHermesHome(result.hermes_home);
       } catch (err) {
         console.error("Failed to initialize app:", err);
@@ -40,6 +68,20 @@ export function App() {
     };
     init();
   }, [setHermesHome]);
+
+  const handleSplashComplete = useCallback((autoconnect: boolean) => {
+    setScreen(autoconnect ? "connection" : "welcome");
+  }, []);
+
+  const handleGetStarted = useCallback(() => {
+    setScreen("connection");
+  }, []);
+
+  const handleConnected = useCallback(() => {
+    setConnected(true);
+    setError(null);
+    setScreen("main");
+  }, [setConnected, setError]);
 
   const handleApprovalDecision = useCallback(
     async (decision: "approved" | "denied" | "approved_always") => {
@@ -66,18 +108,22 @@ export function App() {
     [setPendingApproval]
   );
 
-  if (!connected) {
-    return (
-      <ConnectionScreen
-        onConnected={() => {
-          setConnected(true);
-          setError(null);
-        }}
-        error={error}
-      />
-    );
+  // ── Screen router ────────────────────────────────────────────────────────
+
+  // Splash → Welcome → Connection → Main
+  if (screen === "splash") {
+    return <SplashScreen onComplete={handleSplashComplete} />;
   }
 
+  if (screen === "welcome") {
+    return <WelcomeScreen onGetStarted={handleGetStarted} />;
+  }
+
+  if (screen === "connection" && !connected) {
+    return <ConnectionScreen onConnected={handleConnected} error={error} />;
+  }
+
+  // Main UI (or auto-transitioned from connection → main)
   return (
     <div className="flex h-full">
       {sidebarOpen && (
@@ -88,6 +134,7 @@ export function App() {
         <Header onSettingsClick={() => setSettingsOpen(true)} />
 
         <div className="flex-1 overflow-hidden">
+          {/* Real components */}
           {activeTab === "chat" && (
             <>
               <ChatView />
@@ -105,12 +152,22 @@ export function App() {
           )}
           {activeTab === "sessions" && <SessionList />}
           {activeTab === "kanban" && <KanbanBoard />}
+          {activeTab === "models" && <ProfilesScreen />}
+          {activeTab === "settings" && settingsOpen && (
+            <SettingsPanel onClose={() => setSettingsOpen(false)} />
+          )}
+
+          {/* Coming soon tabs */}
+          {activeTab === "memory" && <MemoryScreen />}
+          {activeTab === "skills" && <SkillsScreen />}
+          {activeTab === "providers" && <ComingSoon tab="Providers" />}
+          {activeTab === "schedules" && <SchedulesScreen />}
         </div>
 
         <StatusBar />
       </div>
 
-      {settingsOpen && (
+      {settingsOpen && activeTab !== "settings" && (
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
       )}
     </div>

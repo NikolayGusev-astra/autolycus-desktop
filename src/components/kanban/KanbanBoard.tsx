@@ -4,6 +4,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Trash, RefreshCw } from "lucide-react";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface KanbanTask {
   id: string;
@@ -35,14 +36,6 @@ interface KanbanBoardView {
   columns: KanbanColumn[];
 }
 
-const COLUMN_LABELS: Record<string, string> = {
-  backlog: "Backlog",
-  todo: "To Do",
-  in_progress: "In Progress",
-  review: "Review",
-  done: "Done",
-};
-
 const COLUMN_COLORS: Record<string, string> = {
   backlog: "border-gray-500",
   todo: "border-blue-500",
@@ -52,6 +45,7 @@ const COLUMN_COLORS: Record<string, string> = {
 };
 
 export function KanbanBoard() {
+  const { t } = useTranslation();
   const [boards, setBoards] = useState<Array<{ slug: string; name: string; total?: number }>>([]);
   const [activeBoard, setActiveBoard] = useState<string | null>(null);
   const [boardView, setBoardView] = useState<KanbanBoardView | null>(null);
@@ -127,7 +121,7 @@ export function KanbanBoard() {
   };
 
   const handleCreateBoard = async () => {
-    const name = prompt("Название доски:");
+    const name = prompt(t("create_board_prompt"));
     if (!name) return;
     const slug = name.toLowerCase().replace(/\s+/g, "-");
     try {
@@ -142,10 +136,14 @@ export function KanbanBoard() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <Layers className="w-12 h-12 text-ac-stone mx-auto mb-4" />
-          <p className="text-ac-stone mb-4">Нет канбан-досок</p>
+          <svg className="w-12 h-12 text-ac-stone mx-auto mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+          <p className="text-ac-stone mb-4">{t("no_boards")}</p>
           <button onClick={handleCreateBoard} className="ac-btn px-4 py-2 text-sm">
-            + Создать доску
+            {t("create_board")}
           </button>
         </div>
       </div>
@@ -167,15 +165,15 @@ export function KanbanBoard() {
             </option>
           ))}
         </select>
-        <button onClick={handleCreateBoard} className="ac-btn px-2 py-1 text-xs" title="Создать доску">
+        <button onClick={handleCreateBoard} className="ac-btn px-2 py-1 text-xs" title={t("create_board")}>
           <Plus className="w-3 h-3" />
         </button>
-        <button onClick={() => activeBoard && loadBoard(activeBoard)} className="ac-btn px-2 py-1 text-xs" title="Обновить">
+        <button onClick={() => activeBoard && loadBoard(activeBoard)} className="ac-btn px-2 py-1 text-xs" title={t("refresh")}>
           <RefreshCw className="w-3 h-3" />
         </button>
         {activeBoard && (
           <button onClick={() => setShowAddTask(!showAddTask)} className="ac-btn px-2 py-1 text-xs">
-            + Задача
+            {t("add_task")}
           </button>
         )}
       </div>
@@ -188,15 +186,15 @@ export function KanbanBoard() {
             value={newTaskTitle}
             onChange={(e) => setNewTaskTitle(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAddTask()}
-            placeholder="Название задачи..."
+            placeholder={t("task_name_placeholder")}
             className="ac-input flex-1 px-3 py-1.5 text-sm"
             autoFocus
           />
           <button onClick={handleAddTask} className="ac-btn px-3 py-1 text-xs">
-            Добавить
+            {t("task_add")}
           </button>
           <button onClick={() => setShowAddTask(false)} className="px-3 py-1 text-xs text-ac-stone">
-            Отмена
+            {t("task_cancel")}
           </button>
         </div>
       )}
@@ -204,7 +202,7 @@ export function KanbanBoard() {
       {/* Columns */}
       {loading ? (
         <div className="flex items-center justify-center h-full">
-          <span className="text-ac-stone text-sm">Загрузка...</span>
+          <span className="text-ac-stone text-sm">{t("loading")}</span>
         </div>
       ) : boardView ? (
         <div className="flex gap-3 p-4 overflow-x-auto flex-1">
@@ -214,6 +212,7 @@ export function KanbanBoard() {
               column={col}
               onMoveTask={handleMoveTask}
               onDeleteTask={handleDeleteTask}
+              t={t}
             />
           ))}
         </div>
@@ -227,13 +226,15 @@ function KanbanColumnView({
   column,
   onMoveTask,
   onDeleteTask,
+  t,
 }: {
   column: KanbanColumn;
   onMoveTask: (taskId: string, newStatus: string) => void;
   onDeleteTask: (taskId: string) => void;
+  t: (key: any) => string;
 }) {
   const colorClass = COLUMN_COLORS[column.key] || "border-ac-border";
-  const label = COLUMN_LABELS[column.key] || column.key;
+  const label = t(column.key as any) || column.label;
 
   return (
     <div className="flex-shrink-0 w-56">
@@ -265,7 +266,7 @@ function KanbanColumnView({
                   onClick={() => onMoveTask(task.id, "backlog")}
                   className="px-1.5 py-0.5 text-[10px] text-ac-stone hover:text-ac-ivory border border-ac-border rounded"
                 >
-                  ← Backlog
+                  ← {t("backlog")}
                 </button>
               )}
               {column.key !== "done" && (
@@ -279,7 +280,7 @@ function KanbanColumnView({
                   }}
                   className="px-1.5 py-0.5 text-[10px] text-ac-stone hover:text-ac-ivory border border-ac-border rounded"
                 >
-                  → Next
+                  {t("next")}
                 </button>
               )}
             </div>
@@ -287,15 +288,5 @@ function KanbanColumnView({
         ))}
       </div>
     </div>
-  );
-}
-
-function Layers(props: React.SVGProps<SVGSVGElement> & { className?: string }) {
-  return (
-    <svg className={props.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M12 2L2 7l10 5 10-5-10-5z" />
-      <path d="M2 17l10 5 10-5" />
-      <path d="M2 12l10 5 10-5" />
-    </svg>
   );
 }

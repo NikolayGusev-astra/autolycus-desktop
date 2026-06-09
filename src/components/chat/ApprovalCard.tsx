@@ -1,5 +1,6 @@
 import { Shield, X, Check, RefreshCw } from "lucide-react";
 import type { ApprovalRequest } from "../../lib/types";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface ApprovalCardProps {
   request: ApprovalRequest;
@@ -34,6 +35,7 @@ export function ApprovalCard({
   onDeny,
   onApproveAlways,
 }: ApprovalCardProps) {
+  const { t } = useTranslation();
   const colorClass =
     CLASS_COLORS[request.commandClass] || CLASS_COLORS.write;
   const classLabel =
@@ -46,7 +48,7 @@ export function ApprovalCard({
         <div className="flex items-center gap-2 mb-2">
           <Shield className="w-4 h-4 text-ac-amber flex-shrink-0" />
           <span className="text-sm font-semibold text-ac-ivory">
-            Подтверждение действия
+            {t("approval.title")}
           </span>
           <span
             className={`ml-auto text-[10px] px-2 py-0.5 rounded border font-medium ${colorClass}`}
@@ -77,21 +79,21 @@ export function ApprovalCard({
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-border text-ac-stone hover:text-ac-ivory hover:border-ac-stone transition-colors"
           >
             <X className="w-3 h-3" />
-            Отклонить
+            {t("approval.deny")}
           </button>
           <button
             onClick={onApprove}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs ac-btn"
           >
             <Check className="w-3 h-3" />
-            Разово
+            {t("approval.approve")}
           </button>
           <button
             onClick={onApproveAlways}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-amber/30 text-ac-amber hover:bg-ac-amber/10 transition-colors"
           >
             <RefreshCw className="w-3 h-3" />
-            Всегда
+            {t("approval.approveAlways")}
           </button>
         </div>
       </div>
