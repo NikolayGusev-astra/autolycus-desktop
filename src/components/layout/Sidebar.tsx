@@ -1,4 +1,4 @@
-import { MessageSquare, Settings, Plus, Bot } from "lucide-react";
+import { MessageSquare, Settings, Plus, Bot, Layers } from "lucide-react";
 import { useUIStore } from "../../stores/uiStore";
 
 interface SidebarProps {
@@ -11,6 +11,7 @@ export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
 
   const tabs = [
     { id: "chat", icon: MessageSquare, label: "Чат" },
+    { id: "kanban", icon: Layers, label: "Канбан" },
     { id: "sessions", icon: Plus, label: "Сессии" },
     { id: "settings", icon: Settings, label: "Настройки" },
   ];

@@ -1,8 +1,12 @@
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { invoke } from "@tauri-apps/api/core";
-import { Power, Cpu } from "lucide-react";
+import { Power, Cpu, Settings } from "lucide-react";
 
-export function Header() {
+interface HeaderProps {
+  onSettingsClick: () => void;
+}
+
+export function Header({ onSettingsClick }: HeaderProps) {
   const {
     agentStatus,
     connected,
@@ -46,7 +50,7 @@ export function Header() {
         <button className="ac-tab active">Основной</button>
       </div>
 
-      {/* Pipeline info (v0.3.0) */}
+      {/* Pipeline info */}
       {connected && (
         <div className="flex items-center gap-2 text-[11px] text-ac-stone ml-2">
           <Cpu className="w-3 h-3" />
@@ -60,6 +64,13 @@ export function Header() {
 
       {/* Right side */}
       <div className="ml-auto flex items-center gap-2.5 text-[11px] text-ac-stone">
+        <button
+          onClick={onSettingsClick}
+          className="text-ac-stone hover:text-ac-ivory transition-colors"
+          title="Настройки"
+        >
+          <Settings className="w-3.5 h-3.5" />
+        </button>
         <div className="flex items-center gap-1.5">
           <span
             className={

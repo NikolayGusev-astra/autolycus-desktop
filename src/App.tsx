@@ -1,5 +1,5 @@
 // src/App.tsx
-// v0.4.0: Multi-mode connection (local/remote/ssh), session management, profile support
+// v0.5.0: Multi-mode connection, kanban, extended settings
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -11,6 +11,7 @@ import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
+import { KanbanBoard } from "./components/kanban/KanbanBoard";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
 
@@ -84,7 +85,7 @@ export function App() {
       )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        <Header />
+        <Header onSettingsClick={() => setSettingsOpen(true)} />
 
         <div className="flex-1 overflow-hidden">
           {activeTab === "chat" && (
@@ -103,6 +104,7 @@ export function App() {
             </>
           )}
           {activeTab === "sessions" && <SessionList />}
+          {activeTab === "kanban" && <KanbanBoard />}
         </div>
 
         <StatusBar />
