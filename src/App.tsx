@@ -17,6 +17,7 @@ import { MemoryScreen } from "./components/memory/MemoryScreen";
 import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
 import { ProfilesScreen } from "./components/profiles/ProfilesScreen";
+import { ProvidersScreen } from "./components/providers/ProvidersScreen";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
@@ -24,21 +25,6 @@ import { useUIStore } from "./stores/uiStore";
 import { useTranslation } from "./hooks/useTranslation";
 
 type AppScreen = "splash" | "welcome" | "connection" | "main";
-
-/** Placeholder for sidebar tabs that don't have a real component yet */
-function ComingSoon({ tab }: { tab: string }) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex-1 flex items-center justify-center">
-      <div className="text-center">
-        <p className="text-lg font-medium text-ac-stone mb-1 capitalize">
-          {tab}
-        </p>
-        <p className="text-sm text-ac-stone/50">{t("misc.comingSoon")}</p>
-      </div>
-    </div>
-  );
-}
 
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
@@ -160,7 +146,7 @@ export function App() {
           {/* Coming soon tabs */}
           {activeTab === "memory" && <MemoryScreen />}
           {activeTab === "skills" && <SkillsScreen />}
-          {activeTab === "providers" && <ComingSoon tab="Providers" />}
+          {activeTab === "providers" && <ProvidersScreen />}
           {activeTab === "schedules" && <SchedulesScreen />}
         </div>
 

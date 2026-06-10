@@ -1089,6 +1089,43 @@ async fn delete_credential_cmd(
     auth::delete_credential(service, account).await
 }
 
+// ── Credential Pool Commands ──────────────────────────────────────────────
+
+/// Get credential pool for all providers
+#[tauri::command]
+async fn get_credential_pool_cmd(
+    state: tauri::State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, Vec<auth::CredentialPoolEntry>>, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    auth::get_credential_pool(&hermes_home).await
+}
+
+/// Add credential pool entry
+#[tauri::command]
+async fn add_credential_pool_entry_cmd(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    key: String,
+    label: String,
+) -> Result<Vec<auth::CredentialPoolEntry>, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    auth::add_credential_pool_entry(&hermes_home, &provider, &key, &label).await
+}
+
+/// Set credential pool for a provider
+#[tauri::command]
+async fn set_credential_pool_cmd(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    entries: Vec<auth::CredentialPoolEntry>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    auth::set_credential_pool(&hermes_home, &provider, &entries).await
+}
+
 // ── Entry Point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1198,6 +1235,10 @@ pub fn run() {
             store_credential_cmd,
             get_credential_cmd,
             delete_credential_cmd,
+            // Credential Pool
+            get_credential_pool_cmd,
+            add_credential_pool_entry_cmd,
+            set_credential_pool_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -265,3 +265,83 @@ pub async fn delete_credential(
         .map_err(|e| format!("Failed to delete credential: {}", e))?;
     Ok(())
 }
+
+// ── Credential Pool ───────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialPoolEntry {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    pub auth_type: Option<String>,
+    pub priority: Option<i32>,
+    pub source: Option<String>,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub request_count: Option<i32>,
+    pub key: Option<String>,
+}
+
+fn pool_path(hermes_home: &PathBuf) -> PathBuf {
+    hermes_home.join("credential_pool.json")
+}
+
+pub async fn get_credential_pool(
+    hermes_home: &PathBuf,
+) -> Result<HashMap<String, Vec<CredentialPoolEntry>>, String> {
+    let path = pool_path(hermes_home);
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Failed to read pool: {}", e))?;
+    let pool: HashMap<String, Vec<CredentialPoolEntry>> = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse pool: {}", e))?;
+    Ok(pool)
+}
+
+pub async fn add_credential_pool_entry(
+    hermes_home: &PathBuf,
+    provider: &str,
+    key: &str,
+    label: &str,
+) -> Result<Vec<CredentialPoolEntry>, String> {
+    let mut pool = get_credential_pool(hermes_home).await?;
+    let entries = pool.entry(provider.to_string()).or_default();
+    entries.push(CredentialPoolEntry {
+        id: Some(format!("{}-{}", provider, entries.len())),
+        label: if label.is_empty() { None } else { Some(label.to_string()) },
+        auth_type: Some("api_key".to_string()),
+        priority: Some(entries.len() as i32),
+        source: Some("manual".to_string()),
+        access_token: Some(key.to_string()),
+        refresh_token: None,
+        api_key: None,
+        base_url: None,
+        request_count: Some(0),
+        key: None,
+    });
+    let result = entries.clone();
+    set_credential_pool(hermes_home, provider, &entries).await?;
+    Ok(result)
+}
+
+pub async fn set_credential_pool(
+    hermes_home: &PathBuf,
+    provider: &str,
+    entries: &[CredentialPoolEntry],
+) -> Result<(), String> {
+    let mut pool = get_credential_pool(hermes_home).await?;
+    pool.insert(provider.to_string(), entries.to_vec());
+    let content = serde_json::to_string_pretty(&pool)
+        .map_err(|e| format!("Failed to serialize pool: {}", e))?;
+    tokio::fs::write(pool_path(hermes_home), content)
+        .await
+        .map_err(|e| format!("Failed to write pool: {}", e))?;
+    Ok(())
+}
