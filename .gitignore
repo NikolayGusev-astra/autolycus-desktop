@@ -39,3 +39,7 @@ node_modules
 
 # Lock files (cross-platform CI handles per-platform resolution)
 package-lock.json
+artifacts/
+linux-appimage/
+linux-deb/
+windows-msi/

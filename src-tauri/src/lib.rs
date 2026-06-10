@@ -81,6 +81,13 @@ pub struct InstanceInfo {
     pub exists: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RemoteInstanceInfo {
+    pub path: String,
+    pub instance: String,
+    pub exists: bool,
+}
+
 // ── Tauri Commands ────────────────────────────────────────────────────────
 
 /// Initialize app — resolve hermes home, detect instances
@@ -138,6 +145,31 @@ async fn check_python_path(path: String) -> Result<bool, String> {
 #[tauri::command]
 async fn detect_local_instances_cmd() -> Result<Vec<discovery::DetectedInstance>, String> {
     Ok(discovery::detect_local_instances())
+}
+
+/// Detect Python/autolycus instances on a remote machine via SSH
+#[tauri::command]
+async fn detect_remote_instances_cmd(ssh_config: SshConfig) -> Result<Vec<RemoteInstanceInfo>, String> {
+    let candidates: Vec<(&str, &str)> = vec![
+        ("~/autolycus/venv/bin/python3", "autolycus"),
+        ("~/autolycus/venv/bin/python", "autolycus"),
+        ("~/.autolycus/venv/bin/python", "autolycus"),
+        ("~/.hermes/venv/bin/python", "hermes"),
+        ("~/.hermes/hermes-agent/venv/bin/python", "hermes-agent"),
+        ("/usr/local/bin/python3", "system"),
+    ];
+
+    let mut result = Vec::new();
+    for (path, instance) in candidates {
+        let exists = ssh::ssh_exec(&ssh_config, &format!("test -f {}", path), 15).is_ok();
+        result.push(RemoteInstanceInfo {
+            path: path.to_string(),
+            instance: instance.to_string(),
+            exists,
+        });
+    }
+
+    Ok(result)
 }
 
 /// Get app version
@@ -1175,6 +1207,7 @@ pub fn run() {
             detect_instances,
             check_python_path,
             detect_local_instances_cmd,
+            detect_remote_instances_cmd,
             get_app_version,
             get_versions_cmd,
             // Connection

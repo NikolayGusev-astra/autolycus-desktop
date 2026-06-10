@@ -1,3 +1,4 @@
+// src/components/ConnectionScreen.tsx
 import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ConnectScreen } from "./ConnectScreen";
@@ -8,10 +9,6 @@ interface ConnectionScreenProps {
   error: string | null;
 }
 
-/**
- * Wraps ConnectScreen to bridge its onStartLocal interface
- * with the onConnected interface expected by App.tsx.
- */
 export function ConnectionScreen({ onConnected, error }: ConnectionScreenProps) {
   const [connecting, setConnecting] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -29,7 +26,6 @@ export function ConnectionScreen({ onConnected, error }: ConnectionScreenProps) 
         );
         if (result.success) {
           setConnecting(true);
-          // Brief delay for gateway to become ready
           await new Promise((r) => setTimeout(r, 600));
           onConnected();
         } else {
@@ -48,6 +44,7 @@ export function ConnectionScreen({ onConnected, error }: ConnectionScreenProps) 
   return (
     <ConnectScreen
       onStartLocal={handleStartLocal}
+      onConnected={onConnected}
       connecting={connecting}
       starting={starting}
       error={localError}
