@@ -1,6 +1,6 @@
 [package]
 name = "autolycus-desktop"
-version = "0.6.0"
+version = "0.7.0"
 description = "Autolycus Desktop — native desktop AI assistant"
 authors = ["Autolycus Team"]
 license = "MIT"
@@ -29,3 +29,5 @@ yaml-rust2 = "0.8"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
+keyring = "2"
+regex = "1"

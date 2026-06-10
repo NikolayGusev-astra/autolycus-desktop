@@ -2,6 +2,7 @@
 // Autolycus Desktop v0.5.0 — Rust backend
 // Ported from fathah/hermes-desktop (v0.5.8)
 
+mod auth;
 mod chat;
 mod config;
 mod cronjobs;
@@ -45,6 +46,7 @@ pub struct AppState {
     pub gateway: GatewayState,
     pub ssh: SshState,
     pub hermes_home: Arc<Mutex<Option<PathBuf>>>,
+    pub auth: auth::AuthState,
 }
 
 use std::sync::Mutex;
@@ -55,6 +57,7 @@ impl AppState {
             gateway: GatewayState::new(),
             ssh: SshState::new(),
             hermes_home: Arc::new(Mutex::new(None)),
+            auth: auth::AuthState::new(),
         }
     }
 }
@@ -1023,6 +1026,69 @@ async fn trigger_cron_job_cmd(
     cronjobs::trigger_cron_job(&hermes_home, profile.as_deref(), &job_id)
 }
 
+// ── Auth Commands ─────────────────────────────────────────────────────────
+
+/// Start OAuth login flow for a provider
+#[tauri::command]
+async fn auth_login_cmd(
+    state: tauri::State<'_, AppState>,
+    app_handle: AppHandle,
+    provider: String,
+    profile: Option<String>,
+) -> Result<auth::OAuthLoginResult, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+
+    let (hermes_python, _hermes_repo) = gateway::find_hermes_python()
+        .map_err(|e| format!("Hermes Python not found: {}", e))?;
+
+    auth::run_oauth_login(
+        app_handle,
+        hermes_home,
+        hermes_python,
+        provider,
+        profile,
+        &state.auth,
+    )
+    .await
+}
+
+/// Cancel in-flight OAuth login
+#[tauri::command]
+async fn auth_cancel_cmd(
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    auth::cancel_oauth_login(&state.auth).await
+}
+
+/// Store credential in OS keyring
+#[tauri::command]
+async fn store_credential_cmd(
+    service: String,
+    account: String,
+    password: String,
+) -> Result<(), String> {
+    auth::store_credential(service, account, password).await
+}
+
+/// Get credential from OS keyring
+#[tauri::command]
+async fn get_credential_cmd(
+    service: String,
+    account: String,
+) -> Result<Option<String>, String> {
+    auth::get_credential(service, account).await
+}
+
+/// Delete credential from OS keyring
+#[tauri::command]
+async fn delete_credential_cmd(
+    service: String,
+    account: String,
+) -> Result<(), String> {
+    auth::delete_credential(service, account).await
+}
+
 // ── Entry Point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1126,6 +1192,12 @@ pub fn run() {
             trigger_cron_job_cmd,
             // Config Health
             config_health_check_cmd,
+            // Auth
+            auth_login_cmd,
+            auth_cancel_cmd,
+            store_credential_cmd,
+            get_credential_cmd,
+            delete_credential_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
