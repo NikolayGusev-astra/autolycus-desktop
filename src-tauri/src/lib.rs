@@ -146,6 +146,29 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Get all version info
+#[tauri::command]
+fn get_versions_cmd() -> VersionsInfo {
+    VersionsInfo {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        tauri_version: tauri::VERSION.to_string(),
+        rust_version: option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown").to_string(),
+        node_version: std::env::var("npm_config_node_version").unwrap_or_else(|_| "unknown".into()),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct VersionsInfo {
+    app_version: String,
+    tauri_version: String,
+    rust_version: String,
+    node_version: String,
+    os: String,
+    arch: String,
+}
+
 // ── Connection Commands ───────────────────────────────────────────────────
 
 /// Get connection config
@@ -1153,6 +1176,7 @@ pub fn run() {
             check_python_path,
             detect_local_instances_cmd,
             get_app_version,
+            get_versions_cmd,
             // Connection
             get_connection_config,
             set_connection_config,

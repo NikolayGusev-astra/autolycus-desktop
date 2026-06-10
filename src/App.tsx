@@ -23,6 +23,9 @@ import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ThemeProvider } from "./components/ThemeProvider";
 import { DiagnoseScreen } from "./components/settings/DiagnoseScreen";
+import { GatewayScreen } from "./components/gateway/GatewayScreen";
+import { ToolsScreen } from "./components/tools/ToolsScreen";
+import { Versions } from "./components/Versions";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
 
@@ -153,6 +156,9 @@ export function App() {
           {activeTab === "skills" && <SkillsScreen />}
           {activeTab === "providers" && <ProvidersScreen />}
           {activeTab === "diagnose" && <DiagnoseScreen />}
+          {activeTab === "gateway" && <GatewayScreen />}
+          {activeTab === "tools" && <ToolsScreen />}
+          {activeTab === "versions" && <Versions />}
           {activeTab === "schedules" && <SchedulesScreen />}
         </div>
 
