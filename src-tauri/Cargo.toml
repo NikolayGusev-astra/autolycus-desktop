@@ -1,6 +1,6 @@
 [package]
 name = "autolycus-desktop"
-version = "0.7.0"
+version = "0.8.1"
 description = "Autolycus Desktop — native desktop AI assistant"
 authors = ["Autolycus Team"]
 license = "MIT"
