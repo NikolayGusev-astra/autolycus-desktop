@@ -18,6 +18,7 @@ import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
 import { ProfilesScreen } from "./components/profiles/ProfilesScreen";
 import { ProvidersScreen } from "./components/providers/ProvidersScreen";
+import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
@@ -120,6 +121,7 @@ export function App() {
         <Header onSettingsClick={() => setSettingsOpen(true)} />
 
         <div className="flex-1 overflow-hidden">
+          <ConfigHealthBanner profile={undefined} />
           {/* Real components */}
           {activeTab === "chat" && (
             <>

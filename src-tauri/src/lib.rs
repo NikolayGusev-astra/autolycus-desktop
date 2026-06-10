@@ -5,6 +5,7 @@
 mod auth;
 mod chat;
 mod config;
+mod config_health;
 mod cronjobs;
 mod discovery;
 mod gateway;
