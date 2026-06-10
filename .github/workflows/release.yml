@@ -36,8 +36,9 @@ jobs:
       - run: npm install
 
       - name: Build
+        shell: bash
         run: |
-          rm -rf node_modules/.vite
+          rm -rf node_modules/.vite || true
           npx vite build
           npx tauri build --target x86_64-unknown-linux-gnu
 
@@ -72,8 +73,9 @@ jobs:
       - run: npm install
 
       - name: Build
+        shell: bash
         run: |
-          rm -rf node_modules/.vite
+          rm -rf node_modules/.vite || true
           npx vite build
           npx tauri build --target x86_64-pc-windows-msvc
 
