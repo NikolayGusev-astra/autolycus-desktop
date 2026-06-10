@@ -322,6 +322,40 @@ async fn get_gateway_port_cmd(
     Ok(gateway::get_gateway_port(&state.gateway, profile.as_deref()))
 }
 
+/// Start gateway on remote machine via SSH
+#[tauri::command]
+async fn start_remote_gateway_cmd(
+    ssh_config: SshConfig,
+    python_path: String,
+) -> Result<GatewayStartResult, String> {
+    let remote_port = ssh_config.remote_port;
+    
+    // Start remote gateway via SSH in background
+    let cmd = format!(
+        "nohup {} -m hermes gateway --port {} > /tmp/gateway.log 2>&1 &",
+        python_path, remote_port
+    );
+    
+    ssh::ssh_exec(&ssh_config, &cmd, 10)?;
+    
+    // Wait for gateway to start
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    
+    // Check if gateway is running on remote
+    let check_cmd = format!("curl -sf http://127.0.0.1:{}/health 2>/dev/null || echo fail", remote_port);
+    let output = ssh::ssh_exec(&ssh_config, &check_cmd, 5)?;
+    
+    let success = !output.trim().is_empty() && !output.contains("fail");
+    
+    Ok(GatewayStartResult {
+        success,
+        running: success,
+        already_running: None,
+        error: if success { None } else { Some("Remote gateway health check failed".to_string()) },
+        log_path: Some("/tmp/gateway.log".to_string()),
+    })
+}
+
 // ── Chat Commands ─────────────────────────────────────────────────────────
 
 /// Send chat message
@@ -1257,6 +1291,7 @@ pub fn run() {
             start_ssh_tunnel_cmd,
             stop_ssh_tunnel_cmd,
             ssh_tunnel_status_cmd,
+            start_remote_gateway_cmd,
             // Telegram
             send_telegram_message_cmd,
             validate_telegram_bot_token_cmd,

@@ -188,7 +188,7 @@ pub fn test_ssh_connection(config: &SshConfig) -> Result<bool, String> {
 pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<String, String> {
     let key_path = expand_tilde(&config.key_path);
 
-    let mut child = Command::new("ssh")
+    let output = Command::new("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -201,33 +201,16 @@ pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<
         .arg(config.port.to_string())
         .arg(format!("{}@{}", config.username, config.host))
         .arg(command)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .map_err(|e| format!("SSH exec failed: {}", e))?;
 
-    // Wait with timeout
-    let start = Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    // Read stdout
-                    // Note: we need to read before wait, this is simplified
-                    return Ok("".to_string());
-                } else {
-                    return Err(format!("SSH command failed with status: {}", status));
-                }
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    return Err("SSH command timed out".to_string());
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("SSH wait error: {}", e)),
-        }
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("SSH command failed ({}): {}", output.status, stderr))
     }
 }

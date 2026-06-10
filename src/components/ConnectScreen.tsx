@@ -303,15 +303,38 @@ function SshConnect({ onConnected }: { onConnected: () => void }) {
         sshRemotePort: cfg.remote_port, sshLocalPort: cfg.local_port,
       });
 
+      // Test SSH connection first
+      const sshOk = await invoke<boolean>("test_connection", {
+        mode: "ssh", url: "", sshConfig: cfg,
+      });
+      if (!sshOk) {
+        setStatus("error");
+        setStatusMsg("SSH connection failed — check host, port, key");
+        setTesting(false);
+        return;
+      }
+
       // Start tunnel
       await invoke("start_ssh_tunnel_cmd", { sshConfig: cfg });
-      setStatus("ok");
-      setStatusMsg("SSH tunnel established!");
-      if (selectedRemoteIdx >= 0) {
-        // Start gateway through tunnel
-        await invoke("start_gateway_cmd", { profile: null });
+      
+      // Start gateway on remote machine via SSH
+      const remotePython = selectedRemoteIdx >= 0 
+        ? remoteInstances[selectedRemoteIdx].path 
+        : "~/autolycus/venv/bin/python";
+      
+      const gwResult = await invoke<{success: boolean; error?: string}>("start_remote_gateway_cmd", {
+        sshConfig: cfg,
+        pythonPath: remotePython,
+      });
+      
+      if (gwResult && gwResult.success) {
+        setStatus("ok");
+        setStatusMsg("SSH tunnel + remote gateway ready!");
+        setTimeout(onConnected, 800);
+      } else {
+        setStatus("error");
+        setStatusMsg(gwResult?.error || "Failed to start remote gateway");
       }
-      setTimeout(onConnected, 800);
     } catch (err) {
       setStatus("error");
       setStatusMsg(String(err));
