@@ -114,3 +114,44 @@ pub fn run_health_check(hermes_home: &PathBuf, profile: Option<&str>) -> Result<
         ran_at: chrono::Utc::now().timestamp(),
     })
 }
+
+/// Attempt to auto-fix a specific config health issue
+pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) -> Result<String, String> {
+    match code {
+        "ENV_MISSING" => {
+            let env_path = hermes_home.join(".env");
+            std::fs::write(env_path, "# Autolycus environment variables\n")
+                .map_err(|e| format!("Failed to create .env: {}", e))?;
+            Ok("Created .env file".to_string())
+        }
+        "CONFIG_MISSING" => {
+            let config_path = if let Some(p) = profile {
+                hermes_home.join("profiles").join(p).join("config.yaml")
+            } else {
+                hermes_home.join("config.yaml")
+            };
+            if let Some(parent) = config_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create config directory: {}", e))?;
+            }
+            let default_config = "\
+# Autolycus Configuration
+model:
+  provider: auto
+  name: auto
+gateway:
+  port: 8000
+  host: 127.0.0.1
+";
+            std::fs::write(&config_path, default_config)
+                .map_err(|e| format!("Failed to create config: {}", e))?;
+            Ok(format!("Created default config at {}", config_path.display()))
+        }
+        "HERMES_HOME_MISSING" => {
+            std::fs::create_dir_all(hermes_home)
+                .map_err(|e| format!("Failed to create hermes home: {}", e))?;
+            Ok(format!("Created directory: {}", hermes_home.display()))
+        }
+        _ => Err(format!("No auto-fix available for issue: {}", code)),
+    }
+}

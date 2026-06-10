@@ -22,6 +22,7 @@ import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ThemeProvider } from "./components/ThemeProvider";
+import { DiagnoseScreen } from "./components/settings/DiagnoseScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
 
@@ -151,6 +152,7 @@ export function App() {
           {activeTab === "memory" && <MemoryScreen />}
           {activeTab === "skills" && <SkillsScreen />}
           {activeTab === "providers" && <ProvidersScreen />}
+          {activeTab === "diagnose" && <DiagnoseScreen />}
           {activeTab === "schedules" && <SchedulesScreen />}
         </div>
 

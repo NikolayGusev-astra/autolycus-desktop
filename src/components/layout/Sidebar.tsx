@@ -9,6 +9,7 @@ import {
   Timer,
   Settings,
   Bot,
+  Stethoscope,
 } from "lucide-react";
 import { useUIStore } from "../../stores/uiStore";
 import { useTranslation } from "../../hooks/useTranslation";
@@ -30,6 +31,7 @@ export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
     { id: "memory", icon: Brain, label: t("nav.memory") },
     { id: "skills", icon: Puzzle, label: t("nav.skills") },
     { id: "providers", icon: KeyRound, label: t("nav.providers") },
+    { id: "diagnose", icon: Stethoscope, label: t("nav.diagnose") },
     { id: "schedules", icon: Timer, label: t("nav.schedules") },
     { id: "settings", icon: Settings, label: t("nav.settings") },
   ];

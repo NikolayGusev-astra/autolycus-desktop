@@ -16,6 +16,7 @@ const translations = {
   'nav.memory': { en: 'Memory', ru: 'Память' },
   'nav.skills': { en: 'Skills', ru: 'Навыки' },
   'nav.providers': { en: 'Providers', ru: 'Провайдеры' },
+  'nav.diagnose': { en: 'Diagnose', ru: 'Диагностика' },
   'nav.schedules': { en: 'Schedules', ru: 'Расписания' },
   'nav.settings': { en: 'Settings', ru: 'Настройки' },
   'sidebar_collapse': { en: 'Collapse sidebar', ru: 'Свернуть панель' },

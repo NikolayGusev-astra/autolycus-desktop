@@ -937,6 +937,18 @@ async fn config_health_check_cmd(
     Ok(config::run_config_health_check(&hermes_home, profile.as_deref()))
 }
 
+/// Auto-fix a config health issue
+#[tauri::command]
+async fn auto_fix_config_cmd(
+    state: State<'_, AppState>,
+    code: String,
+    profile: Option<String>,
+) -> Result<String, String> {
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    config_health::auto_fix_issue(&hermes_home, &code, profile.as_deref())
+}
+
 // ── Validation Commands ───────────────────────────────────────────────────
 
 /// Validate chat readiness — pre-send check
@@ -1230,6 +1242,7 @@ pub fn run() {
             trigger_cron_job_cmd,
             // Config Health
             config_health_check_cmd,
+            auto_fix_config_cmd,
             // Auth
             auth_login_cmd,
             auth_cancel_cmd,
