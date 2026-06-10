@@ -30,7 +30,7 @@ const DISMISS_STORAGE_KEY = "autolycus-config-health-dismissed";
 
 function readDismissedStamp(): number {
   try {
-    const raw = localStorage.getItem(DISSMISS_STORAGE_KEY);
+    const raw = localStorage.getItem(DISMISS_STORAGE_KEY);
     return raw ? Number(raw) || 0 : 0;
   } catch {
     return 0;
@@ -39,7 +39,7 @@ function readDismissedStamp(): number {
 
 function rememberDismiss(ranAt: number) {
   try {
-    localStorage.setItem(DISSMISS_STORAGE_KEY, String(ranAt));
+    localStorage.setItem(DISMISS_STORAGE_KEY, String(ranAt));
   } catch {
     // localStorage unavailable
   }

@@ -6,5 +6,5 @@ import { t } from '../lib/i18n';
 
 export function useTranslation() {
   const lang = useUIStore((s) => s.language);
-  return { t: (key: Parameters<typeof t>[0]) => t(key, lang), lang };
+  return { t: (key: string, _params?: unknown) => t(key, lang), lang };
 }

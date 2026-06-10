@@ -17,13 +17,14 @@ import { MemoryScreen } from "./components/memory/MemoryScreen";
 import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
 import { ProfilesScreen } from "./components/profiles/ProfilesScreen";
-import { ProvidersScreen } from "./components/providers/ProvidersScreen";
+import ProvidersScreen from "./components/providers/ProvidersScreen";
 import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { ThemeProvider } from "./components/ThemeProvider";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
-import { useTranslation } from "./hooks/useTranslation";
+
 
 type AppScreen = "splash" | "welcome" | "connection" | "main";
 
@@ -112,6 +113,7 @@ export function App() {
 
   // Main UI (or auto-transitioned from connection → main)
   return (
+    <ThemeProvider>
     <div className="flex h-full">
       {sidebarOpen && (
         <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
@@ -159,5 +161,6 @@ export function App() {
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
       )}
     </div>
+    </ThemeProvider>
   );
 }
