@@ -40,7 +40,7 @@ export function ConnectScreen({
     <div className="fixed inset-0 bg-ac-pitch flex items-center justify-center">
       <div className="w-full max-w-md px-6">
         <div className="text-center mb-8">
-          <div className="ac-display mb-2">{t("autolycus_title")}</div>
+          <div className="ac-display mb-2">{t("steersman_title")}</div>
           <p className="text-sm text-ac-stone">{t("ai_assistant")}</p>
         </div>
 
@@ -146,7 +146,7 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
       <div className="mb-4">
         <label className="text-[11px] text-ac-stone mb-1 block">{t("or_specify_path")}</label>
         <input type="text" value={customPath} onChange={(e) => setCustomPath(e.target.value)}
-          placeholder="~/autolycus/venv/bin/python" className="ac-input w-full px-3 py-2 text-sm" />
+          placeholder="~/steersman/venv/bin/python" className="ac-input w-full px-3 py-2 text-sm" />
       </div>
 
       {error && (
@@ -320,7 +320,7 @@ function SshConnect({ onConnected }: { onConnected: () => void }) {
       // Start gateway on remote machine via SSH
       const remotePython = selectedRemoteIdx >= 0 
         ? remoteInstances[selectedRemoteIdx].path 
-        : "~/autolycus/venv/bin/python";
+        : "~/steersman/venv/bin/python";
       
       const gwResult = await invoke<{success: boolean; error?: string}>("start_remote_gateway_cmd", {
         sshConfig: cfg,

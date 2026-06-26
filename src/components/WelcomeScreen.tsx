@@ -92,7 +92,7 @@ export function WelcomeScreen({ onGetStarted, detectedInstances }: WelcomeScreen
 
         {/* Footer */}
         <p className="mt-8 text-[11px] text-ac-stone/40">
-          Autolycus Desktop v0.5.0
+          Штурман Desktop v0.5.0
         </p>
       </div>
     </div>

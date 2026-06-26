@@ -24,8 +24,8 @@ winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --add M
 
 ```powershell
 cd C:\Projects
-git clone https://github.com/NikolayGusev-astra/autolycus-desktop.git
-cd autolycus-desktop
+git clone https://github.com/NikolayGusev-astra/steersman-desktop.git
+cd steersman-desktop
 
 npm install
 npm run tauri build -- --target x86_64-pc-windows-msvc
@@ -35,13 +35,13 @@ npm run tauri build -- --target x86_64-pc-windows-msvc
 
 MSI установщик появится в:
 ```
-src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\Autolycus Desktop_0.3.0_x64_en-US.msi
+src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\Штурман Desktop_0.3.0_x64_en-US.msi
 ```
 
 ## Структура установщика
 
 - **Установка:** per-machine (для всех пользователей)
-- **Путь:** `C:\Program Files\Autolycus Desktop\`
+- **Путь:** `C:\Program Files\Штурман Desktop\`
 - **Языки:** English + Russian (авто-определение по системе)
 - **Ярлыки:** Рабочий стол + Меню Пуск
 - **Деинсталляция:** через "Удаление программ"

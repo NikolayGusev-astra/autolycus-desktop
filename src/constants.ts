@@ -1,4 +1,4 @@
-// src/constants.ts — shared constants for autolycus-desktop
+// src/constants.ts — shared constants for steersman-desktop
 
 export interface FieldDef {
   key: string;

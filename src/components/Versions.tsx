@@ -39,14 +39,14 @@ export function Versions() {
 
   const handleCopy = () => {
     if (!info) return;
-    const text = `Autolycus Desktop ${info.app_version}\nTauri ${info.tauri_version}\nOS: ${info.os} (${info.arch})`;
+    const text = `Штурман Desktop ${info.app_version}\nTauri ${info.tauri_version}\nOS: ${info.os} (${info.arch})`;
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const rows = [
-    { label: "Autolycus Desktop", value: info?.app_version, icon: Monitor },
+    { label: "Штурман Desktop", value: info?.app_version, icon: Monitor },
     { label: "Tauri", value: info?.tauri_version, icon: Cpu },
     { label: "OS", value: info ? `${info.os} (${info.arch})` : null, icon: HardDrive },
   ];

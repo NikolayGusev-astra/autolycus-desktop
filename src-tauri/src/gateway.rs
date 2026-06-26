@@ -61,9 +61,9 @@ pub fn find_hermes_python() -> Result<(PathBuf, String), String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
 
     let candidates: Vec<(PathBuf, &str)> = vec![
-        (home.join("autolycus/venv/bin/python"), "autolycus"),
-        (home.join("autolycus/venv/bin/python3"), "autolycus"),
-        (home.join(".autolycus/venv/bin/python"), "autolycus"),
+        (home.join("steersman/venv/bin/python"), "steersman"),
+        (home.join("steersman/venv/bin/python3"), "steersman"),
+        (home.join(".steersman/venv/bin/python"), "steersman"),
         (home.join(".hermes/venv/bin/python"), "hermes"),
         (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent"),
         (PathBuf::from("/usr/local/bin/python3"), "system"),
@@ -75,7 +75,7 @@ pub fn find_hermes_python() -> Result<(PathBuf, String), String> {
         }
     }
 
-    Err("No Python instance found. Install autolycus or hermes.".to_string())
+    Err("No Python instance found. Install steersman or hermes.".to_string())
 }
 
 pub fn find_hermes_repo(python_path: &PathBuf) -> Option<PathBuf> {

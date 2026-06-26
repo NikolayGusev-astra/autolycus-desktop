@@ -63,7 +63,7 @@ sudo apt-get update
 sudo apt-get install -y libwebkit2gtk-4.0-37 libgtk-3-0 librsvg2-2 libssl3
 
 # Установите пакет
-sudo dpkg -i autolycus-desktop_0.3.0_amd64.deb
+sudo dpkg -i steersman-desktop_0.3.0_amd64.deb
 # Если ошибки зависимостей:
 sudo apt-get install -f -y
 ```
@@ -71,7 +71,7 @@ sudo apt-get install -f -y
 ### Вариант 3: Из репозитория (когда будет настроен)
 
 ```bash
-sudo apt-get install autolycus-desktop
+sudo apt-get install steersman-desktop
 ```
 
 ## Известные проблемы
@@ -98,7 +98,7 @@ sudo apt-get install -f -y
 **Решение:** Tauri использует WebKitGTK который работает через X11. Для Wayland:
 ```bash
 # Запуск через XWayland
-GDK_BACKEND=x11 autolycus-desktop
+GDK_BACKEND=x11 steersman-desktop
 ```
 
 ### 4. Безопасность Astra Linux (PARSEC/МСВС)
@@ -128,10 +128,10 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
 # Сборка
-git clone https://github.com/NikolayGusev-astra/autolycus-desktop.git
-cd autolycus-desktop
+git clone https://github.com/NikolayGusev-astra/steersman-desktop.git
+cd steersman-desktop
 npm install
 npm run tauri build
 ```
 
-Результат: `src-tauri/target/release/bundle/deb/autolycus-desktop_0.3.0_amd64.deb`
+Результат: `src-tauri/target/release/bundle/deb/steersman-desktop_0.3.0_amd64.deb`

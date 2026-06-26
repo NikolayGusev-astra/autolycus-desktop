@@ -1,5 +1,5 @@
 // src-tauri/src/discovery.rs
-// Local instance discovery: find hermes/autolycus installations,
+// Local instance discovery: find hermes/steersman installations,
 // determine version, gateway status, and active profile.
 // v0.5.0 — Phase 3: Autodetect instances
 
@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectedInstance {
     pub path: String,
-    pub instance_type: String, // "autolycus", "hermes", "hermes-agent", "system"
+    pub instance_type: String, // "steersman", "hermes", "hermes-agent", "system"
     pub version: String,
     pub gateway_running: bool,
     pub gateway_port: Option<u16>,
@@ -113,7 +113,7 @@ pub fn check_gateway_status(python_path: &str) -> (bool, Option<u16>) {
 
 // ── Detect local instances ────────────────────────────────────────────────
 
-/// Scan for all local hermes/autolycus installations and return detailed info.
+/// Scan for all local hermes/steersman installations and return detailed info.
 pub fn detect_local_instances() -> Vec<DetectedInstance> {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -122,9 +122,9 @@ pub fn detect_local_instances() -> Vec<DetectedInstance> {
 
     // Candidate python paths (matching find_hermes_python logic)
     let candidates: Vec<(PathBuf, &str)> = vec![
-        (home.join("autolycus/venv/bin/python"), "autolycus"),
-        (home.join("autolycus/venv/bin/python3"), "autolycus"),
-        (home.join(".autolycus/venv/bin/python"), "autolycus"),
+        (home.join("steersman/venv/bin/python"), "steersman"),
+        (home.join("steersman/venv/bin/python3"), "steersman"),
+        (home.join(".steersman/venv/bin/python"), "steersman"),
         (home.join(".hermes/venv/bin/python"), "hermes"),
         (
             home.join(".hermes/hermes-agent/venv/bin/python"),
@@ -204,7 +204,7 @@ fn detect_active_profile(_python_path: &str) -> String {
     let home = dirs::home_dir();
     for base in &[
         home.as_ref().map(|h| h.join(".hermes")),
-        home.as_ref().map(|h| h.join(".autolycus")),
+        home.as_ref().map(|h| h.join(".steersman")),
     ] {
         if let Some(base_path) = base {
             let active_file = base_path.join("active_profile");

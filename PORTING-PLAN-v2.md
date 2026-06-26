@@ -1,4 +1,4 @@
-# План портинга Autolycus Desktop v0.5 → v1.0
+# План портинга Штурман Desktop v0.5 → v1.0
 
 ## Призм-анализ: ГДЕ МЫ СЕЙЧАС
 
@@ -46,7 +46,7 @@
 | Settings: Models | не подключён к Rust (нет invoke) |
 | Settings: Terminal | нет терминала |
 | Chat через SSH | туннель поднимается но API на сервере не включён был |
-| Автодетект instances | нет кода для поиска hermes/autolycus на сервере/локально |
+| Автодетект instances | нет кода для поиска hermes/steersman на сервере/локально |
 | Version display | показывает v0.4.0 хотя Cargo.toml v0.5.0 |
 | Sidebar | только 4 вкладки: chat, kanban, sessions, settings |
 | Launch splash | нет splash screen при запуске |
@@ -69,12 +69,12 @@
 - [ ] **Тест:** `cargo check` + `npm run build`
 
 ### Фаза 1: Автодетект + Welcome + Структура (2 дня)
-**Цель:** Автоматическое обнаружение instances hermes/autolycus, Welcome экран
+**Цель:** Автоматическое обнаружение instances hermes/steersman, Welcome экран
 
 #### Автодетект instances
 - [ ] Rust: added `detect_instances_cmd` — сканирует:
-  - Локально: `~/.autolycus/venv/bin/python`, `~/.hermes/hermes-agent/venv/bin/python`, `~/autolycus/venv/bin/python`
-  - Удалённо (через SSH): `which hermes`, `which autolycus`, проверка `hermes gateway status`
+  - Локально: `~/.steersman/venv/bin/python`, `~/.hermes/hermes-agent/venv/bin/python`, `~/steersman/venv/bin/python`
+  - Удалённо (через SSH): `which hermes`, `which steersman`, проверка `hermes gateway status`
 - [ ] ConnectionScreen: выпадающий список instances + кнопка "Авто检测" вместо хардкода IP
 - [ ] Сохранение instance в desktop.json
 
@@ -169,7 +169,7 @@
 
 #### Сборка и публикация
 - [ ] v0.5.0: обновить версию everywhere
-- [ ] v1.0.0: переименовать → Autolycus Desktop v1.0
+- [ ] v1.0.0: переименовать → Штурман Desktop v1.0
 - [ ] Windows MSI: через GitHub Actions
 - [ ] Linux AppImage + deb
 - [ ] GitHub release notes

@@ -15,7 +15,7 @@ export function SplashScreen({ onComplete }: SplashScreenProps) {
     // Check localStorage for autoconnect preference
     let autoconnect = false;
     try {
-      autoconnect = localStorage.getItem("autolycus_autoconnect") === "true";
+      autoconnect = localStorage.getItem("steersman_autoconnect") === "true";
     } catch {
       // localStorage might not be available in some contexts
     }
@@ -45,7 +45,7 @@ export function SplashScreen({ onComplete }: SplashScreenProps) {
 
       {/* Title */}
       <h1 className="text-3xl font-bold text-ac-ivory tracking-tight opacity-0 animate-fade-in-delay-1">
-        Autolycus
+        Штурман
       </h1>
 
       {/* Subtitle */}

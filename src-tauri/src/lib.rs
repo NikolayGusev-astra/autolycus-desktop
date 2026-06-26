@@ -1,5 +1,5 @@
 // src-tauri/src/lib.rs
-// Autolycus Desktop v0.5.0 — Rust backend
+// Штурман Desktop v0.5.0 — Rust backend
 // Ported from fathah/hermes-desktop (v0.5.8)
 
 mod auth;
@@ -114,9 +114,9 @@ async fn detect_instances() -> Result<Vec<InstanceInfo>, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
 
     let candidates: Vec<(PathBuf, &str)> = vec![
-        (home.join("autolycus/venv/bin/python"), "autolycus"),
-        (home.join("autolycus/venv/bin/python3"), "autolycus"),
-        (home.join(".autolycus/venv/bin/python"), "autolycus"),
+        (home.join("steersman/venv/bin/python"), "steersman"),
+        (home.join("steersman/venv/bin/python3"), "steersman"),
+        (home.join(".steersman/venv/bin/python"), "steersman"),
         (home.join(".hermes/venv/bin/python"), "hermes"),
         (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent"),
         (PathBuf::from("/usr/local/bin/python3"), "system"),
@@ -147,13 +147,13 @@ async fn detect_local_instances_cmd() -> Result<Vec<discovery::DetectedInstance>
     Ok(discovery::detect_local_instances())
 }
 
-/// Detect Python/autolycus instances on a remote machine via SSH
+/// Detect Python/steersman instances on a remote machine via SSH
 #[tauri::command]
 async fn detect_remote_instances_cmd(ssh_config: SshConfig) -> Result<Vec<RemoteInstanceInfo>, String> {
     let candidates: Vec<(&str, &str)> = vec![
-        ("~/autolycus/venv/bin/python3", "autolycus"),
-        ("~/autolycus/venv/bin/python", "autolycus"),
-        ("~/.autolycus/venv/bin/python", "autolycus"),
+        ("~/steersman/venv/bin/python3", "steersman"),
+        ("~/steersman/venv/bin/python", "steersman"),
+        ("~/.steersman/venv/bin/python", "steersman"),
         ("~/.hermes/venv/bin/python", "hermes"),
         ("~/.hermes/hermes-agent/venv/bin/python", "hermes-agent"),
         ("/usr/local/bin/python3", "system"),
@@ -1235,6 +1235,73 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
+        .setup(|app| {
+            // ── Tray icon ───────────────────────────────────────────────
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::TrayIconBuilder;
+            use tauri::Manager;
+
+            let show_item = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;
+            let hide_item = MenuItem::with_id(app, "hide", "Скрыть", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Штурман")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "hide" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
+            // ── Global shortcut: Ctrl+Shift+S ──────────────────────────
+            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            app.global_shortcut().on_shortcut("Control+Shift+S", move |app, _shortcut, _event| {
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            })?;
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // App
             init_app,

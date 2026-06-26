@@ -26,7 +26,7 @@ interface HealthReport {
   ran_at: number;
 }
 
-const DISMISS_STORAGE_KEY = "autolycus-config-health-dismissed";
+const DISMISS_STORAGE_KEY = "steersman-config-health-dismissed";
 
 function readDismissedStamp(): number {
   try {

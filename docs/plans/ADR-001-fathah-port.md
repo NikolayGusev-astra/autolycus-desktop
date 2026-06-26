@@ -8,11 +8,11 @@
 
 ## Контекст
 
-autolycus-desktop v0.3.0 — минимальный прототип. Работает только локально, только с одним профилем, без session management, без remote/SSH подключений. Чат использует примитивный JSON-RPC протокол, который не соответствует реальному API hermes gateway.
+steersman-desktop v0.3.0 — минимальный прототип. Работает только локально, только с одним профилем, без session management, без remote/SSH подключений. Чат использует примитивный JSON-RPC протокол, который не соответствует реальному API hermes gateway.
 
 fathah/hermes-desktop v0.5.8 — полноценный клиент с 3 режимами подключения, gateway management, session management, per-profile изоляцией. 22K+ строк TypeScript в main процессе Electron.
 
-Нам нужно заставить autolycus-desktop работать с удалённым hermes-сервером (NL, 147.90.10.50) и локально.
+Нам нужно заставить steersman-desktop работать с удалённым hermes-сервером (NL, 147.90.10.50) и локально.
 
 ---
 

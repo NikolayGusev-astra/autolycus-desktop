@@ -120,7 +120,7 @@ pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) 
     match code {
         "ENV_MISSING" => {
             let env_path = hermes_home.join(".env");
-            std::fs::write(env_path, "# Autolycus environment variables\n")
+            std::fs::write(env_path, "# Штурман environment variables\n")
                 .map_err(|e| format!("Failed to create .env: {}", e))?;
             Ok("Created .env file".to_string())
         }
@@ -135,7 +135,7 @@ pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) 
                     .map_err(|e| format!("Failed to create config directory: {}", e))?;
             }
             let default_config = "\
-# Autolycus Configuration
+# Штурман Configuration
 model:
   provider: auto
   name: auto

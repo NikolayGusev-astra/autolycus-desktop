@@ -81,7 +81,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   setTheme: async (dark: boolean) => {
     try {
       await invoke("set_env_cmd", {
-        key: "AUTOLYCUS_THEME",
+        key: "STEERSMAN_THEME",
         value: dark ? "dark" : "light",
         profile: null as string | null,
       });

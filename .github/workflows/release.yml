@@ -84,3 +84,37 @@ jobs:
         with:
           name: windows-msi
           path: src-tauri/target/*/release/bundle/msi/*.msi
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - run: npm install
+
+      - name: Build (Universal Binary)
+        shell: bash
+        run: |
+          rm -rf node_modules/.vite || true
+          npx vite build
+          npx tauri build --target universal-apple-darwin
+
+      - name: Upload .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: src-tauri/target/*/release/bundle/dmg/*.dmg
+
+      - name: Upload .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: src-tauri/target/*/release/bundle/macos/*.app

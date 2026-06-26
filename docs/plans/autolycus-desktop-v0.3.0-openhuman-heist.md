@@ -1,4 +1,4 @@
-# autolycus-desktop v0.3.0 — UI-улучшения (OpenHuman heist)
+# steersman-desktop v0.3.0 — UI-улучшения (OpenHuman heist)
 
 > Источник вдохновления: [tinyhumansai/openhuman](https://github.com/tinyhumansai/openhuman)
 > Статус: спецификация утверждена, реализация не начата
@@ -12,7 +12,7 @@
 
 Проведён полный анализ OpenHuman (GNU license, v0.57.18, 950K+ строк):
 - Клонирован репозиторий, прочитаны ключевые модули: security/policy/, approval/, prompt_injection/, cwd_jail/, tokenjuice/, subconscious/, memory_tree/, agent/, composio/, mcp_server/, channels/
-- Клонирован autolycus-desktop (v0.1.0), прочитаны все 35 файлов: компоненты, store, Rust core, types
+- Клонирован steersman-desktop (v0.1.0), прочитаны все 35 файлов: компоненты, store, Rust core, types
 
 ### Prism-анализ (WHERE/WHEN/WHY)
 
@@ -186,7 +186,7 @@ export interface PipelineStatus { backend, model?, tokens_used?, tokens_limit?, 
 **StatusBar (упрощён):**
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ Autolycus Desktop v0.3.0  ·  mode: local               │
+│ Штурман Desktop v0.3.0  ·  mode: local               │
 └──────────────────────────────────────────────────────────┘
 ```
 

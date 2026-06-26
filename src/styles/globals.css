@@ -3,7 +3,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 @theme {
-  /* Autolycus brand colors */
+  /* Штурман brand colors */
   --color-ac-amber: #d4a843;
   --color-ac-ivory: #f0ece4;
   --color-ac-pitch: #0a0a0a;
@@ -62,7 +62,7 @@
 }
 
 @layer components {
-  /* Autolycus card */
+  /* Штурман card */
   .ac-card {
     background: var(--color-ac-surface);
     border: 1px solid var(--color-ac-border);
@@ -73,7 +73,7 @@
     border-color: rgba(212, 168, 67, 0.2);
   }
 
-  /* Autolycus input */
+  /* Штурман input */
   .ac-input {
     background: var(--color-ac-surface);
     border: 1px solid var(--color-ac-border);
@@ -89,7 +89,7 @@
     color: var(--color-ac-stone);
   }
 
-  /* Autolycus button */
+  /* Штурман button */
   .ac-btn {
     background: var(--color-ac-amber);
     border: none;
@@ -103,7 +103,7 @@
     background: #c49a3a;
   }
 
-  /* Autolycus badge */
+  /* Штурман badge */
   .ac-badge {
     display: inline-block;
     padding: 1px 7px;

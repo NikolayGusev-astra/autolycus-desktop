@@ -121,7 +121,7 @@ pub fn install_skill(
 
     // Try to find in bundled skills
     let bundled_paths = [
-        Path::new("/usr/share/autolycus/skills").join(identifier),
+        Path::new("/usr/share/steersman/skills").join(identifier),
         hermes_home.join("..").join("skills").join(identifier),
         Path::new("skills").join(identifier),
     ];

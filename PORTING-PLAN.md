@@ -1,9 +1,9 @@
-# План портинга fathah/hermes-desktop → autolycus-desktop (Tauri+Rust)
+# План портинга fathah/hermes-desktop → steersman-desktop (Tauri+Rust)
 
 ## Обзор
 
 **Оригинал:** fathah/hermes-desktop — Electron+TypeScript, ~20,800 строк (+ 20,300 строк экранов)
-**Текущее состояние:** autolycus-desktop v0.5.0 — Tauri+Rust, бэкенд ~90% готов, фронтенд ~15% готов
+**Текущее состояние:** steersman-desktop v0.5.0 — Tauri+Rust, бэкенд ~90% готов, фронтенд ~15% готов
 
 ## Текущее состояние (что уже портировано в Rust)
 

@@ -67,7 +67,7 @@ export function InstallScreen({ onComplete }: { onComplete?: () => void }) {
         <div className="bg-ac-bg border border-ac-border rounded-xl p-6">
           {step === "welcome" && (
             <div className="text-center">
-              <h1 className="text-2xl font-bold mb-2">Welcome to Autolycus</h1>
+              <h1 className="text-2xl font-bold mb-2">Welcome to Штурман</h1>
               <p className="text-ac-muted mb-6">
                 Let's get you set up. This wizard will guide you through configuring
                 your first AI provider.
@@ -196,7 +196,7 @@ export function InstallScreen({ onComplete }: { onComplete?: () => void }) {
               <CheckCircle2 className="w-12 h-12 text-green-500 mx-auto mb-4" />
               <h2 className="text-lg font-semibold mb-2">Setup Complete!</h2>
               <p className="text-ac-muted mb-6">
-                Your provider has been configured successfully. You can now start using Autolycus.
+                Your provider has been configured successfully. You can now start using Штурман.
               </p>
               <button
                 className="btn btn-primary"

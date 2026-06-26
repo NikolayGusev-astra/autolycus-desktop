@@ -1,21 +1,23 @@
 [package]
-name = "autolycus-desktop"
-version = "0.8.2"
-description = "Autolycus Desktop — native desktop AI assistant"
-authors = ["Autolycus Team"]
+name = "steersman-desktop"
+version = "0.9.0"
+description = "Штурман Desktop — native desktop AI assistant"
+authors = ["Штурман Team"]
 license = "MIT"
 edition = "2021"
 
 [lib]
-name = "autolycus_desktop_lib"
+name = "steersman_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"

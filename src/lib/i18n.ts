@@ -1,11 +1,11 @@
 // src/lib/i18n.ts
-// Simple i18n dictionary for Autolycus Desktop
+// Simple i18n dictionary for Штурман Desktop
 // Keys match Russian strings used in the codebase
 
 const translations = {
   // App
-  'app.name': { en: 'Autolycus', ru: 'Автолик' },
-  'app.title': { en: 'Autolycus Desktop', ru: 'Автолик Десктоп' },
+  'app.name': { en: 'Штурман', ru: 'Штурман' },
+  'app.title': { en: 'Штурман Desktop', ru: 'Штурман Десктоп' },
   'app.subtitle': { en: 'AI Ассистент', ru: 'AI Ассистент' },
 
   // Navigation
@@ -47,7 +47,7 @@ const translations = {
   'conn.autoDetect': { en: 'Auto-detect', ru: 'Авто-обнаружение' },
   'conn.localInstance': { en: 'Local instances', ru: 'Локальные экземпляры' },
   'conn.failedStart': { en: 'Failed to start gateway', ru: 'Не удалось запустить шлюз' },
-  'autolycus_title': { en: 'Autolycus', ru: 'Автолик' },
+  'steersman_title': { en: 'Штурман', ru: 'Штурман' },
   'ai_assistant': { en: 'AI Assistant', ru: 'AI Ассистент' },
   'connect_title': { en: 'Connect', ru: 'Подключиться' },
   'found_instances': { en: 'Found instances', ru: 'Найденные экземпляры' },
@@ -66,7 +66,7 @@ const translations = {
   'chat.notConnected': { en: 'Not connected', ru: 'Не подключено' },
   'chat.connected': { en: 'Ready', ru: 'Готов' },
   'chat.runStarted': { en: 'Run started', ru: 'Запуск выполнен' },
-  'chat.welcome': { en: 'Welcome to Autolycus', ru: 'Добро пожаловать в Автолик' },
+  'chat.welcome': { en: 'Welcome to Штурман', ru: 'Добро пожаловать в Штурман' },
   'chat.welcomeSubtitle': { en: 'Send a message to start chatting', ru: 'Отправьте сообщение чтобы начать' },
   'chat.connected_to': { en: 'Connected to', ru: 'Подключено к' },
   'chat.tool_running': { en: '🔧 **Running:** `{toolName}`...', ru: '🔧 **Выполняет:** `{toolName}`...' },
@@ -182,8 +182,8 @@ const translations = {
   'approval.approveAlways': { en: 'Always', ru: 'Всегда' },
 
   // Welcome screen
-  'welcome.title': { en: 'Welcome to Autolycus', ru: 'Добро пожаловать в Автолик' },
-  'welcome.subtitle': { en: 'Configure your connection to start working with Autolycus', ru: 'Настройте подключение для начала работы с Автоликом' },
+  'welcome.title': { en: 'Welcome to Штурман', ru: 'Добро пожаловать в Штурман' },
+  'welcome.subtitle': { en: 'Configure your connection to start working with Штурман', ru: 'Настройте подключение для начала работы с Штурманом' },
   'welcome.detectedInstances': { en: 'Detected local instances', ru: 'Обнаруженные локальные экземпляры' },
   'welcome.gatewayRunning': { en: 'Gateway running on port', ru: 'Шлюз работает на порту' },
   'welcome.gatewayOffline': { en: 'Gateway offline', ru: 'Шлюз не запущен' },

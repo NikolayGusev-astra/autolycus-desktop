@@ -1,9 +1,9 @@
-# SDD: Autolycus Desktop v0.4.0 — Hermes Agent Port
+# SDD: Штурман Desktop v0.4.0 — Hermes Agent Port
 
 > **Статус:** черновик
 > **Дата:** 2026-06-09
 > **Автор:** OWL
-> **Источник:** анализ fathah/hermes-desktop (v0.5.8) + NikolayGusev-astra/autolycus-desktop (v0.3.0)
+> **Источник:** анализ fathah/hermes-desktop (v0.5.8) + NikolayGusev-astra/steersman-desktop (v0.3.0)
 
 ---
 
@@ -11,7 +11,7 @@
 
 ### Проблема
 
-autolycus-desktop v0.3.0 — минимальный Tauri-обёрт вокруг `tui_gateway.entry`. Работает только локально, только с одним профилем, без session management, без remote/SSH, без gateway lifecycle management. Чат использует примитивный JSON-RPC stdin/stdout, который не соответствует реальному протоколу hermes gateway.
+steersman-desktop v0.3.0 — минимальный Tauri-обёрт вокруг `tui_gateway.entry`. Работает только локально, только с одним профилем, без session management, без remote/SSH, без gateway lifecycle management. Чат использует примитивный JSON-RPC stdin/stdout, который не соответствует реальному протоколу hermes gateway.
 
 fathah/hermes-desktop v0.5.8 — полноценный Electron-клиент (22K+ строк TS в main процессе), реализующий:
 - 3 режима подключения (local / remote / SSH tunnel)

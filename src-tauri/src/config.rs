@@ -46,7 +46,7 @@ pub fn resolve_hermes_home() -> PathBuf {
 
 fn read_override_file() -> Option<PathBuf> {
     let data_dir = dirs::data_dir()?;
-    let file = data_dir.join("autolycus-desktop").join("hermes-home.json");
+    let file = data_dir.join("steersman-desktop").join("hermes-home.json");
     if !file.exists() {
         return None;
     }

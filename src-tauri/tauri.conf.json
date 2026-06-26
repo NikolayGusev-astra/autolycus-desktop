@@ -1,8 +1,8 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
-    "productName": "Autolycus Desktop",
-    "version": "0.8.2",
-    "identifier": "com.autolycus.desktop",
+    "productName": "Штурман Desktop",
+    "version": "0.9.0",
+    "identifier": "com.steersman.desktop",
     "build": {
         "beforeDevCommand": "npm run dev",
         "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
     "app": {
         "windows": [
             {
-                "title": "Autolycus",
+                "title": "Штурман",
                 "width": 1200,
                 "height": 800,
                 "minWidth": 800,
@@ -40,10 +40,10 @@
             "icons/icon.icns",
             "icons/icon.ico"
         ],
-        "copyright": "\u00a9 2026 Autolycus Team",
+        "copyright": "\u00a9 2026 Штурман Team",
         "category": "DeveloperTool",
         "shortDescription": "AI Assistant Desktop App",
-        "longDescription": "Autolycus Desktop \u2014 native desktop AI assistant powered by Hermes Agent",
+        "longDescription": "Штурман Desktop \u2014 native desktop AI assistant powered by Hermes Agent",
         "linux": {
             "deb": {
                 "depends": [
