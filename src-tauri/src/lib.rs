@@ -1294,6 +1294,8 @@ pub fn run() {
         // of starting a duplicate process (which would also fail to register
         // the global hotkey a second time and panic).
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // get_webview_window comes from the Manager trait.
+            use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();

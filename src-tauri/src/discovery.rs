@@ -13,11 +13,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ── DetectedInstance ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+/// Deserialize is required so the type can be passed as an argument to a
+/// Tauri command (the frontend sends it as JSON over IPC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedInstance {
     pub path: String,
     pub instance_type: String, // "steersman", "hermes", "autolycus", "system", ...
