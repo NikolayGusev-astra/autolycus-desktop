@@ -1,6 +1,6 @@
 [package]
 name = "steersman-desktop"
-version = "0.9.0"
+version = "0.9.2"
 description = "Штурман Desktop — native desktop AI assistant"
 authors = ["Штурман Team"]
 license = "MIT"
@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["stream", "json"] }
 futures = "0.3"
 ssh2 = "0.9"
+openssl-sys = { version = "0.9", features = ["vendored"] }
 yaml-rust2 = "0.8"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
