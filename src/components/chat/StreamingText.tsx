@@ -22,7 +22,7 @@ export function StreamingText({ content }: StreamingTextProps) {
     <div className="relative">
       <MarkdownRenderer content={displayed} />
       <span
-        className={`inline-block w-0.5 h-4 bg-gray-800 dark:bg-gray-200 ml-0.5 align-middle transition-opacity ${
+        className={`inline-block w-0.5 h-4 bg-ac-brand ml-0.5 align-middle transition-opacity ${
           cursorVisible ? "opacity-100" : "opacity-0"
         }`}
       />

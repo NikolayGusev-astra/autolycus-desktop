@@ -58,8 +58,8 @@ export function ToolResultCard({ result }: ToolResultCardProps) {
     <div
       className={`mb-2 border rounded-lg overflow-hidden ${
         isError
-          ? "border-red-300 dark:border-red-800"
-          : "border-gray-200 dark:border-gray-700"
+          ? "border-ac-red"
+          : "border-ac-border"
       }`}
     >
       {/* Header */}
@@ -67,8 +67,8 @@ export function ToolResultCard({ result }: ToolResultCardProps) {
         onClick={() => setExpanded(!expanded)}
         className={`flex items-center gap-2 px-3 py-1.5 w-full text-left transition-colors ${
           isError
-            ? "hover:bg-red-50 dark:hover:bg-red-950/30"
-            : "hover:bg-gray-50 dark:hover:bg-gray-800"
+            ? "hover:bg-ac-red/5"
+            : "hover:bg-ac-surface-2"
         }`}
       >
         <ChevronRight
@@ -76,43 +76,43 @@ export function ToolResultCard({ result }: ToolResultCardProps) {
             expanded ? "rotate-90" : ""
           }`}
         />
-        <Icon className="w-4 h-4 text-gray-400 flex-shrink-0" />
+        <Icon className="w-4 h-4 text-ac-faint flex-shrink-0" />
         <span className="text-sm font-mono font-medium truncate">
           {result.name}
         </span>
-        <span className="text-xs text-gray-400 ml-auto flex-shrink-0">
+        <span className="text-xs text-ac-faint ml-auto flex-shrink-0">
           {formatDuration(result.durationMs)}
         </span>
         {isError ? (
-          <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+          <XCircle className="w-4 h-4 text-ac-red flex-shrink-0" />
         ) : (
-          <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+          <CheckCircle className="w-4 h-4 text-ac-green flex-shrink-0" />
         )}
       </button>
 
       {/* Body */}
       {expanded && (
-        <div className="border-t border-gray-200 dark:border-gray-700">
+        <div className="border-t border-ac-border">
           {/* Input */}
           {result.input && (
-            <div className="px-3 py-2 bg-gray-50 dark:bg-gray-900/50">
+            <div className="px-3 py-2 bg-ac-surface">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-gray-400 font-medium">
+                <span className="text-xs text-ac-faint font-medium">
                   Input
                 </span>
                 <button
                   onClick={() => handleCopy(result.input, setCopiedInput)}
-                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                  className="text-ac-faint hover:text-ac-muted transition-colors"
                   title="Copy input"
                 >
                   {copiedInput ? (
-                    <Check className="w-3 h-3 text-green-500" />
+                    <Check className="w-3 h-3 text-ac-green" />
                   ) : (
                     <Copy className="w-3 h-3" />
                   )}
                 </button>
               </div>
-              <pre className="text-xs font-mono overflow-x-auto whitespace-pre-wrap text-gray-600 dark:text-gray-400">
+              <pre className="text-xs font-mono overflow-x-auto whitespace-pre-wrap text-ac-muted">
                 {result.input}
               </pre>
             </div>
@@ -122,16 +122,16 @@ export function ToolResultCard({ result }: ToolResultCardProps) {
           {result.output && (
             <div className="px-3 py-2">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-gray-400 font-medium">
+                <span className="text-xs text-ac-faint font-medium">
                   Output
                 </span>
                 <button
                   onClick={() => handleCopy(result.output, setCopiedOutput)}
-                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                  className="text-ac-faint hover:text-ac-muted transition-colors"
                   title="Copy output"
                 >
                   {copiedOutput ? (
-                    <Check className="w-3 h-3 text-green-500" />
+                    <Check className="w-3 h-3 text-ac-green" />
                   ) : (
                     <Copy className="w-3 h-3" />
                   )}
@@ -140,7 +140,7 @@ export function ToolResultCard({ result }: ToolResultCardProps) {
               <div className="text-sm overflow-x-auto">
                 {result.output.includes("\n") ||
                 result.output.startsWith("LINE_") ? (
-                  <pre className="text-xs font-mono whitespace-pre-wrap text-gray-700 dark:text-gray-300">
+                  <pre className="text-xs font-mono whitespace-pre-wrap text-ac-ink-2">
                     {result.output}
                   </pre>
                 ) : (

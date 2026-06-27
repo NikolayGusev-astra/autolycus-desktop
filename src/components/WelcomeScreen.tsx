@@ -1,5 +1,4 @@
 import {
-  Bot,
   ArrowRight,
   Cpu,
   Wifi,
@@ -8,6 +7,7 @@ import {
   Plug,
 } from "lucide-react";
 import { useTranslation } from "../hooks/useTranslation";
+import logo from "../assets/logo.png";
 
 interface DetectedInstance {
   path: string;
@@ -39,29 +39,32 @@ export function WelcomeScreen({
   const versionLabel = appVersion ? `v${appVersion}` : "";
 
   return (
-    <div className="fixed inset-0 bg-ac-pitch flex items-center justify-center">
+    <div className="fixed inset-0 bg-ac-bg flex items-center justify-center">
       <div className="w-full max-w-md px-6 text-center">
         {/* Logo */}
         <div className="flex justify-center mb-6">
-          <div className="w-16 h-16 rounded-2xl bg-ac-amber/10 border border-ac-amber/20 flex items-center justify-center">
-            <Bot className="w-8 h-8 text-ac-amber" />
-          </div>
+          <img
+            src={logo}
+            alt="Штурман"
+            className="w-16 h-16 rounded-2xl shadow-sm"
+            draggable={false}
+          />
         </div>
 
         {/* Title */}
-        <h1 className="text-2xl font-semibold text-ac-ivory mb-2">
+        <h1 className="text-2xl font-semibold text-ac-ink mb-2">
           {t("welcome.title")}
         </h1>
 
         {/* Subtitle */}
-        <p className="text-sm text-ac-stone mb-6 leading-relaxed">
+        <p className="text-sm text-ac-muted mb-6 leading-relaxed">
           {t("welcome.subtitle")}
         </p>
 
         {/* Detected local instances — offer to adopt an environment */}
         {detectedInstances && detectedInstances.length > 0 && (
           <div className="mb-6 text-left">
-            <label className="text-[11px] text-ac-stone mb-2 block text-center">
+            <label className="text-[11px] text-ac-muted mb-2 block text-center">
               {t("welcome.detectedInstances")}
             </label>
             <div className="space-y-1.5 max-h-48 overflow-y-auto">
@@ -75,21 +78,21 @@ export function WelcomeScreen({
                     onClick={() => connectable && onConnectInstance!(inst)}
                     className={`w-full text-left px-3 py-2 text-xs border rounded transition-colors ${
                       connectable
-                        ? "border-ac-amber/30 hover:border-ac-amber/60 hover:bg-ac-amber/5 cursor-pointer"
-                        : "border-ac-border/50 opacity-70 cursor-default"
+                        ? "border-ac-brand-border hover:border-ac-brand hover:bg-ac-brand-soft cursor-pointer"
+                        : "border-ac-border opacity-70 cursor-default"
                     }`}
                     title={connectable ? t("welcome.connectTooltip") : undefined}
                   >
                     <div className="flex items-center gap-2">
-                      <Cpu className="w-3 h-3 text-ac-amber flex-shrink-0" />
-                      <span className="font-medium text-ac-ivory truncate">
+                      <Cpu className="w-3 h-3 text-ac-brand flex-shrink-0" />
+                      <span className="font-medium text-ac-ink truncate">
                         {inst.label ?? inst.instance_type}
                       </span>
-                      <span className="text-[10px] text-ac-stone ml-auto">
+                      <span className="text-[10px] text-ac-muted ml-auto">
                         {inst.version}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 mt-1 text-[10px] text-ac-stone/70">
+                    <div className="flex items-center gap-2 mt-1 text-[10px] text-ac-faint">
                       <FolderOpen className="w-2.5 h-2.5" />
                       <span className="truncate">
                         {inst.home_dir ?? inst.path}
@@ -102,16 +105,16 @@ export function WelcomeScreen({
                           {t("welcome.gatewayRunning")} {inst.gateway_port}
                         </span>
                       ) : (
-                        <span className="text-ac-stone/50 flex items-center gap-1">
+                        <span className="text-ac-faint flex items-center gap-1">
                           <Terminal className="w-2.5 h-2.5" />{" "}
                           {t("welcome.gatewayOffline")}
                         </span>
                       )}
-                      <span className="text-ac-stone/50">
+                      <span className="text-ac-faint">
                         {t("welcome.profile")} {inst.active_profile}
                       </span>
                       {connectable && (
-                        <span className="ml-auto text-ac-amber flex items-center gap-1">
+                        <span className="ml-auto text-ac-brand flex items-center gap-1">
                           <Plug className="w-2.5 h-2.5" />{" "}
                           {t("welcome.connect")}
                         </span>
@@ -134,7 +137,7 @@ export function WelcomeScreen({
         </button>
 
         {/* Footer with version from the backend */}
-        <p className="mt-8 text-[11px] text-ac-stone/40">
+        <p className="mt-8 text-[11px] text-ac-faint">
           {versionLabel && `Штурман Desktop ${versionLabel}`}
         </p>
       </div>
