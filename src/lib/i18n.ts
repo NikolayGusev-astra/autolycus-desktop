@@ -184,10 +184,12 @@ const translations = {
   // Welcome screen
   'welcome.title': { en: 'Welcome to Штурман', ru: 'Добро пожаловать в Штурман' },
   'welcome.subtitle': { en: 'Configure your connection to start working with Штурман', ru: 'Настройте подключение для начала работы с Штурманом' },
-  'welcome.detectedInstances': { en: 'Detected local instances', ru: 'Обнаруженные локальные экземпляры' },
+  'welcome.detectedInstances': { en: 'Detected local instances — click to connect', ru: 'Обнаруженные локальные экземпляры — нажмите для подключения' },
   'welcome.gatewayRunning': { en: 'Gateway running on port', ru: 'Шлюз работает на порту' },
   'welcome.gatewayOffline': { en: 'Gateway offline', ru: 'Шлюз не запущен' },
   'welcome.profile': { en: 'Profile:', ru: 'Профиль:' },
+  'welcome.connect': { en: 'Connect', ru: 'Подключиться' },
+  'welcome.connectTooltip': { en: 'Adopt this environment: reuse its profiles, skills and settings', ru: 'Подхватить окружение: использовать его профили, навыки и настройки' },
 
   // Splash screen
   'splash.subtitle': { en: 'AI Assistant Desktop', ru: 'AI Ассистент Десктоп' },
