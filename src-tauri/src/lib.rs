@@ -1256,51 +1256,72 @@ pub fn run() {
             Some(vec!["--minimized"]),
         ))
         .setup(|app| {
-            // ── Tray icon ───────────────────────────────────────────────
+            // ── Tray icon (best-effort) ───────────────────────────────
+            // On some Linux DEs (notably Astra Linux / older libayatana-
+            // appindicator), building the tray icon fails with a raw-data
+            // size mismatch ("wrong data size, expected 4096 got 8192").
+            // The tray is a convenience, not a requirement — if it cannot be
+            // created, the app must still start. So we swallow the error
+            // instead of propagating it via `?` (which would abort startup).
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::TrayIconBuilder;
             use tauri::Manager;
 
-            let show_item = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;
-            let hide_item = MenuItem::with_id(app, "hide", "Скрыть", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
+            let tray_result = (|| -> Result<(), tauri::Error> {
+                let show_item = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;
+                let hide_item = MenuItem::with_id(app, "hide", "Скрыть", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
 
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Штурман")
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                let icon = match app.default_window_icon() {
+                    Some(i) => i.clone(),
+                    None => {
+                        return Err(tauri::Error::AssetNotFound(
+                            "default window icon".to_string(),
+                        ))
                     }
-                    "hide" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.hide();
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
+                };
+                let builder = TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("Штурман")
+                    .menu(&menu)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
                         }
-                    }
-                })
-                .build(app)?;
+                        "hide" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                    });
+                builder.build(app)?;
+                Ok(())
+            })();
+
+            if let Err(e) = tray_result {
+                eprintln!("[steersman] warning: tray icon unavailable on this platform, continuing without it: {}", e);
+            }
 
             // ── Global shortcut: Ctrl+Shift+S ──────────────────────────
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
