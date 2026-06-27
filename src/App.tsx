@@ -13,6 +13,7 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { KanbanBoard } from "./components/kanban/KanbanBoard";
+import { SteersmanScreen } from "./steersman/SteersmanChatView";
 import { MemoryScreen } from "./components/memory/MemoryScreen";
 import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
@@ -144,6 +145,7 @@ export function App() {
               )}
             </>
           )}
+          {activeTab === "steersman" && <SteersmanScreen />}
           {activeTab === "sessions" && <SessionList />}
           {activeTab === "kanban" && <KanbanBoard />}
           {activeTab === "models" && <ProfilesScreen />}

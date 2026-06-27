@@ -10,6 +10,7 @@ import {
   Settings,
   Bot,
   Stethoscope,
+  Compass,
   Wrench,
   Monitor,
 } from "lucide-react";
@@ -27,6 +28,7 @@ export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
 
   const tabs = [
     { id: "chat", icon: MessageSquare, label: t("nav.chat") },
+    { id: "steersman", icon: Compass, label: "Штурман" },
     { id: "sessions", icon: Clock, label: t("nav.sessions") },
     { id: "kanban", icon: Layers, label: t("nav.kanban") },
     { id: "models", icon: Cpu, label: t("nav.models") },
