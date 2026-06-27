@@ -108,11 +108,20 @@ pub struct PublicConnectionConfig {
 
 impl From<&ConnectionConfig> for PublicConnectionConfig {
     fn from(cfg: &ConnectionConfig) -> Self {
+        // The API key lives in the keyring now; report its presence/length
+        // from there rather than from the (always-empty) on-disk field.
+        let key = get_remote_api_key();
+        let (has, len) = if key.is_empty() {
+            // Fallback for a not-yet-migrated plaintext key.
+            (!cfg.api_key.is_empty(), cfg.api_key.len())
+        } else {
+            (true, key.len())
+        };
         Self {
             mode: cfg.mode.clone(),
             remote_url: cfg.remote_url.clone(),
-            has_api_key: !cfg.api_key.is_empty(),
-            api_key_length: cfg.api_key.len(),
+            has_api_key: has,
+            api_key_length: len,
             ssh: cfg.ssh.clone(),
         }
     }
@@ -127,17 +136,62 @@ pub fn read_desktop_config(hermes_home: &Path) -> ConnectionConfig {
     if !path.exists() {
         return ConnectionConfig::default();
     }
-    match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => ConnectionConfig::default(),
+    let mut cfg = match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<ConnectionConfig>(&content).unwrap_or_default(),
+        Err(_) => return ConnectionConfig::default(),
+    };
+
+    // One-time migration: if a plaintext API key is still in desktop.json,
+    // move it into the OS keyring and clear the field on disk. Subsequent
+    // reads pull the key from the keyring via get_remote_api_key().
+    if !cfg.api_key.is_empty() {
+        let migrated = crate::secrets::migrate(crate::secrets::account::REMOTE_API_KEY, &cfg.api_key);
+        if migrated {
+            // Rewrite the file without the plaintext key. If the rewrite
+            // fails we keep the old file; the key is now ALSO in keyring,
+            // so get_remote_api_key() still resolves it.
+            cfg.api_key.clear();
+            let _ = write_desktop_config(hermes_home, &cfg);
+        }
     }
+
+    cfg
+}
+
+/// Resolve the remote API key, preferring the OS keyring and falling back to
+/// the (legacy) plaintext field in desktop.json.
+pub fn get_remote_api_key() -> String {
+    match crate::secrets::get(crate::secrets::account::REMOTE_API_KEY) {
+        Ok(Some(k)) => k,
+        // Fallback: a non-migrated plaintext key, or keyring unavailable.
+        _ => String::new(),
+    }
+}
+
+/// Persist the remote API key into the OS keyring. Also clears any stale
+/// plaintext copy from desktop.json so the key lives in exactly one place.
+pub fn set_remote_api_key(hermes_home: &Path, api_key: &str) -> Result<(), String> {
+    if api_key.is_empty() {
+        // Empty value = user cleared the key. Remove from keyring.
+        crate::secrets::delete(crate::secrets::account::REMOTE_API_KEY)?;
+    } else {
+        crate::secrets::set(crate::secrets::account::REMOTE_API_KEY, api_key)?;
+    }
+    // Ensure desktop.json no longer carries the plaintext key.
+    let mut cfg = read_desktop_config(hermes_home);
+    if !cfg.api_key.is_empty() {
+        cfg.api_key.clear();
+        write_desktop_config(hermes_home, &cfg)?;
+    }
+    Ok(())
 }
 
 pub fn write_desktop_config(hermes_home: &Path, config: &ConnectionConfig) -> Result<(), String> {
     let path = desktop_config_path(hermes_home);
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Serialization error: {}", e))?;
-    // desktop.json may carry the remote API key, so restrict it to the owner.
+    // desktop.json no longer stores the API key (moved to keyring), but it may
+    // still hold the SSH key path, so keep it owner-only.
     write_secret_file(&path, &json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
