@@ -1,6 +1,5 @@
 // src/stores/gatewayStore.ts
 import { create } from "zustand";
-import type { AgentClient } from "../lib/agent-client";
 import type {
   AgentStatus,
   Session,
@@ -13,7 +12,6 @@ import type {
 const MAX_EVENTS = 1000;
 
 interface GatewayState {
-  client: AgentClient | null;
   connected: boolean;
   error: string | null;
   agentStatus: AgentStatus;
@@ -28,7 +26,6 @@ interface GatewayState {
   hermesHome: string | null;
   gatewayVersion: string | null;
 
-  setClient: (client: AgentClient | null) => void;
   setConnected: (connected: boolean) => void;
   setError: (error: string | null) => void;
   setAgentStatus: (status: AgentStatus) => void;
@@ -54,7 +51,6 @@ const INITIAL_PIPELINE_STATUS: PipelineStatus = {
 };
 
 export const useGatewayStore = create<GatewayState>()((set) => ({
-  client: null,
   connected: false,
   error: null,
   agentStatus: "idle",
@@ -68,7 +64,6 @@ export const useGatewayStore = create<GatewayState>()((set) => ({
   hermesHome: null,
   gatewayVersion: null,
 
-  setClient: (client: AgentClient | null) => set({ client }),
   setConnected: (connected: boolean) => set({ connected }),
   setError: (error: string | null) => set({ error }),
   setAgentStatus: (agentStatus: AgentStatus) => set({ agentStatus }),
@@ -109,5 +104,3 @@ export const useGatewayStore = create<GatewayState>()((set) => ({
       pipelineStatus: INITIAL_PIPELINE_STATUS,
     }),
 }));
-
-export type { AgentClient };

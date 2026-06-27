@@ -185,6 +185,31 @@ pub fn test_ssh_connection(config: &SshConfig) -> Result<bool, String> {
 
 // ── SSH remote exec ───────────────────────────────────────────────────────
 
+/// Validate a path is safe to interpolate into a remote shell command.
+/// A trusted path must look like a filesystem path: it may contain
+/// alphanumerics, `/`, `-`, `_`, `.`, `~` (only as a leading component),
+/// and must contain no shell metacharacters or whitespace beyond the path.
+///
+/// This is the last line of defense before a caller-supplied path reaches
+/// a remote shell via `ssh ... <command>`.
+pub fn is_safe_shell_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // Allow a single leading ~/ for home-relative paths
+    let p = path.strip_prefix("~/").unwrap_or(path);
+    if p.is_empty() {
+        return false;
+    }
+    p.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || c == '/'
+            || c == '-'
+            || c == '_'
+            || c == '.'
+    })
+}
+
 pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<String, String> {
     let key_path = expand_tilde(&config.key_path);
 
@@ -212,5 +237,31 @@ pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("SSH command failed ({}): {}", output.status, stderr))
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_shell_paths() {
+        assert!(is_safe_shell_path("/usr/local/bin/python3"));
+        assert!(is_safe_shell_path("~/steersman/venv/bin/python"));
+        assert!(is_safe_shell_path("/home/x/.hermes/venv/bin/python-3.11"));
+    }
+
+    #[test]
+    fn unsafe_shell_paths_rejected() {
+        // classic command-injection payloads must all be rejected
+        assert!(!is_safe_shell_path("; rm -rf ~ ;"));
+        assert!(!is_safe_shell_path("/bin/x$(whoami)"));
+        assert!(!is_safe_shell_path("/tmp/x`id`"));
+        assert!(!is_safe_shell_path("/a/b|cat"));
+        assert!(!is_safe_shell_path("/a/b\nrm"));
+        assert!(!is_safe_shell_path(""));
+        assert!(!is_safe_shell_path("~/")); // empty after ~/ prefix
     }
 }

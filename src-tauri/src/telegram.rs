@@ -123,7 +123,10 @@ pub async fn validate_bot_token(bot_token: &str) -> TelegramResult {
     }
 }
 
-/// Save Telegram config to desktop.json
+/// Save Telegram config to telegram.json
+///
+/// The file holds the bot token, so it is written with mode 0600 (owner-only)
+/// on unix to limit exposure to other local users.
 pub fn save_config(
     hermes_home: &std::path::Path,
     config: &TelegramConfig,
@@ -131,8 +134,18 @@ pub fn save_config(
     let config_path = hermes_home.join("telegram.json");
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Serialization error: {}", e))?;
-    std::fs::write(&config_path, json)
-        .map_err(|e| format!("Write error: {}", e))?;
+    write_secret_file(&config_path, &json).map_err(|e| format!("Write error: {}", e))?;
+    Ok(())
+}
+
+/// Write a file containing a secret with mode 0600 on unix (owner-only).
+fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    std::fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

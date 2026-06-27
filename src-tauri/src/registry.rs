@@ -173,11 +173,25 @@ pub fn get_installed(hermes_home: &Path, profile: Option<&str>) -> InstalledRegi
 }
 
 /// Install a skill from the registry.
+///
+/// The registry item's identifier (not its raw `source`/`path`) is used as
+/// the on-disk skill directory name. `install_skill` additionally enforces
+/// that the identifier is a single safe path component, so a malicious or
+/// corrupted registry entry cannot traverse outside the skills directory.
 pub fn install_from_registry(
     hermes_home: &Path,
     profile: Option<&str>,
     item: &RegistryItem,
 ) -> Result<(), String> {
-    let source = item.source.as_ref().ok_or("No source path for this item")?;
-    crate::skills::install_skill(hermes_home, profile, source)
+    // Prefer the stable `id`; fall back to `name`. Never use `source`/`path`
+    // directly, since those are free-form strings from a remote catalog.
+    let identifier = if !item.id.trim().is_empty() {
+        item.id.trim()
+    } else if !item.name.trim().is_empty() {
+        item.name.trim()
+    } else {
+        return Err("Registry item has no id or name".to_string());
+    };
+
+    crate::skills::install_skill(hermes_home, profile, identifier)
 }
