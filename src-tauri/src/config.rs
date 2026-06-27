@@ -138,7 +138,7 @@ pub fn write_desktop_config(hermes_home: &Path, config: &ConnectionConfig) -> Re
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Serialization error: {}", e))?;
     // desktop.json may carry the remote API key, so restrict it to the owner.
-    write_secret_file(&path, json).map_err(|e| format!("Write error: {}", e))?;
+    write_secret_file(&path, &json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
 
