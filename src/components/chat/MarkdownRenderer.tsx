@@ -35,7 +35,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
           }
           return (
             <code
-              className="bg-gray-200 dark:bg-gray-700 px-1 py-0.5 rounded text-sm"
+              className="bg-ac-surface-2 px-1 py-0.5 rounded text-sm"
               {...props}
             >
               {children}

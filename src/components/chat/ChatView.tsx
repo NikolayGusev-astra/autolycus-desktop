@@ -269,7 +269,7 @@ export function ChatView() {
   );
 
   return (
-    <div className="flex h-full flex-col bg-white dark:bg-gray-900">
+    <div className="flex h-full flex-col bg-ac-bg">
       <div className="flex-1 overflow-hidden">
         <MessageList />
       </div>

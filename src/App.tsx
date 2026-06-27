@@ -37,6 +37,19 @@ export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
   const [activeTab, setActiveTab] = useState("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [detectedInstances, setDetectedInstances] = useState<
+    Array<{
+      path: string;
+      instance_type: string;
+      version: string;
+      gateway_running: boolean;
+      gateway_port: number | null;
+      active_profile: string;
+      home_dir?: string;
+      label?: string;
+    }>
+  >([]);
   const { sidebarOpen } = useUIStore();
   const {
     connected,
@@ -55,12 +68,38 @@ export function App() {
           "init_app"
         );
         setHermesHome(result.hermes_home);
+        setAppVersion(result.version);
       } catch (err) {
         console.error("Failed to initialize app:", err);
       }
     };
     init();
   }, [setHermesHome]);
+
+  // Detect existing agent installations once, to offer adopting an
+  // environment on the welcome screen.
+  useEffect(() => {
+    const detect = async () => {
+      try {
+        const instances = await invoke<
+          Array<{
+            path: string;
+            instance_type: string;
+            version: string;
+            gateway_running: boolean;
+            gateway_port: number | null;
+            active_profile: string;
+            home_dir?: string;
+            label?: string;
+          }>
+        >("detect_local_instances_cmd");
+        setDetectedInstances(instances ?? []);
+      } catch (err) {
+        console.error("Instance detection failed:", err);
+      }
+    };
+    detect();
+  }, []);
 
   const handleSplashComplete = useCallback((autoconnect: boolean) => {
     setScreen(autoconnect ? "connection" : "welcome");
@@ -69,6 +108,30 @@ export function App() {
   const handleGetStarted = useCallback(() => {
     setScreen("connection");
   }, []);
+
+  // Adopt an existing agent environment: set HERMES_HOME to the chosen
+  // instance's home, then proceed to the connection screen.
+  const handleConnectInstance = useCallback(
+    async (instance: {
+      home_dir?: string;
+      label?: string;
+      instance_type: string;
+    }) => {
+      try {
+        const resolvedHome = await invoke<string>("connect_to_instance", {
+          instance,
+        });
+        setHermesHome(resolvedHome);
+        setScreen("connection");
+      } catch (err) {
+        console.error("Failed to connect to instance:", err);
+        setError(String(err));
+        // Fall through to manual connection on failure.
+        setScreen("connection");
+      }
+    },
+    [setHermesHome, setError]
+  );
 
   const handleConnected = useCallback(() => {
     setConnected(true);
@@ -109,7 +172,14 @@ export function App() {
   }
 
   if (screen === "welcome") {
-    return <WelcomeScreen onGetStarted={handleGetStarted} />;
+    return (
+      <WelcomeScreen
+        onGetStarted={handleGetStarted}
+        detectedInstances={detectedInstances}
+        appVersion={appVersion}
+        onConnectInstance={handleConnectInstance}
+      />
+    );
   }
 
   if (screen === "connection" && !connected) {

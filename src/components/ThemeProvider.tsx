@@ -23,7 +23,7 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: "system",
-  resolved: DEFAULT_DARK_THEME,
+  resolved: DEFAULT_LIGHT_THEME,
   setTheme: () => {},
   rounded: true,
   setRounded: () => {},
@@ -50,7 +50,8 @@ export function ThemeProvider({
   const [theme, setThemeState] = useState<Theme>(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === "system" || (stored && THEME_IDS.has(stored))) return stored;
-    return DEFAULT_DARK_THEME;
+    // Brand default is the light Штурман theme.
+    return DEFAULT_LIGHT_THEME;
   });
   const [resolved, setResolved] = useState<string>(() => resolve(theme));
   const [rounded, setRoundedState] = useState<boolean>(

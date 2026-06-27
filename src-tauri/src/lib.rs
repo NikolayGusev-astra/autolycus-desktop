@@ -108,12 +108,58 @@ pub struct RemoteInstanceInfo {
 #[tauri::command]
 async fn init_app(state: State<'_, AppState>) -> Result<InitResult, String> {
     let hermes_home = config::resolve_hermes_home();
+
+    // Harden secret-bearing files: files created before the 0600 fix (PR #2)
+    // may still be world/group-readable. Tighten them on every start so an
+    // existing install is brought up to current policy. Missing files are
+    // skipped; non-unix platforms are no-ops.
+    harden_secret_files(&hermes_home);
+
     state.hermes_home.store(Some(std::sync::Arc::new(hermes_home.clone())));
 
     Ok(InitResult {
         hermes_home: hermes_home.to_string_lossy().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Ensure files that may hold secrets are owner-only (0600) on unix.
+/// Idempotent and best-effort: failures are logged, never fatal.
+fn harden_secret_files(hermes_home: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["desktop.json", "telegram.json", ".env", "auth.json"] {
+            let path = hermes_home.join(name);
+            let mode = match std::fs::metadata(&path) {
+                Ok(m) => m.permissions().mode(),
+                Err(_) => continue, // file absent — nothing to harden
+            };
+            // Only chmod if more permissive than 0600 (owner rw).
+            if mode & 0o077 != 0 {
+                if let Err(e) = std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o600),
+                ) {
+                    eprintln!(
+                        "[steersman] warning: could not tighten permissions on {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    eprintln!(
+                        "[steersman] hardened '{}' to 0600 (was {:o})",
+                        path.display(),
+                        mode & 0o777
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = hermes_home;
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +205,36 @@ async fn check_python_path(path: String) -> Result<bool, String> {
 #[tauri::command]
 async fn detect_local_instances_cmd() -> Result<Vec<discovery::DetectedInstance>, String> {
     Ok(discovery::detect_local_instances())
+}
+
+/// Connect to a detected agent instance — adopt its environment.
+///
+/// The user picks an instance from the discovery list; we set HERMES_HOME to
+/// that instance's home dir (falling back to a resolved one) so the rest of
+/// the app reuses its profiles, skills, and secrets instead of bootstrapping
+/// a new environment. Returns the resolved home dir.
+#[tauri::command]
+async fn connect_to_instance(
+    state: State<'_, AppState>,
+    instance: discovery::DetectedInstance,
+) -> Result<String, String> {
+    // Prefer the instance's reported home dir; otherwise resolve the default.
+    let home = match instance.home_dir {
+        Some(h) if !h.is_empty() => PathBuf::from(h),
+        _ => config::resolve_hermes_home(),
+    };
+
+    // Sanity-check: a real agent home should be a directory that exists.
+    if !home.is_dir() {
+        return Err(format!(
+            "Instance home '{}' does not exist or is not a directory",
+            home.display()
+        ));
+    }
+
+    state.hermes_home.store(Some(std::sync::Arc::new(home.clone())));
+
+    Ok(home.to_string_lossy().to_string())
 }
 
 /// Detect Python/steersman instances on a remote machine via SSH
@@ -1214,6 +1290,16 @@ async fn set_credential_pool_cmd(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Single-instance: a second launch focuses the existing window instead
+        // of starting a duplicate process (which would also fail to register
+        // the global hotkey a second time and panic).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(AppState::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -1289,18 +1375,28 @@ pub fn run() {
                 eprintln!("[steersman] warning: tray icon unavailable on this platform, continuing without it: {}", e);
             }
 
-            // ── Global shortcut: Ctrl+Shift+S ──────────────────────────
+            // ── Global shortcut: Ctrl+Shift+S (best-effort) ────────────
+            // If the shortcut is already taken (e.g. by another app or a stale
+            // instance), registration fails — but that must not abort startup.
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            app.global_shortcut().on_shortcut("Control+Shift+S", move |app, _shortcut, _event| {
-                if let Some(window) = app.get_webview_window("main") {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                    } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+            if let Err(e) = app.global_shortcut().on_shortcut(
+                "Control+Shift+S",
+                move |app, _shortcut, _event| {
+                    if let Some(window) = app.get_webview_window("main") {
+                        if window.is_visible().unwrap_or(false) {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
                     }
-                }
-            })?;
+                },
+            ) {
+                eprintln!(
+                    "[steersman] warning: global shortcut Ctrl+Shift+S unavailable, continuing without it: {}",
+                    e
+                );
+            }
 
             Ok(())
         })
@@ -1310,6 +1406,7 @@ pub fn run() {
             detect_instances,
             check_python_path,
             detect_local_instances_cmd,
+            connect_to_instance,
             detect_remote_instances_cmd,
             get_app_version,
             get_versions_cmd,

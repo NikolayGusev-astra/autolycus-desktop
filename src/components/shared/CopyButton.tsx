@@ -29,11 +29,11 @@ export function CopyButton({ text }: CopyButtonProps) {
   return (
     <button
       onClick={handleCopy}
-      className="p-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+      className="p-1 rounded bg-ac-surface-2 hover:bg-ac-border text-ac-muted transition-colors"
       title="Copy to clipboard"
     >
       {copied ? (
-        <Check className="w-3.5 h-3.5 text-green-400" />
+        <Check className="w-3.5 h-3.5 text-ac-green" />
       ) : (
         <Copy className="w-3.5 h-3.5" />
       )}

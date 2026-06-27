@@ -31,7 +31,7 @@ export function MessageList() {
 
   if (grouped.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-gray-400">
+      <div className="flex h-full items-center justify-center text-ac-faint">
         <div className="text-center">
           <p className="text-lg mb-1">Welcome to Штурман</p>
           <p className="text-sm">Send a message to start chatting</p>
