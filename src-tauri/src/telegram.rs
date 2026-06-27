@@ -123,22 +123,32 @@ pub async fn validate_bot_token(bot_token: &str) -> TelegramResult {
     }
 }
 
-/// Save Telegram config to telegram.json
+/// Save Telegram config.
 ///
-/// The file holds the bot token, so it is written with mode 0600 (owner-only)
-/// on unix to limit exposure to other local users.
+/// The bot token is stored in the OS keyring; telegram.json keeps only
+/// `chat_id`/`enabled` (no secret). A one-time plaintext token still present
+/// on disk is migrated on load.
 pub fn save_config(
     hermes_home: &std::path::Path,
     config: &TelegramConfig,
 ) -> Result<(), String> {
+    // Token → keyring.
+    crate::secrets::set(crate::secrets::account::TELEGRAM_BOT_TOKEN, &config.bot_token)?;
+
+    // Non-secret fields → telegram.json (still 0600 for consistency).
+    let on_disk = TelegramConfig {
+        bot_token: String::new(),
+        chat_id: config.chat_id.clone(),
+        enabled: config.enabled,
+    };
     let config_path = hermes_home.join("telegram.json");
-    let json = serde_json::to_string_pretty(config)
+    let json = serde_json::to_string_pretty(&on_disk)
         .map_err(|e| format!("Serialization error: {}", e))?;
     write_secret_file(&config_path, &json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
 
-/// Write a file containing a secret with mode 0600 on unix (owner-only).
+/// Write a file with mode 0600 on unix (owner-only).
 fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)?;
     #[cfg(unix)]
@@ -149,27 +159,54 @@ fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<(
     Ok(())
 }
 
-/// Load Telegram config from desktop.json
+/// Load Telegram config.
+///
+/// The bot token is read from the keyring. If a plaintext token is still in
+/// telegram.json (pre-migration), it is moved to the keyring and cleared on
+/// disk on the next save.
 pub fn load_config(hermes_home: &std::path::Path) -> TelegramConfig {
     let config_path = hermes_home.join("telegram.json");
-    if !config_path.exists() {
-        return TelegramConfig {
+    let mut on_disk = if !config_path.exists() {
+        TelegramConfig {
             bot_token: String::new(),
             chat_id: String::new(),
             enabled: false,
-        };
+        }
+    } else {
+        std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| TelegramConfig {
+                bot_token: String::new(),
+                chat_id: String::new(),
+                enabled: false,
+            })
+    };
+
+    // One-time migration of a plaintext token into the keyring.
+    if !on_disk.bot_token.is_empty() {
+        if crate::secrets::migrate(crate::secrets::account::TELEGRAM_BOT_TOKEN, &on_disk.bot_token) {
+            on_disk.bot_token.clear();
+            // Persist the cleaned config immediately so the token is gone.
+            let cleaned = TelegramConfig {
+                bot_token: String::new(),
+                chat_id: on_disk.chat_id.clone(),
+                enabled: on_disk.enabled,
+            };
+            let json = serde_json::to_string_pretty(&cleaned).unwrap_or_default();
+            let _ = write_secret_file(&config_path, &json);
+        }
     }
 
-    match std::fs::read_to_string(&config_path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| TelegramConfig {
-            bot_token: String::new(),
-            chat_id: String::new(),
-            enabled: false,
-        }),
-        Err(_) => TelegramConfig {
-            bot_token: String::new(),
-            chat_id: String::new(),
-            enabled: false,
-        },
+    // Resolve the token from the keyring (fallback to empty / plaintext).
+    let bot_token = crate::secrets::get(crate::secrets::account::TELEGRAM_BOT_TOKEN)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    TelegramConfig {
+        bot_token,
+        chat_id: on_disk.chat_id,
+        enabled: on_disk.enabled,
     }
 }

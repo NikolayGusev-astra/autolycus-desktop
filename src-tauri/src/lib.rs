@@ -18,6 +18,7 @@ mod mcp;
 mod profiles;
 mod provider_registry;
 mod registry;
+mod secrets;
 mod sessions;
 mod skills;
 mod ssh;
@@ -229,10 +230,14 @@ async fn set_connection_config(
     let hermes_home = state.hermes_home.lock().unwrap().clone()
         .ok_or("App not initialized")?;
 
+    // The API key goes to the OS keyring, not into desktop.json. The on-disk
+    // config keeps an empty api_key field (legacy compat) — see set_remote_api_key.
+    config::set_remote_api_key(&hermes_home, &api_key)?;
+
     let cfg = ConnectionConfig {
         mode,
         remote_url,
-        api_key,
+        api_key: String::new(),
         ssh: SshConfig {
             host: ssh_host,
             port: ssh_port,
@@ -387,13 +392,16 @@ async fn send_message_cmd(
         _ => ConnectionMode::Local,
     };
 
+    // API key now lives in the OS keyring (migrated out of desktop.json).
+    let remote_api_key = config::get_remote_api_key();
+
     send_message(
         &state.gateway,
         &state.ssh,
         &hermes_home,
         &mode,
         &conn_cfg.remote_url,
-        &conn_cfg.api_key,
+        &remote_api_key,
         &Some(conn_cfg.ssh),
         request,
         &app_handle,
