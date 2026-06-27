@@ -33,6 +33,7 @@ chrono = "0.4"
 base64 = "0.22"
 keyring = "2"
 regex = "1"
+arc-swap = "1"
 
 # macOS universal binary cross-compile: OpenSSL not found via pkg-config.
 # Vendored build compiles OpenSSL from source (adds ~2 min to build time).

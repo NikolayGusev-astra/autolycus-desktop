@@ -33,8 +33,8 @@ impl SshState {
 // ── Tunnel URL ────────────────────────────────────────────────────────────
 
 pub fn get_tunnel_url(state: &SshState) -> Option<String> {
-    let running = *state.tunnel_running.lock().unwrap();
-    let config = state.active_config.lock().unwrap();
+    let running = *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner());
+    let config = state.active_config.lock().unwrap_or_else(|p| p.into_inner());
     if running {
         config.as_ref().map(|c| format!("http://127.0.0.1:{}", c.local_port))
     } else {
@@ -43,7 +43,7 @@ pub fn get_tunnel_url(state: &SshState) -> Option<String> {
 }
 
 pub fn is_tunnel_active(state: &SshState) -> bool {
-    *state.tunnel_running.lock().unwrap()
+    *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 // ── Health check ──────────────────────────────────────────────────────────
@@ -135,9 +135,9 @@ pub fn start_ssh_tunnel(state: &SshState, config: &SshConfig) -> Result<(), Stri
         }
     }
 
-    *state.tunnel_process.lock().unwrap() = Some(child);
-    *state.active_config.lock().unwrap() = Some(config.clone());
-    *state.tunnel_running.lock().unwrap() = true;
+    *state.tunnel_process.lock().unwrap_or_else(|p| p.into_inner()) = Some(child);
+    *state.active_config.lock().unwrap_or_else(|p| p.into_inner()) = Some(config.clone());
+    *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner()) = true;
 
     Ok(())
 }
@@ -145,7 +145,7 @@ pub fn start_ssh_tunnel(state: &SshState, config: &SshConfig) -> Result<(), Stri
 // ── Stop tunnel ───────────────────────────────────────────────────────────
 
 pub fn stop_ssh_tunnel(state: &SshState) {
-    let mut process = state.tunnel_process.lock().unwrap();
+    let mut process = state.tunnel_process.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(mut child) = process.take() {
         #[cfg(unix)]
         {
@@ -156,8 +156,8 @@ pub fn stop_ssh_tunnel(state: &SshState) {
         }
         let _ = child.wait();
     }
-    *state.active_config.lock().unwrap() = None;
-    *state.tunnel_running.lock().unwrap() = false;
+    *state.active_config.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner()) = false;
 }
 
 // ── Test SSH connection ───────────────────────────────────────────────────

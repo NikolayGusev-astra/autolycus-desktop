@@ -40,7 +40,6 @@ pub struct GatewayProcess {
 pub struct GatewayState {
     pub processes: Arc<Mutex<HashMap<String, GatewayProcess>>>,
     pub api_server_available: Arc<Mutex<Option<bool>>>,
-    pub hermes_home: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl GatewayState {
@@ -48,7 +47,6 @@ impl GatewayState {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             api_server_available: Arc::new(Mutex::new(None)),
-            hermes_home: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -112,7 +110,7 @@ pub fn start_gateway(
 
     // Check if already running
     {
-        let processes = state.processes.lock().unwrap();
+        let processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
         if processes.contains_key(&profile_key) {
             return GatewayStartResult {
                 success: true,
@@ -219,7 +217,7 @@ pub fn start_gateway(
 
     // Store process
     {
-        let mut processes = state.processes.lock().unwrap();
+        let mut processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
         processes.insert(
             profile_key.clone(),
             GatewayProcess {
@@ -233,7 +231,7 @@ pub fn start_gateway(
 
     // Mark API as available
     {
-        let mut api = state.api_server_available.lock().unwrap();
+        let mut api = state.api_server_available.lock().unwrap_or_else(|p| p.into_inner());
         *api = Some(true);
     }
 
@@ -251,7 +249,7 @@ pub fn start_gateway(
 pub fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), String> {
     let profile_key = profile.unwrap_or("default").to_string();
 
-    let mut processes = state.processes.lock().unwrap();
+    let mut processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(mut gw) = processes.remove(&profile_key) {
         // Graceful shutdown: SIGTERM → wait → SIGKILL
         #[cfg(unix)]
@@ -295,7 +293,7 @@ pub fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), S
 pub fn is_gateway_running(state: &GatewayState, profile: Option<&str>) -> bool {
     let profile_key = profile.unwrap_or("default").to_string();
 
-    let mut processes = state.processes.lock().unwrap();
+    let mut processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(gw) = processes.get_mut(&profile_key) {
         match gw.child.try_wait() {
             Ok(None) => true, // Still running
@@ -313,7 +311,7 @@ pub fn is_gateway_running(state: &GatewayState, profile: Option<&str>) -> bool {
 
 pub fn get_gateway_port(state: &GatewayState, profile: Option<&str>) -> Option<u16> {
     let profile_key = profile.unwrap_or("default").to_string();
-    let processes = state.processes.lock().unwrap();
+    let processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
     processes.get(&profile_key).map(|gw| gw.port)
 }
 

@@ -46,20 +46,33 @@ pub use ssh::SshState;
 pub struct AppState {
     pub gateway: GatewayState,
     pub ssh: SshState,
-    pub hermes_home: Arc<Mutex<Option<PathBuf>>>,
+    /// Resolved HERMES_HOME. Set once during init_app, read by every command.
+    /// Lock-free (ArcSwap) so reads never block the async runtime and there is
+    /// no mutex to poison.
+    pub hermes_home: arc_swap::ArcSwapOption<PathBuf>,
     pub auth: auth::AuthState,
 }
-
-use std::sync::Mutex;
 
 impl AppState {
     fn new() -> Self {
         Self {
             gateway: GatewayState::new(),
             ssh: SshState::new(),
-            hermes_home: Arc::new(Mutex::new(None)),
+            hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
         }
+    }
+
+    /// Read the resolved HERMES_HOME. Returns `Err` if init_app has not run yet.
+    /// Lock-free; safe to call from async commands without blocking the runtime.
+    fn hermes_home(&self) -> Result<PathBuf, String> {
+        // load_full() -> Option<Guard<Arc<PathBuf>>>. Guard derefs to
+        // Arc<PathBuf>; as_ref() yields &Arc<PathBuf> -> &PathBuf via deref,
+        // to_path_buf() clones out an owned PathBuf.
+        self.hermes_home
+            .load_full()
+            .map(|guard| guard.as_ref().to_path_buf())
+            .ok_or_else(|| "App not initialized".to_string())
     }
 }
 
@@ -94,7 +107,7 @@ pub struct RemoteInstanceInfo {
 #[tauri::command]
 async fn init_app(state: State<'_, AppState>) -> Result<InitResult, String> {
     let hermes_home = config::resolve_hermes_home();
-    *state.hermes_home.lock().unwrap() = Some(hermes_home.clone());
+    state.hermes_home.store(Some(std::sync::Arc::new(hermes_home.clone())));
 
     Ok(InitResult {
         hermes_home: hermes_home.to_string_lossy().to_string(),
@@ -206,8 +219,7 @@ struct VersionsInfo {
 /// Get connection config
 #[tauri::command]
 async fn get_connection_config(state: State<'_, AppState>) -> Result<PublicConnectionConfig, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     let cfg = config::read_desktop_config(&hermes_home);
     Ok(PublicConnectionConfig::from(&cfg))
 }
@@ -226,8 +238,7 @@ async fn set_connection_config(
     ssh_remote_port: u16,
     ssh_local_port: u16,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     let cfg = ConnectionConfig {
         mode,
@@ -284,8 +295,7 @@ async fn start_gateway_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<GatewayStartResult, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     Ok(gateway::start_gateway(
         &state.gateway,
@@ -376,8 +386,7 @@ async fn send_message_cmd(
     app_handle: AppHandle,
     request: SendMessageRequest,
 ) -> Result<String, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     let conn_cfg = config::read_desktop_config(&hermes_home);
 
@@ -411,8 +420,7 @@ async fn list_sessions_cmd(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<SessionSummary>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     sessions::list_sessions(
         &hermes_home,
@@ -430,8 +438,7 @@ async fn get_session_messages_cmd(
     session_id: String,
     profile: Option<String>,
 ) -> Result<Vec<SessionMessage>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     sessions::get_session_messages(&hermes_home, profile.as_deref(), &session_id)
         .map_err(|e| format!("SQLite error: {}", e))
@@ -445,8 +452,7 @@ async fn search_sessions_cmd(
     limit: Option<i64>,
     profile: Option<String>,
 ) -> Result<Vec<sessions::SearchResult>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     sessions::search_sessions(
         &hermes_home,
@@ -464,8 +470,7 @@ async fn delete_session_cmd(
     session_id: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     sessions::delete_session(&hermes_home, profile.as_deref(), &session_id)
         .map_err(|e| format!("SQLite error: {}", e))
@@ -477,8 +482,7 @@ async fn get_session_stats_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<SessionStats, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     sessions::get_session_stats(&hermes_home, profile.as_deref())
         .map_err(|e| format!("SQLite error: {}", e))
@@ -491,8 +495,7 @@ async fn get_session_stats_cmd(
 async fn list_profiles_cmd(
     state: State<'_, AppState>,
 ) -> Result<Vec<ProfileInfo>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     let active = profiles::get_active_profile(&hermes_home);
     Ok(profiles::list_profiles(&hermes_home, active.as_deref()))
@@ -505,8 +508,7 @@ async fn create_profile_cmd(
     name: String,
     clone: bool,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     profiles::create_profile(&hermes_home, &name, clone)
 }
@@ -517,8 +519,7 @@ async fn delete_profile_cmd(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     profiles::delete_profile(&hermes_home, &name)
 }
@@ -529,8 +530,7 @@ async fn set_active_profile_cmd(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     profiles::set_active_profile(&hermes_home, &name)
 }
@@ -542,8 +542,7 @@ async fn set_active_profile_cmd(
 async fn list_models_cmd(
     state: State<'_, AppState>,
 ) -> Result<Vec<SavedModel>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     Ok(models::list_models(&hermes_home))
 }
@@ -557,8 +556,7 @@ async fn add_model_cmd(
     model: String,
     base_url: String,
 ) -> Result<SavedModel, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     models::add_model(&hermes_home, &name, &provider, &model, &base_url)
 }
@@ -569,8 +567,7 @@ async fn remove_model_cmd(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     models::remove_model(&hermes_home, &id)
 }
@@ -582,8 +579,7 @@ async fn update_model_cmd(
     id: String,
     fields: std::collections::HashMap<String, String>,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     models::update_model(&hermes_home, &id, &fields)
 }
@@ -596,8 +592,7 @@ async fn get_env_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     Ok(config::read_env(&hermes_home, profile.as_deref()))
 }
@@ -610,8 +605,7 @@ async fn set_env_cmd(
     value: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     config::write_env_value(&hermes_home, profile.as_deref(), &key, &value)
 }
@@ -622,8 +616,7 @@ async fn get_model_config_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<config::ModelConfig, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     Ok(config::get_model_config(&hermes_home, profile.as_deref()))
 }
@@ -637,8 +630,7 @@ async fn set_model_config_cmd(
     base_url: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     config::set_model_config(&hermes_home, profile.as_deref(), &provider, &model, &base_url)
 }
@@ -651,8 +643,7 @@ async fn list_installed_skills_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<Vec<skills::InstalledSkill>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     Ok(skills::list_installed_skills(&hermes_home, profile.as_deref()))
 }
@@ -664,8 +655,7 @@ async fn get_skill_content_cmd(
     skill_name: String,
     profile: Option<String>,
 ) -> Result<String, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     skills::get_skill_content(&hermes_home, profile.as_deref(), &skill_name)
 }
 
@@ -676,8 +666,7 @@ async fn install_skill_cmd(
     identifier: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     skills::install_skill(&hermes_home, profile.as_deref(), &identifier)
 }
@@ -689,8 +678,7 @@ async fn uninstall_skill_cmd(
     name: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     skills::uninstall_skill(&hermes_home, profile.as_deref(), &name)
 }
@@ -703,8 +691,7 @@ async fn read_memory_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<memory::MemoryReadResult, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     Ok(memory::read_memory(&hermes_home, profile.as_deref()))
 }
 
@@ -715,8 +702,7 @@ async fn write_user_profile_cmd(
     content: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     memory::write_user_profile(&hermes_home, profile.as_deref(), &content)
 }
 
@@ -727,8 +713,7 @@ async fn add_memory_entry_cmd(
     content: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     memory::add_memory_entry(&hermes_home, profile.as_deref(), &content)
 }
 
@@ -740,8 +725,7 @@ async fn update_memory_entry_cmd(
     content: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     memory::update_memory_entry(&hermes_home, profile.as_deref(), index, &content)
 }
 
@@ -752,8 +736,7 @@ async fn remove_memory_entry_cmd(
     index: usize,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     memory::remove_memory_entry(&hermes_home, profile.as_deref(), index)
 }
 
@@ -812,8 +795,7 @@ async fn save_telegram_config_cmd(
     state: State<'_, AppState>,
     config: telegram::TelegramConfig,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     telegram::save_config(&hermes_home, &config)
 }
 
@@ -822,8 +804,7 @@ async fn save_telegram_config_cmd(
 async fn load_telegram_config_cmd(
     state: State<'_, AppState>,
 ) -> Result<telegram::TelegramConfig, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     Ok(telegram::load_config(&hermes_home))
 }
 
@@ -907,8 +888,7 @@ async fn get_installed_registry_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<registry::InstalledRegistry, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     Ok(registry::get_installed(&hermes_home, profile.as_deref()))
 }
 
@@ -919,8 +899,7 @@ async fn install_from_registry_cmd(
     item: registry::RegistryItem,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     registry::install_from_registry(&hermes_home, profile.as_deref(), &item)
 }
 
@@ -932,8 +911,7 @@ async fn list_kanban_boards_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<Vec<kanban::KanbanBoard>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::list_boards(&hermes_home, profile.as_deref())
 }
 
@@ -946,8 +924,7 @@ async fn create_kanban_board_cmd(
     description: Option<String>,
     profile: Option<String>,
 ) -> Result<kanban::KanbanBoard, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::create_board(&hermes_home, profile.as_deref(), &slug, &name, description.as_deref())
 }
 
@@ -958,8 +935,7 @@ async fn delete_kanban_board_cmd(
     slug: String,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::delete_board(&hermes_home, profile.as_deref(), &slug)
 }
 
@@ -970,8 +946,7 @@ async fn list_kanban_tasks_cmd(
     board_slug: String,
     profile: Option<String>,
 ) -> Result<kanban::KanbanBoardView, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::list_tasks(&hermes_home, profile.as_deref(), &board_slug)
 }
 
@@ -985,8 +960,7 @@ async fn create_kanban_task_cmd(
     status: String,
     profile: Option<String>,
 ) -> Result<kanban::KanbanTask, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::create_task(&hermes_home, profile.as_deref(), &board_slug, &title, body.as_deref(), &status)
 }
 
@@ -998,8 +972,7 @@ async fn update_kanban_task_cmd(
     fields: std::collections::HashMap<String, String>,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::update_task(&hermes_home, profile.as_deref(), &task_id, &fields)
 }
 
@@ -1010,8 +983,7 @@ async fn delete_kanban_task_cmd(
     task_id: String,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::delete_task(&hermes_home, profile.as_deref(), &task_id)
 }
 
@@ -1023,8 +995,7 @@ async fn move_kanban_task_cmd(
     new_status: String,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     kanban::move_task(&hermes_home, profile.as_deref(), &task_id, &new_status)
 }
 
@@ -1036,8 +1007,7 @@ async fn config_health_check_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<config::ConfigHealthReport, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     Ok(config::run_config_health_check(&hermes_home, profile.as_deref()))
 }
 
@@ -1048,8 +1018,7 @@ async fn auto_fix_config_cmd(
     code: String,
     profile: Option<String>,
 ) -> Result<String, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     config_health::auto_fix_issue(&hermes_home, &code, profile.as_deref())
 }
 
@@ -1061,8 +1030,7 @@ async fn validate_chat_readiness_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<validation::ChatReadiness, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     Ok(validation::validate_chat_readiness(&hermes_home, profile.as_deref()))
 }
 
@@ -1075,8 +1043,7 @@ async fn list_cron_jobs_cmd(
     include_disabled: Option<bool>,
     profile: Option<String>,
 ) -> Result<Vec<cronjobs::CronJob>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     Ok(cronjobs::list_cron_jobs(&hermes_home, profile.as_deref(), include_disabled.unwrap_or(true)))
 }
 
@@ -1090,8 +1057,7 @@ async fn create_cron_job_cmd(
     deliver: Option<String>,
     profile: Option<String>,
 ) -> Result<cronjobs::CronJob, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     cronjobs::create_cron_job(&hermes_home, profile.as_deref(), &schedule, prompt.as_deref(), name.as_deref(), deliver.as_deref())
 }
 
@@ -1102,8 +1068,7 @@ async fn remove_cron_job_cmd(
     job_id: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     cronjobs::remove_cron_job(&hermes_home, profile.as_deref(), &job_id)
 }
 
@@ -1114,8 +1079,7 @@ async fn pause_cron_job_cmd(
     job_id: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     cronjobs::pause_cron_job(&hermes_home, profile.as_deref(), &job_id)
 }
 
@@ -1126,8 +1090,7 @@ async fn resume_cron_job_cmd(
     job_id: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     cronjobs::resume_cron_job(&hermes_home, profile.as_deref(), &job_id)
 }
 
@@ -1138,8 +1101,7 @@ async fn trigger_cron_job_cmd(
     job_id: String,
     profile: Option<String>,
 ) -> Result<String, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     cronjobs::trigger_cron_job(&hermes_home, profile.as_deref(), &job_id)
 }
 
@@ -1153,8 +1115,7 @@ async fn auth_login_cmd(
     provider: String,
     profile: Option<String>,
 ) -> Result<auth::OAuthLoginResult, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
 
     let (hermes_python, _hermes_repo) = gateway::find_hermes_python()
         .map_err(|e| format!("Hermes Python not found: {}", e))?;
@@ -1213,8 +1174,7 @@ async fn delete_credential_cmd(
 async fn get_credential_pool_cmd(
     state: tauri::State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, Vec<auth::CredentialPoolEntry>>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     auth::get_credential_pool(&hermes_home).await
 }
 
@@ -1226,8 +1186,7 @@ async fn add_credential_pool_entry_cmd(
     key: String,
     label: String,
 ) -> Result<Vec<auth::CredentialPoolEntry>, String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     auth::add_credential_pool_entry(&hermes_home, &provider, &key, &label).await
 }
 
@@ -1238,8 +1197,7 @@ async fn set_credential_pool_cmd(
     provider: String,
     entries: Vec<auth::CredentialPoolEntry>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home.lock().unwrap().clone()
-        .ok_or("App not initialized")?;
+    let hermes_home = state.hermes_home()?;
     auth::set_credential_pool(&hermes_home, &provider, &entries).await
 }
 
