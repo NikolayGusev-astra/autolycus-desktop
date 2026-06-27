@@ -328,25 +328,36 @@ async fn start_remote_gateway_cmd(
     ssh_config: SshConfig,
     python_path: String,
 ) -> Result<GatewayStartResult, String> {
+    // Defense against shell injection: python_path is interpolated into a
+    // remote shell command, so it must be a plain filesystem path with no
+    // shell metacharacters.
+    if !ssh::is_safe_shell_path(&python_path) {
+        return Err(format!(
+            "Refused remote gateway start: python path '{}' is not a safe shell path",
+            python_path
+        ));
+    }
+
     let remote_port = ssh_config.remote_port;
-    
-    // Start remote gateway via SSH in background
+
+    // Start remote gateway via SSH in background. Both python_path (validated)
+    // and remote_port (u16, no metacharacters) are safe to interpolate.
     let cmd = format!(
         "nohup {} -m hermes gateway --port {} > /tmp/gateway.log 2>&1 &",
         python_path, remote_port
     );
-    
+
     ssh::ssh_exec(&ssh_config, &cmd, 10)?;
-    
-    // Wait for gateway to start
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    
+
+    // Wait for gateway to start (async, does not block the Tauri runtime).
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
     // Check if gateway is running on remote
     let check_cmd = format!("curl -sf http://127.0.0.1:{}/health 2>/dev/null || echo fail", remote_port);
     let output = ssh::ssh_exec(&ssh_config, &check_cmd, 5)?;
-    
+
     let success = !output.trim().is_empty() && !output.contains("fail");
-    
+
     Ok(GatewayStartResult {
         success,
         running: success,
@@ -649,9 +660,13 @@ async fn list_installed_skills_cmd(
 /// Get skill content
 #[tauri::command]
 async fn get_skill_content_cmd(
-    skill_path: String,
+    state: State<'_, AppState>,
+    skill_name: String,
+    profile: Option<String>,
 ) -> Result<String, String> {
-    skills::get_skill_content(&skill_path)
+    let hermes_home = state.hermes_home.lock().unwrap().clone()
+        .ok_or("App not initialized")?;
+    skills::get_skill_content(&hermes_home, profile.as_deref(), &skill_name)
 }
 
 /// Install skill

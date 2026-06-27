@@ -22,6 +22,14 @@ output/
 src-tauri/target
 .tauri-build-cache
 
+# Release binaries belong in GitHub Releases, not the git tree
+releases/
+*.deb
+*.AppImage
+*.msi
+*.dmg
+*.exe
+
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*

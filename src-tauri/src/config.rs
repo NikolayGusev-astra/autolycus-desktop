@@ -137,7 +137,21 @@ pub fn write_desktop_config(hermes_home: &Path, config: &ConnectionConfig) -> Re
     let path = desktop_config_path(hermes_home);
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Serialization error: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
+    // desktop.json may carry the remote API key, so restrict it to the owner.
+    write_secret_file(&path, json).map_err(|e| format!("Write error: {}", e))?;
+    Ok(())
+}
+
+/// Write a file containing secrets with mode 0600 (owner read/write only).
+/// Falls back to a plain write on platforms where the permission is not
+/// applicable (e.g. Windows), where file ACLs are the relevant control.
+fn write_secret_file(path: &Path, content: &str) -> std::io::Result<()> {
+    fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -215,7 +229,8 @@ pub fn write_env_value(
         fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {}", e))?;
     }
 
-    fs::write(&env_path, lines.join("\n") + "\n")
+    // .env holds provider API keys — restrict to the owner on unix.
+    write_secret_file(&env_path, &(lines.join("\n") + "\n"))
         .map_err(|e| format!("Write error: {}", e))?;
 
     env.insert(key.to_string(), value.to_string());

@@ -58,7 +58,7 @@ export function SkillsScreen() {
       setContentLoading(true);
       setSelectedSkill(skill.name);
       const content = await invoke<string>("get_skill_content_cmd", {
-        skillPath: skill.path,
+        skillName: skill.name,
       });
       setSkillContent(content);
     } catch (err) {

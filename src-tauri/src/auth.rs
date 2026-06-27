@@ -340,8 +340,22 @@ pub async fn set_credential_pool(
     pool.insert(provider.to_string(), entries.to_vec());
     let content = serde_json::to_string_pretty(&pool)
         .map_err(|e| format!("Failed to serialize pool: {}", e))?;
-    tokio::fs::write(pool_path(hermes_home), content)
+    // credential_pool.json stores live access/refresh tokens and API keys in
+    // plaintext; restrict it to the owner to limit local exposure.
+    write_secret_file(&pool_path(hermes_home), &content)
         .await
         .map_err(|e| format!("Failed to write pool: {}", e))?;
+    Ok(())
+}
+
+/// Write a file containing secrets with mode 0600 (owner-only) on unix.
+async fn write_secret_file(path: &PathBuf, content: &str) -> Result<(), std::io::Error> {
+    tokio::fs::write(path, content).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // set_permissions is a cheap syscall; run it inline.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
