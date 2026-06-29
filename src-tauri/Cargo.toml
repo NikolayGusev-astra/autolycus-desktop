@@ -1,6 +1,6 @@
 [package]
 name = "steersman-desktop"
-version = "0.9.9"
+version = "0.9.10"
 description = "Штурман Desktop — native desktop AI assistant"
 authors = ["Штурман Team"]
 license = "MIT"
