@@ -1,6 +1,6 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
-    "productName": "Steersman Desktop",
+    "productName": "Штурман Desktop",
     "version": "0.9.9",
     "identifier": "com.steersman.desktop",
     "build": {

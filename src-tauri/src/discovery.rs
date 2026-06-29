@@ -224,10 +224,15 @@ pub fn detect_local_instances() -> Vec<DetectedInstance> {
     // ── Conventional venv installs (platform-aware venv layout) ──
     for (sub, kind) in [
         ("steersman", "steersman"),
+        ("steersman/venv", "steersman"),
         (".steersman", "steersman"),
+        (".steersman/venv", "steersman"),
         (".hermes", "hermes"),
+        (".hermes/venv", "hermes"),
         (".hermes/hermes-agent", "hermes-agent"),
+        (".hermes/hermes-agent/venv", "hermes-agent"),
         (".autolycus", "autolycus"),
+        (".autolycus/venv", "autolycus"),
         ("autolycus", "autolycus"),
     ] {
         let py = venv_interpreter(&home.join(sub));
@@ -272,20 +277,39 @@ pub fn detect_local_instances() -> Vec<DetectedInstance> {
         for base in [appdata, localappdata] {
             if let Some(base) = base {
                 for (sub, kind) in [
+                    // Conventional flat installs.
                     ("Steersman", "steersman"),
                     ("Hermes", "hermes"),
                     ("Autolycus", "autolycus"),
+                    // Real-world Hermes layout: <base>\hermes\hermes-agent\venv
+                    // (uv-managed checkout). The venv interpreter lives at
+                    // ...\hermes-agent\venv\Scripts\python.exe — match it here so
+                    // detection finds an actual installation instead of nothing.
+                    ("hermes\\hermes-agent\\venv", "hermes"),
+                    ("hermes\\hermes-agent", "hermes"),
+                    ("Hermes\\hermes-agent\\venv", "hermes"),
+                    ("Steersman\\venv", "steersman"),
+                    ("Autolycus\\venv", "autolycus"),
                 ] {
                     let py = venv_interpreter(&base.join(sub));
                     candidates.push((py, kind));
                 }
             }
         }
+        // ~/.hermes and ~/.steersman checkout layouts (venv inside the checkout)
+        for (sub, kind) in [
+            (".hermes\\hermes-agent\\venv", "hermes"),
+            (".steersman\\venv", "steersman"),
+            (".autolycus\\venv", "autolycus"),
+        ] {
+            let py = venv_interpreter(&home.join(sub));
+            candidates.push((py, kind));
+        }
         // Program Files installs
         for pf in [
-            PathBuf::from("C:\\Program Files\\Steersman"),
-            PathBuf::from("C:\\Program Files\\Hermes"),
-            PathBuf::from("C:\\Program Files\\Autolycus"),
+            PathBuf::from("C:\\Program Files\\Steersman\\venv"),
+            PathBuf::from("C:\\Program Files\\Hermes\\hermes-agent\\venv"),
+            PathBuf::from("C:\\Program Files\\Autolycus\\venv"),
         ] {
             candidates.push((venv_interpreter(&pf), "hermes"));
         }
@@ -492,16 +516,14 @@ fn infer_environment(interp: &Path, kind: &str) -> (Option<String>, Option<Strin
     (home_str, label)
 }
 
-/// A directory looks like an agent home if it holds a config / env file or
-/// one of the characteristic subdirs the agents create.
+/// A directory looks like an agent home if it holds a config / env file. The
+/// characteristic subdirs (skills/profiles/...) alone are NOT enough: a source
+/// checkout (e.g. `hermes-agent/`) also contains `skills/` as part of the repo,
+/// so matching on it alone would wrongly treat the checkout as the home dir.
+/// Requiring a config file resolves the real home one level up.
 fn looks_like_agent_home(dir: &Path) -> bool {
     for marker in ["config.yaml", "config.yml", ".env", "auth.json"] {
         if dir.join(marker).exists() {
-            return true;
-        }
-    }
-    for sub in ["skills", "profiles", "sessions", "memory"] {
-        if dir.join(sub).is_dir() {
             return true;
         }
     }
@@ -539,4 +561,68 @@ fn detect_active_profile(_python_path: &str) -> String {
     }
 
     "default".to_string()
+}
+
+// ── Public discovery helpers ───────────────────────────────────────────────
+
+/// Find a usable local agent interpreter by running the full discovery scan
+/// and returning the interpreter path of the first detected instance.
+///
+/// This is the single source of truth for "where is the local Hermes Python?"
+/// — `gateway.rs` (gateway start) and `test_connection` use it instead of
+/// keeping their own hard-coded candidate lists (ADR-001).
+pub fn find_local_interpreter() -> Option<PathBuf> {
+    let instances = detect_local_instances();
+    instances.first().map(|inst| PathBuf::from(&inst.path))
+}
+
+/// The best instance to auto-connect to: prefer one whose gateway is already
+/// running, else the first instance that has a known home_dir. Returns None if
+/// no instance is detected at all. Used by the auto-adopt startup flow
+/// (ADR-003).
+pub fn primary_instance() -> Option<DetectedInstance> {
+    let instances = detect_local_instances();
+    if instances.is_empty() {
+        return None;
+    }
+    // Prefer a running gateway (zero-touch: just adopt it).
+    if let Some(running) = instances.iter().find(|i| i.gateway_running) {
+        return Some(running.clone());
+    }
+    // Else prefer one with a known home dir.
+    if let Some(with_home) = instances.iter().find(|i| i.home_dir.is_some()) {
+        return Some(with_home.clone());
+    }
+    instances.first().cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Integration check that runs against the real machine: discovery should
+    /// surface any locally-installed Hermes/Steersman interpreter. Run with
+    ///     cargo test --lib detect_real_machine -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn detect_real_machine() {
+        let instances = detect_local_instances();
+        println!("discovery found {} instance(s):", instances.len());
+        for inst in &instances {
+            println!(
+                "  - kind={} ver={} gw_running={} port={:?} home={:?} label={:?}\n    path={}",
+                inst.instance_type,
+                inst.version,
+                inst.gateway_running,
+                inst.gateway_port,
+                inst.home_dir,
+                inst.label,
+                inst.path
+            );
+        }
+        let primary = primary_instance();
+        println!("primary_instance: {:?}", primary.is_some());
+        let interp = find_local_interpreter();
+        println!("find_local_interpreter: {:?}", interp);
+    }
 }

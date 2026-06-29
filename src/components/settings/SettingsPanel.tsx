@@ -1,18 +1,58 @@
 // src/components/settings/SettingsPanel.tsx
-// v0.6.0: Settings tabs connected to Rust via invoke + stores
-// General: get_app_version, init_app (hermes_home), theme via set_env
-// Connection: get_connection_config / set_connection_config via connectionStore
-// Models: list_models_cmd / add_model_cmd / remove_model_cmd / set_model_config_cmd
+// Unified settings panel (ADR-006). Consolidates what used to be scattered
+// across the sidebar — models, providers, gateway, tools, diagnose, versions —
+// into one place with a left tab rail. Work areas (chat, sessions, kanban,
+// memory, skills, schedules) stay in the sidebar; everything else lives here.
+//
+// Existing tab implementations (GeneralTab, ConnectionTab, TelegramTab,
+// ModelsTab, TerminalTab) are kept as-is. New tabs embed the already-working
+// screens (GatewayScreen, ToolsScreen, DiagnoseScreen, ProvidersScreen,
+// ProfilesScreen, Versions) and an Appearance tab wired to the ThemeProvider.
 
 import { useState, useEffect, useCallback } from "react";
-import { X, Server, Globe, Shield, Moon, Sun, Send, Cpu, Terminal as TermIcon, Languages } from "lucide-react";
+import {
+  X,
+  Server,
+  Globe,
+  Shield,
+  Moon,
+  Sun,
+  Send,
+  Cpu,
+  Terminal as TermIcon,
+  Languages,
+  Palette,
+  Bot,
+  Wrench,
+  Stethoscope,
+  Info,
+  KeyRound,
+} from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";
 import { useUIStore } from "../../stores/uiStore";
 import { useTranslation } from "../../hooks/useTranslation";
+import { useTheme } from "../ThemeProvider";
+import { THEMES } from "../../constants";
 import type { Lang } from "../../lib/i18n";
+import { GatewayScreen } from "../gateway/GatewayScreen";
+import { ToolsScreen } from "../tools/ToolsScreen";
+import { DiagnoseScreen } from "./DiagnoseScreen";
+import ProvidersScreen from "../providers/ProvidersScreen";
+import { Versions } from "../Versions";
 
-type SettingsTab = "general" | "connection" | "telegram" | "models" | "terminal";
+type SettingsTab =
+  | "general"
+  | "appearance"
+  | "connection"
+  | "models"
+  | "providers"
+  | "gateway"
+  | "tools"
+  | "telegram"
+  | "terminal"
+  | "diagnose"
+  | "about";
 
 // ── General tab ────────────────────────────────────────────────────────────
 function GeneralTab() {
@@ -35,7 +75,7 @@ function GeneralTab() {
     <div className="space-y-4">
       {/* Language selector */}
       <div className="mb-4">
-        <label className="ac-section-title mb-1.5 block">{t("language_label")}</label>
+        <label className="ac-section-title mb-1.5 block">{t("settings.language")}</label>
         <div className="flex gap-2">
           <button
             onClick={() => setLanguage("ru" as Lang)}
@@ -79,23 +119,77 @@ function GeneralTab() {
       </div>
 
       <div>
-        <label className="ac-section-title mb-1.5 block">{t("app_version_label")}</label>
+        <label className="ac-section-title mb-1.5 block">{t("settings.version")}</label>
         {generalLoading ? (
-          <p className="text-xs text-ac-stone">{t("loading_dots")}</p>
+          <p className="text-xs text-ac-muted">{t("loading_dots")}</p>
         ) : generalError ? (
           <p className="text-xs text-ac-red">{generalError}</p>
         ) : generalInfo ? (
-          <p className="text-sm font-mono text-ac-ivory">{generalInfo.version}</p>
+          <p className="text-sm font-mono text-ac-ink">{generalInfo.version}</p>
         ) : null}
       </div>
 
       <div>
-        <label className="ac-section-title mb-1.5 block">{t("hermes_home_label")}</label>
+        <label className="ac-section-title mb-1.5 block">{t("settings.hermesHome")}</label>
         {generalLoading ? (
-          <p className="text-xs text-ac-stone">{t("loading_dots")}</p>
+          <p className="text-xs text-ac-muted">{t("loading_dots")}</p>
         ) : generalInfo ? (
-          <p className="text-sm font-mono text-ac-ivory break-all">{generalInfo.hermes_home}</p>
+          <p className="text-sm font-mono text-ac-ink break-all">{generalInfo.hermes_home}</p>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ── Appearance tab (ADR-006) — exposes the 12 themes + radius toggle that
+// previously existed in ThemeProvider but were never shown in the UI. ──────
+function AppearanceTab() {
+  const { theme, setTheme, rounded, setRounded } = useTheme();
+  const { t } = useTranslation();
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <label className="ac-section-title mb-1.5 block">{t("settings.theme")}</label>
+        <div className="flex gap-2 mb-3 flex-wrap">
+          <button
+            onClick={() => setTheme("system")}
+            className={`ac-pill ${theme === "system" ? "active" : ""}`}
+          >
+            {t("settings.systemTheme")}
+          </button>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {THEMES.map((th) => (
+            <button
+              key={th.id}
+              onClick={() => setTheme(th.id)}
+              className={`px-3 py-2 text-xs rounded-md border transition-colors text-left ${
+                theme === th.id
+                  ? "border-ac-brand bg-ac-brand/10 text-ac-brand"
+                  : "border-ac-border text-ac-ink-2 hover:border-ac-muted"
+              }`}
+            >
+              <span className="block font-medium">{th.name}</span>
+              <span className="text-[10px] text-ac-muted uppercase tracking-wide">
+                {th.appearance}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between border-t border-ac-border pt-4">
+        <div>
+          <label className="ac-section-title block">{t("settings.radius")}</label>
+          <p className="text-[11px] text-ac-muted">{t("settings.radiusHint")}</p>
+        </div>
+        <button
+          onClick={() => setRounded(!rounded)}
+          className={`ac-pill ${rounded ? "active" : ""}`}
+        >
+          {rounded ? t("telegram_on") : t("telegram_off")}
+        </button>
       </div>
     </div>
   );
@@ -182,7 +276,7 @@ function ConnectionTab() {
       {localMode === "remote" && (
         <div className="space-y-3">
           <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("url_label")}</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">{t("url_label")}</label>
             <input
               type="text"
               value={localRemoteUrl}
@@ -198,38 +292,38 @@ function ConnectionTab() {
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[11px] text-ac-stone mb-1 block">{t("host_label")}</label>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("host_label")}</label>
               <input type="text" value={localSshHost} onChange={(e) => setLocalSshHost(e.target.value)} placeholder="example.com" className="ac-input w-full px-3 py-2 text-sm" />
             </div>
             <div>
-              <label className="text-[11px] text-ac-stone mb-1 block">{t("port_label")}</label>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("port_label")}</label>
               <input type="text" value={localSshPort} onChange={(e) => setLocalSshPort(e.target.value)} placeholder="22" className="ac-input w-full px-3 py-2 text-sm" />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[11px] text-ac-stone mb-1 block">{t("user_label")}</label>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("user_label")}</label>
               <input type="text" value={localSshUser} onChange={(e) => setLocalSshUser(e.target.value)} placeholder="user" className="ac-input w-full px-3 py-2 text-sm" />
             </div>
             <div>
-              <label className="text-[11px] text-ac-stone mb-1 block">{t("ssh_key_label")}</label>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("ssh_key_label")}</label>
               <input type="text" value={localSshKey} onChange={(e) => setLocalSshKey(e.target.value)} placeholder="~/.ssh/id_rsa" className="ac-input w-full px-3 py-2 text-sm" />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[11px] text-ac-stone mb-1 block">{t("remote_port_label")}</label>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("remote_port_label")}</label>
               <input type="text" value={localSshRemotePort} onChange={(e) => setLocalSshRemotePort(e.target.value)} placeholder="8642" className="ac-input w-full px-3 py-2 text-sm" />
             </div>
             <div>
-              <label className="text-[11px] text-ac-stone mb-1 block">{t("local_port_label")}</label>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("local_port_label")}</label>
               <input type="text" value={localSshLocalPort} onChange={(e) => setLocalSshLocalPort(e.target.value)} placeholder="18642" className="ac-input w-full px-3 py-2 text-sm" />
             </div>
           </div>
         </div>
       )}
 
-      {loading && <p className="text-xs text-ac-stone mt-2">{t("saving_dots")}</p>}
+      {loading && <p className="text-xs text-ac-muted mt-2">{t("saving_dots")}</p>}
 
       {(localMode === "remote" || localMode === "ssh") && (
         <div className="flex justify-end mt-4">
@@ -291,7 +385,7 @@ function TelegramTab() {
       </div>
 
       <div>
-        <label className="text-[11px] text-ac-stone mb-1 block">{t("bot_token_label")}</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">{t("bot_token_label")}</label>
         <input
           type="password"
           value={botToken}
@@ -302,7 +396,7 @@ function TelegramTab() {
       </div>
 
       <div>
-        <label className="text-[11px] text-ac-stone mb-1 block">{t("chat_id_label")}</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">{t("chat_id_label")}</label>
         <input
           type="text"
           value={chatId}
@@ -384,131 +478,133 @@ function ModelsTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <label className="ac-section-title">{t("saved_models_title")}</label>
-        <button
-          onClick={() => setShowAddForm(!showAddForm)}
-          className="ac-btn px-3 py-1 text-xs"
-        >
-          {showAddForm ? t("cancel_add") : t("add_model")}
-        </button>
-      </div>
-
-      {showAddForm && (
-        <div className="border border-ac-border rounded p-3 space-y-3">
-          <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("model_name_label")}</label>
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder={t("model_name_placeholder")}
-              className="ac-input w-full px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("provider_select_label")}</label>
-            <select
-              value={newProvider}
-              onChange={(e) => setNewProvider(e.target.value)}
-              className="ac-input w-full px-3 py-2 text-sm"
-            >
-              <option value="openrouter">OpenRouter</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="ollama">Ollama</option>
-              <option value="ollama-cloud">Ollama Cloud</option>
-            </select>
-          </div>
-          <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("model_field_label")}</label>
-            <input
-              type="text"
-              value={newModel}
-              onChange={(e) => setNewModel(e.target.value)}
-              placeholder={t("model_placeholder")}
-              className="ac-input w-full px-3 py-2 text-sm font-mono"
-            />
-          </div>
-          <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("base_url_label")}</label>
-            <input
-              type="text"
-              value={newBaseUrl}
-              onChange={(e) => setNewBaseUrl(e.target.value)}
-              className="ac-input w-full px-3 py-2 text-sm font-mono"
-            />
-          </div>
-          <button onClick={handleAddModel} className="ac-btn px-3 py-1.5 text-xs">
-            {t("save_model")}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <label className="ac-section-title">{t("saved_models_title")}</label>
+          <button
+            onClick={() => setShowAddForm(!showAddForm)}
+            className="ac-btn px-3 py-1 text-xs"
+          >
+            {showAddForm ? t("cancel_add") : t("add_model")}
           </button>
-          {addStatus && (
-            <p className={`text-xs ${addStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
-              {addStatus}
-            </p>
-          )}
         </div>
-      )}
 
-      {modelsLoading ? (
-        <p className="text-xs text-ac-stone">{t("model_loading")}</p>
-      ) : models.length === 0 ? (
-        <p className="text-xs text-ac-stone">{t("no_saved_models")}</p>
-      ) : (
-        <div className="space-y-2 max-h-60 overflow-y-auto">
-          {models.map((m) => {
-            const isActive =
-              modelConfig?.provider === m.provider &&
-              modelConfig?.model === m.model &&
-              modelConfig?.base_url === m.base_url;
-
-            return (
-              <div
-                key={m.id}
-                className={`flex items-center justify-between px-3 py-2 rounded text-sm ${
-                  isActive ? "bg-ac-amber/10 border border-ac-amber/30" : "bg-ac-bg border border-ac-border"
-                }`}
+        {showAddForm && (
+          <div className="border border-ac-border rounded p-3 space-y-3 mb-3">
+            <div>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("model_name_label")}</label>
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder={t("model_name_placeholder")}
+                className="ac-input w-full px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("provider_select_label")}</label>
+              <select
+                value={newProvider}
+                onChange={(e) => setNewProvider(e.target.value)}
+                className="ac-input w-full px-3 py-2 text-sm"
               >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-ac-ivory font-medium truncate">{m.name}</span>
-                    {isActive && (
-                      <span className="text-[10px] text-ac-amber px-1.5 py-0.5 rounded bg-ac-amber/20">{t("active_badge_model")}</span>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-ac-stone font-mono truncate">
-                    {m.provider}/{m.model}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1 shrink-0 ml-2">
-                  {!isActive && (
-                    <button
-                      onClick={() => handleSetActive(m.provider, m.model, m.base_url)}
-                      className="text-[11px] text-ac-amber hover:text-ac-amber/80 px-2 py-1"
-                      title={t("make_active")}
-                    >
-                      {t("make_active")}
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleRemoveModel(m.id, m.name)}
-                    className="text-[11px] text-ac-red hover:text-red-300 px-2 py-1"
-                    title={t("delete_model")}
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="ollama">Ollama</option>
+                <option value="ollama-cloud">Ollama Cloud</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("model_field_label")}</label>
+              <input
+                type="text"
+                value={newModel}
+                onChange={(e) => setNewModel(e.target.value)}
+                placeholder={t("model_placeholder")}
+                className="ac-input w-full px-3 py-2 text-sm font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-ac-muted mb-1 block">{t("base_url_label")}</label>
+              <input
+                type="text"
+                value={newBaseUrl}
+                onChange={(e) => setNewBaseUrl(e.target.value)}
+                className="ac-input w-full px-3 py-2 text-sm font-mono"
+              />
+            </div>
+            <button onClick={handleAddModel} className="ac-btn px-3 py-1.5 text-xs">
+              {t("save_model")}
+            </button>
+            {addStatus && (
+              <p className={`text-xs ${addStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
+                {addStatus}
+              </p>
+            )}
+          </div>
+        )}
 
-      {addStatus && !showAddForm && (
-        <p className={`text-xs ${addStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
-          {addStatus}
-        </p>
-      )}
+        {modelsLoading ? (
+          <p className="text-xs text-ac-muted">{t("model_loading")}</p>
+        ) : models.length === 0 ? (
+          <p className="text-xs text-ac-muted">{t("no_saved_models")}</p>
+        ) : (
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {models.map((m) => {
+              const isActive =
+                modelConfig?.provider === m.provider &&
+                modelConfig?.model === m.model &&
+                modelConfig?.base_url === m.base_url;
+
+              return (
+                <div
+                  key={m.id}
+                  className={`flex items-center justify-between px-3 py-2 rounded text-sm ${
+                    isActive ? "bg-ac-brand/10 border border-ac-brand/30" : "bg-ac-bg border border-ac-border"
+                  }`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-ac-ink font-medium truncate">{m.name}</span>
+                      {isActive && (
+                        <span className="text-[10px] text-ac-brand px-1.5 py-0.5 rounded bg-ac-brand/20">{t("active_badge_model")}</span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-ac-muted font-mono truncate">
+                      {m.provider}/{m.model}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0 ml-2">
+                    {!isActive && (
+                      <button
+                        onClick={() => handleSetActive(m.provider, m.model, m.base_url)}
+                        className="text-[11px] text-ac-brand hover:text-ac-brand/80 px-2 py-1"
+                        title={t("make_active")}
+                      >
+                        {t("make_active")}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleRemoveModel(m.id, m.name)}
+                      className="text-[11px] text-ac-red hover:text-red-300 px-2 py-1"
+                      title={t("delete_model")}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {addStatus && !showAddForm && (
+          <p className={`text-xs mt-2 ${addStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
+            {addStatus}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -532,7 +628,7 @@ function TerminalTab() {
   return (
     <div className="space-y-4">
       <div>
-        <label className="text-[11px] text-ac-stone mb-1 block">{t("terminal_cwd_label")}</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">{t("terminal_cwd_label")}</label>
         <input
           type="text"
           value={cwd}
@@ -562,54 +658,82 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   const tabs: { id: SettingsTab; label: string; icon: typeof Sun }[] = [
     { id: "general", label: t("settings_general"), icon: Sun },
+    { id: "appearance", label: t("settings.appearance"), icon: Palette },
     { id: "connection", label: t("settings_connection"), icon: Globe },
-    { id: "telegram", label: t("settings_telegram"), icon: Send },
     { id: "models", label: t("settings_models"), icon: Cpu },
+    { id: "providers", label: t("settings.providers"), icon: KeyRound },
+    { id: "gateway", label: t("settings.gateway"), icon: Bot },
+    { id: "tools", label: t("settings.tools"), icon: Wrench },
+    { id: "telegram", label: t("settings_telegram"), icon: Send },
     { id: "terminal", label: t("settings_terminal"), icon: TermIcon },
+    { id: "diagnose", label: t("settings.diagnose"), icon: Stethoscope },
+    { id: "about", label: t("settings.about"), icon: Info },
   ];
 
   return (
     <div className="ac-modal-overlay">
-      <div className="ac-modal" style={{ maxWidth: 640 }}>
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-base font-semibold text-ac-ivory">{t("settings_title")}</h2>
+      <div className="ac-modal" style={{ maxWidth: 820, height: 600, display: "flex", flexDirection: "column" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-ac-ink">{t("settings.title")}</h2>
           <button
             onClick={onClose}
-            className="text-ac-stone hover:text-ac-ivory transition-colors"
+            className="text-ac-muted hover:text-ac-ink transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="flex gap-1 mb-4 border-b border-ac-border overflow-x-auto">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-2 text-xs transition-colors whitespace-nowrap ${
-                activeTab === tab.id
-                  ? "text-ac-amber border-b-2 border-ac-amber"
-                  : "text-ac-stone hover:text-ac-ivory"
-              }`}
-            >
-              <tab.icon className="w-3 h-3" />
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        {/* Two-column layout: a left tab rail (so all 11 tabs fit without
+            horizontal scrolling) + the active panel on the right. */}
+        <div className="flex gap-4 flex-1 min-h-0">
+          {/* Tab rail */}
+          <nav className="w-40 shrink-0 border-r border-ac-border pr-2 overflow-y-auto">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`w-full flex items-center gap-2 px-2.5 py-2 text-xs rounded-md mb-0.5 transition-colors text-left ${
+                  activeTab === tab.id
+                    ? "bg-ac-brand/10 text-ac-brand"
+                    : "text-ac-muted hover:text-ac-ink hover:bg-ac-surface"
+                }`}
+              >
+                <tab.icon className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{tab.label}</span>
+              </button>
+            ))}
+          </nav>
 
-        <div className="min-h-[200px]">
-          {activeTab === "general" && <GeneralTab />}
-          {activeTab === "connection" && <ConnectionTab />}
-          {activeTab === "telegram" && <TelegramTab />}
-          {activeTab === "models" && <ModelsTab />}
-          {activeTab === "terminal" && <TerminalTab />}
+          {/* Panel content */}
+          <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+            {activeTab === "general" && <GeneralTab />}
+            {activeTab === "appearance" && <AppearanceTab />}
+            {activeTab === "connection" && <ConnectionTab />}
+            {activeTab === "models" && <ModelsTab />}
+            {activeTab === "providers" && (
+              <div className="-m-4"><ProvidersScreen /></div>
+            )}
+            {activeTab === "gateway" && (
+              <div className="-m-4"><GatewayScreen /></div>
+            )}
+            {activeTab === "tools" && (
+              <div className="-m-4"><ToolsScreen /></div>
+            )}
+            {activeTab === "telegram" && <TelegramTab />}
+            {activeTab === "terminal" && <TerminalTab />}
+            {activeTab === "diagnose" && (
+              <div className="-m-4"><DiagnoseScreen /></div>
+            )}
+            {activeTab === "about" && (
+              <div className="-m-4"><Versions /></div>
+            )}
+          </div>
         </div>
 
         <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-ac-border">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm border border-ac-border text-ac-stone hover:text-ac-ivory transition-colors"
+            className="px-4 py-2 text-sm border border-ac-border text-ac-muted hover:text-ac-ink transition-colors rounded-md"
           >
             {t("close")}
           </button>

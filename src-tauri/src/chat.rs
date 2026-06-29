@@ -467,10 +467,16 @@ pub async fn send_message(
             let api_url = gateway::get_api_url(gateway_state, None)
                 .ok_or("Gateway not available")?;
 
+            // The Hermes API server requires a Bearer token (API_SERVER_KEY) on
+            // every endpoint except /health. It lives in the instance's .env.
+            // Reading it here fixes the 401 that the old empty-key path caused.
+            let local_key = config::get_api_server_key(hermes_home, None)
+                .unwrap_or_default();
+
             // Use API mode even for local (gateway exposes HTTP API)
             send_message_via_api(
                 &api_url,
-                "", // Local gateway doesn't need API key
+                &local_key,
                 &model_config,
                 &request.text,
                 request.history.as_ref(),
@@ -503,9 +509,15 @@ pub async fn send_message(
             let tunnel_url = crate::ssh::get_tunnel_url(ssh_state)
                 .ok_or("SSH tunnel not available")?;
 
+            // The remote gateway still requires its API_SERVER_KEY, which lives
+            // in the local instance's .env (the tunnel points at the same
+            // Hermes install whose home we adopted).
+            let tunneled_key = config::get_api_server_key(hermes_home, None)
+                .unwrap_or_default();
+
             send_message_via_api(
                 &tunnel_url,
-                "", // Remote gateway may not need key over tunnel
+                &tunneled_key,
                 &model_config,
                 &request.text,
                 request.history.as_ref(),

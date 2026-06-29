@@ -168,29 +168,25 @@ struct InitResult {
     version: String,
 }
 
-/// Detect available Python instances
+/// Detect available Python instances.
+///
+/// Thin adapter over the unified cross-platform discovery
+/// (`discovery::detect_local_instances`, ADR-001). The legacy function kept a
+/// hard-coded unix-only candidate list that found nothing on Windows; we now
+/// surface whatever the real discovery detects, mapped to the legacy
+/// `{path, instance, exists}` shape so the existing frontend (ConnectScreen)
+/// keeps working unchanged.
 #[tauri::command]
 async fn detect_instances() -> Result<Vec<InstanceInfo>, String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-
-    let candidates: Vec<(PathBuf, &str)> = vec![
-        (home.join("steersman/venv/bin/python"), "steersman"),
-        (home.join("steersman/venv/bin/python3"), "steersman"),
-        (home.join(".steersman/venv/bin/python"), "steersman"),
-        (home.join(".hermes/venv/bin/python"), "hermes"),
-        (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent"),
-        (PathBuf::from("/usr/local/bin/python3"), "system"),
-    ];
-
-    let mut result = Vec::new();
-    for (path, instance) in candidates {
-        result.push(InstanceInfo {
-            path: path.to_string_lossy().to_string(),
-            instance: instance.to_string(),
-            exists: path.exists(),
-        });
-    }
-
+    let detected = discovery::detect_local_instances();
+    let result = detected
+        .into_iter()
+        .map(|inst| InstanceInfo {
+            path: inst.path,
+            instance: inst.instance_type,
+            exists: true, // discovery only returns existing interpreters
+        })
+        .collect();
     Ok(result)
 }
 
@@ -235,6 +231,87 @@ async fn connect_to_instance(
     state.hermes_home.store(Some(std::sync::Arc::new(home.clone())));
 
     Ok(home.to_string_lossy().to_string())
+}
+
+/// Auto-discover and adopt the local Hermes instance in one shot (ADR-003).
+///
+/// Runs discovery; if an instance is found, adopts its HERMES_HOME and starts
+/// the gateway, returning the resolved home + whether the gateway came up.
+/// The frontend uses this on startup to go straight to the chat screen when a
+/// local agent exists (the shturman.ai "Подключен" experience), without ever
+/// showing the manual connection screen.
+#[tauri::command]
+async fn auto_connect_local_cmd(
+    state: State<'_, AppState>,
+) -> Result<AutoConnectResult, String> {
+    let instance = match discovery::primary_instance() {
+        Some(i) => i,
+        None => {
+            return Ok(AutoConnectResult {
+                found: false,
+                hermes_home: None,
+                gateway_running: false,
+                label: None,
+                error: Some("No local Hermes installation detected".to_string()),
+            });
+        }
+    };
+
+    // Adopt the instance's home dir (if known), else fall back to the default.
+    let home = match &instance.home_dir {
+        Some(h) if !h.is_empty() && PathBuf::from(h).is_dir() => PathBuf::from(h),
+        _ => {
+            // No explicit home dir; rely on the resolved default, but only if it
+            // looks like an agent home so we don't adopt a phantom dir.
+            let resolved = config::resolve_hermes_home();
+            if resolved.is_dir() {
+                resolved
+            } else {
+                return Ok(AutoConnectResult {
+                    found: true,
+                    hermes_home: None,
+                    gateway_running: instance.gateway_running,
+                    label: instance.label.clone(),
+                    error: Some("Detected instance but could not resolve its home directory".to_string()),
+                });
+            }
+        }
+    };
+
+    state
+        .hermes_home
+        .store(Some(std::sync::Arc::new(home.clone())));
+
+    // Start the gateway if it isn't already up. primary_instance prefers a
+    // running gateway; if it's already running we just report that.
+    let gateway_running = if instance.gateway_running {
+        true
+    } else {
+        let result = gateway::start_gateway(&state.gateway, &home, None);
+        result.success
+    };
+
+    Ok(AutoConnectResult {
+        found: true,
+        hermes_home: Some(home.to_string_lossy().to_string()),
+        gateway_running,
+        label: instance.label.clone(),
+        error: if gateway_running {
+            None
+        } else {
+            Some("Instance adopted but gateway failed to start".to_string())
+        },
+    })
+}
+
+/// Result of an auto-connect attempt.
+#[derive(Debug, Serialize)]
+struct AutoConnectResult {
+    found: bool,
+    hermes_home: Option<String>,
+    gateway_running: bool,
+    label: Option<String>,
+    error: Option<String>,
 }
 
 /// Detect Python/steersman instances on a remote machine via SSH
@@ -431,11 +508,15 @@ async fn start_remote_gateway_cmd(
 
     let remote_port = ssh_config.remote_port;
 
-    // Start remote gateway via SSH in background. Both python_path (validated)
-    // and remote_port (u16, no metacharacters) are safe to interpolate.
+    // Start remote gateway via SSH in background (ADR-002). The Hermes gateway
+    // is a `hermes gateway` subcommand, not a `python -m hermes` module, and it
+    // does not take a `--port` flag (the port comes from API_SERVER_PORT or
+    // config.yaml). Prefer the `hermes` launcher on PATH, else fall back to
+    // invoking the CLI module through the interpreter. remote_port (u16) is
+    // safe to interpolate.
     let cmd = format!(
-        "nohup {} -m hermes gateway --port {} > /tmp/gateway.log 2>&1 &",
-        python_path, remote_port
+        "nohup sh -c 'API_SERVER_PORT={} hermes gateway 2>/dev/null || API_SERVER_PORT={} {} -m hermes_cli.main gateway' > /tmp/gateway.log 2>&1 &",
+        remote_port, remote_port, python_path
     );
 
     ssh::ssh_exec(&ssh_config, &cmd, 10)?;
@@ -1409,6 +1490,7 @@ pub fn run() {
             check_python_path,
             detect_local_instances_cmd,
             connect_to_instance,
+            auto_connect_local_cmd,
             detect_remote_instances_cmd,
             get_app_version,
             get_versions_cmd,

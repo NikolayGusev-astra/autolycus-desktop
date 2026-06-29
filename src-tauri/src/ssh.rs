@@ -29,6 +29,24 @@ impl SshState {
     }
 }
 
+// ── Shell-path safety ─────────────────────────────────────────────────────
+
+/// A filesystem path is "shell-safe" if it contains no shell metacharacters,
+/// so it can be interpolated into a remote `nohup <path> ... &` command without
+/// quoting. Used to guard `start_remote_gateway_cmd` against injection.
+pub fn is_safe_shell_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // Reject any shell metacharacter that could break out of the command.
+    const FORBIDDEN: &[char] = &[
+        ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\n', '\r', '\t',
+        '"', '\'', '\\', '*', '?', '[', ']', '!', '#', '~', '=', ':',
+    ];
+    // Allow letters, digits, path separators, dot, dash, underscore, plus.
+    path.chars().all(|c| !FORBIDDEN.contains(&c))
+}
+
 // ── Tunnel URL ────────────────────────────────────────────────────────────
 
 pub fn get_tunnel_url(state: &SshState) -> Option<String> {

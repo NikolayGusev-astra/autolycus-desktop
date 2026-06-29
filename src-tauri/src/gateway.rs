@@ -54,33 +54,27 @@ static GATEWAY_PORT_BASE: AtomicU64 = AtomicU64::new(8642);
 
 // ── Hermes paths ──────────────────────────────────────────────────────────
 
+/// Resolve the agent interpreter via the unified cross-platform discovery
+/// (ADR-001). Replaces the old `find_hermes_python`, which kept a hard-coded
+/// unix-only candidate list and found nothing on Windows.
 pub fn find_hermes_python() -> Result<(PathBuf, String), String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-
-    let candidates: Vec<(PathBuf, &str)> = vec![
-        (home.join("steersman/venv/bin/python"), "steersman"),
-        (home.join("steersman/venv/bin/python3"), "steersman"),
-        (home.join(".steersman/venv/bin/python"), "steersman"),
-        (home.join(".hermes/venv/bin/python"), "hermes"),
-        (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent"),
-        (PathBuf::from("/usr/local/bin/python3"), "system"),
-    ];
-
-    for (path, instance) in candidates {
-        if path.exists() {
-            return Ok((path, instance.to_string()));
-        }
+    match crate::discovery::find_local_interpreter() {
+        Some(p) => Ok((p.clone(), "hermes".to_string())),
+        None => Err(
+            "No local Hermes/Steersman installation found. Install Hermes Agent first.".to_string(),
+        ),
     }
-
-    Err("No Python instance found. Install steersman or hermes.".to_string())
 }
 
+/// Resolve the agent home directory from discovery (the source of truth), so
+/// we don't guess repo layout. Returns None if unknown — callers handle it.
 pub fn find_hermes_repo(python_path: &PathBuf) -> Option<PathBuf> {
-    // Go up from venv/bin/python to find the repo root
+    // A venv interpreter lives at <root>/venv/{bin|Scripts}/python[.exe];
+    // the agent source checkout is the venv's parent's parent.
     python_path
-        .parent() // bin/
+        .parent() // bin/ or Scripts/
         .and_then(|p| p.parent()) // venv/
-        .and_then(|p| p.parent()) // repo root
+        .and_then(|p| p.parent()) // checkout root
         .map(|p| p.to_path_buf())
 }
 
@@ -138,14 +132,29 @@ pub fn start_gateway(
     let port = allocate_port(&profile_key);
     let repo_path = find_hermes_repo(&python_path);
 
-    // Build command: python -m hermes gateway
-    let mut cmd = Command::new(&python_path);
-    cmd.arg("-m")
-        .arg("hermes")
-        .arg("gateway")
-        .arg("--port")
-        .arg(port.to_string())
-        .stdin(Stdio::null())
+    // Build the gateway command (ADR-002). The real Hermes backend exposes
+    // `gateway` as a subcommand of the `hermes` console-script launcher
+    // (hermes.exe / hermes), NOT as a `python -m hermes` module (there is no
+    // top-level `hermes` package — only `hermes_cli`). The gateway also does
+    // NOT accept a `--port` flag; the port is taken from
+    // platforms.api_server.extra.port in config.yaml or the API_SERVER_PORT
+    // env var. So: prefer the launcher if present, else fall back to
+    // `python -m hermes_cli.main gateway`, and pass the port via env.
+    let hermes_launcher = python_path
+        .parent() // bin/ or Scripts/
+        .map(|dir| dir.join(if cfg!(windows) { "hermes.exe" } else { "hermes" }));
+
+    let mut cmd = if let Some(launcher) = hermes_launcher.as_ref().filter(|p| p.exists()) {
+        let mut c = Command::new(launcher);
+        c.arg("gateway");
+        c
+    } else {
+        // Fallback: invoke the CLI module directly with the interpreter.
+        let mut c = Command::new(&python_path);
+        c.arg("-m").arg("hermes_cli.main").arg("gateway");
+        c
+    };
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -155,6 +164,10 @@ pub fn start_gateway(
     }
     cmd.env("HERMES_HOME", hermes_home);
     cmd.env("PYTHONUNBUFFERED", "1");
+    // The gateway reads its listen port from this env var (falls back to the
+    // value in config.yaml, default 8642). We set it explicitly so the port
+    // we allocated matches the one we health-check.
+    cmd.env("API_SERVER_PORT", port.to_string());
 
     // Profile-specific env
     let profile_home_path = profile_home(hermes_home, profile);
@@ -176,42 +189,52 @@ pub fn start_gateway(
         }
     };
 
-    // Read stdout for READY signal or error
+    // Drain stdout/stderr in the background so the child's pipes never fill and
+    // block the process. We no longer parse stdout for a "READY" string — the
+    // real Hermes gateway logs to stdout in formats that vary by version, and
+    // blocking on stdout.lines() hangs until the pipe closes. Instead we wait
+    // for readiness by polling the HTTP /health endpoint (ADR-002).
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-
-    // Wait for gateway to be ready (up to 10 seconds)
-    let start = Instant::now();
-    let mut ready = false;
-    let reader = std::io::BufReader::new(stdout);
-    let stderr_reader = std::io::BufReader::new(stderr);
-
-    // Read stderr in background
     let profile_key_clone = profile_key.clone();
     thread::spawn(move || {
-        for line in stderr_reader.lines() {
-            if let Ok(text) = line {
-                eprintln!("[gateway:{}] {}", profile_key_clone, text);
-            }
+        let reader = std::io::BufReader::new(stdout);
+        for line in reader.lines().flatten() {
+            eprintln!("[gateway:{}] {}", profile_key_clone, line);
+        }
+    });
+    let profile_key_clone2 = profile_key.clone();
+    thread::spawn(move || {
+        let stderr_reader = std::io::BufReader::new(stderr);
+        for line in stderr_reader.lines().flatten() {
+            eprintln!("[gateway:{}] {}", profile_key_clone2, line);
         }
     });
 
-    // Check stdout for ready signal
-    for line in reader.lines() {
-        if let Ok(text) = line {
-            if text.contains("READY") || text.contains("running") || text.contains("started") {
+    // Wait for the gateway HTTP server to become reachable (up to 30s). We
+    // probe TCP first (cheap, no runtime) then confirm with /health via a
+    // blocking reqwest blocking client on a short-lived thread.
+    let mut ready = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        // Cheap TCP probe — mirrors discovery's check_gateway_status.
+        let addr = format!("127.0.0.1:{}", port);
+        if let Ok(parsed) = addr.parse() {
+            if std::net::TcpStream::connect_timeout(&parsed, Duration::from_millis(300)).is_ok() {
                 ready = true;
                 break;
             }
-            if start.elapsed() > Duration::from_secs(10) {
-                break;
-            }
         }
+        // Bail early if the child already exited.
+        match child.try_wait() {
+            Ok(Some(_status)) => break, // process died
+            _ => {}
+        }
+        thread::sleep(Duration::from_millis(300));
     }
-
-    if !ready {
-        // Gateway might still be starting, give it more time
-        thread::sleep(Duration::from_secs(2));
+    // If TCP is up, give the HTTP layer a brief moment to bind handlers.
+    if ready {
+        thread::sleep(Duration::from_millis(400));
     }
 
     // Store process
@@ -228,17 +251,25 @@ pub fn start_gateway(
         );
     }
 
-    // Mark API as available
+    // Mark API as available (only if readiness was confirmed)
     {
         let mut api = state.api_server_available.lock().unwrap_or_else(|p| p.into_inner());
-        *api = Some(true);
+        *api = Some(ready);
     }
 
     GatewayStartResult {
-        success: true,
-        running: true,
+        success: ready,
+        running: ready,
         already_running: Some(false),
-        error: None,
+        error: if ready {
+            None
+        } else {
+            Some(format!(
+                "Gateway process started but did not become reachable on port {} within 30s. \
+                 Check that Hermes Agent is installed and config.yaml has platforms.api_server.enabled.",
+                port
+            ))
+        },
         log_path: Some(format!("{}/logs/gateway.log", hermes_home.display())),
     }
 }

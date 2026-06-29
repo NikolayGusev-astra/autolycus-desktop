@@ -1,6 +1,8 @@
 // src/App.tsx
-// v0.5.0: Multi-mode connection, kanban, extended settings
-// Flow: Splash → Welcome → Connection → Main
+// Startup flow: Splash → (auto-adopt local Hermes) → Main, with Welcome /
+// Connection as fallbacks when no local instance is detected (ADR-003).
+// ThemeProvider wraps the whole app from main.tsx so every screen shares one
+// theme (ADR-004).
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -17,16 +19,9 @@ import { SteersmanScreen } from "./steersman/SteersmanChatView";
 import { MemoryScreen } from "./components/memory/MemoryScreen";
 import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
-import { ProfilesScreen } from "./components/profiles/ProfilesScreen";
-import ProvidersScreen from "./components/providers/ProvidersScreen";
 import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
-import { ThemeProvider } from "./components/ThemeProvider";
-import { DiagnoseScreen } from "./components/settings/DiagnoseScreen";
-import { GatewayScreen } from "./components/gateway/GatewayScreen";
-import { ToolsScreen } from "./components/tools/ToolsScreen";
-import { Versions } from "./components/Versions";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
 
@@ -101,9 +96,44 @@ export function App() {
     detect();
   }, []);
 
-  const handleSplashComplete = useCallback((autoconnect: boolean) => {
-    setScreen(autoconnect ? "connection" : "welcome");
-  }, []);
+  const handleSplashComplete = useCallback(
+    async (autoconnect: boolean) => {
+      // ADR-003: when autoconnect is requested, try to auto-discover and adopt
+      // the local Hermes instance in one shot. On success we go straight to the
+      // main UI (the shturman.ai "Подключен" experience) without showing the
+      // manual connection screen. If discovery finds nothing, fall through to
+      // the welcome/connection screens as before.
+      if (autoconnect) {
+        try {
+          const result = await invoke<{
+            found: boolean;
+            hermes_home: string | null;
+            gateway_running: boolean;
+            label: string | null;
+            error: string | null;
+          }>("auto_connect_local_cmd");
+          if (result.found && result.gateway_running && result.hermes_home) {
+            setHermesHome(result.hermes_home);
+            setConnected(true);
+            setError(null);
+            setScreen("main");
+            return;
+          }
+          // Found an instance but the gateway didn't come up — surface the
+          // reason and fall through to the connection screen for manual retry.
+          if (result.found && result.error) {
+            setError(result.error);
+          }
+        } catch (err) {
+          console.error("Auto-connect failed:", err);
+        }
+        setScreen("connection");
+        return;
+      }
+      setScreen("welcome");
+    },
+    [setHermesHome, setConnected, setError]
+  );
 
   const handleGetStarted = useCallback(() => {
     setScreen("connection");
@@ -186,12 +216,17 @@ export function App() {
     return <ConnectionScreen onConnected={handleConnected} error={error} />;
   }
 
-  // Main UI (or auto-transitioned from connection → main)
+  // Main UI (or auto-transitioned from connection → main).
+  // ThemeProvider now wraps the whole app from main.tsx (ADR-004), so every
+  // screen — including splash/welcome/connection — shares one theme.
   return (
-    <ThemeProvider>
     <div className="flex h-full">
       {sidebarOpen && (
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
       )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
@@ -218,29 +253,19 @@ export function App() {
           {activeTab === "steersman" && <SteersmanScreen />}
           {activeTab === "sessions" && <SessionList />}
           {activeTab === "kanban" && <KanbanBoard />}
-          {activeTab === "models" && <ProfilesScreen />}
-          {activeTab === "settings" && settingsOpen && (
-            <SettingsPanel onClose={() => setSettingsOpen(false)} />
-          )}
-
-          {/* Coming soon tabs */}
           {activeTab === "memory" && <MemoryScreen />}
           {activeTab === "skills" && <SkillsScreen />}
-          {activeTab === "providers" && <ProvidersScreen />}
-          {activeTab === "diagnose" && <DiagnoseScreen />}
-          {activeTab === "gateway" && <GatewayScreen />}
-          {activeTab === "tools" && <ToolsScreen />}
-          {activeTab === "versions" && <Versions />}
           {activeTab === "schedules" && <SchedulesScreen />}
         </div>
 
         <StatusBar />
       </div>
 
-      {settingsOpen && activeTab !== "settings" && (
+      {/* Unified settings panel — a modal over whatever tab is active (ADR-006).
+          Reached from the sidebar gear or the header gear. */}
+      {settingsOpen && (
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
       )}
     </div>
-    </ThemeProvider>
   );
 }
