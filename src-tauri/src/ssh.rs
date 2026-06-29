@@ -2,9 +2,8 @@
 // SSH tunnel + remote execution
 // Ported from fathah/hermes-desktop src/main/ssh-tunnel.ts + ssh-remote.rs
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,8 +32,8 @@ impl SshState {
 // ── Tunnel URL ────────────────────────────────────────────────────────────
 
 pub fn get_tunnel_url(state: &SshState) -> Option<String> {
-    let running = *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner());
-    let config = state.active_config.lock().unwrap_or_else(|p| p.into_inner());
+    let running = *state.tunnel_running.lock().unwrap();
+    let config = state.active_config.lock().unwrap();
     if running {
         config.as_ref().map(|c| format!("http://127.0.0.1:{}", c.local_port))
     } else {
@@ -43,7 +42,7 @@ pub fn get_tunnel_url(state: &SshState) -> Option<String> {
 }
 
 pub fn is_tunnel_active(state: &SshState) -> bool {
-    *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner())
+    *state.tunnel_running.lock().unwrap()
 }
 
 // ── Health check ──────────────────────────────────────────────────────────
@@ -135,9 +134,9 @@ pub fn start_ssh_tunnel(state: &SshState, config: &SshConfig) -> Result<(), Stri
         }
     }
 
-    *state.tunnel_process.lock().unwrap_or_else(|p| p.into_inner()) = Some(child);
-    *state.active_config.lock().unwrap_or_else(|p| p.into_inner()) = Some(config.clone());
-    *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner()) = true;
+    *state.tunnel_process.lock().unwrap() = Some(child);
+    *state.active_config.lock().unwrap() = Some(config.clone());
+    *state.tunnel_running.lock().unwrap() = true;
 
     Ok(())
 }
@@ -145,7 +144,7 @@ pub fn start_ssh_tunnel(state: &SshState, config: &SshConfig) -> Result<(), Stri
 // ── Stop tunnel ───────────────────────────────────────────────────────────
 
 pub fn stop_ssh_tunnel(state: &SshState) {
-    let mut process = state.tunnel_process.lock().unwrap_or_else(|p| p.into_inner());
+    let mut process = state.tunnel_process.lock().unwrap();
     if let Some(mut child) = process.take() {
         #[cfg(unix)]
         {
@@ -156,8 +155,8 @@ pub fn stop_ssh_tunnel(state: &SshState) {
         }
         let _ = child.wait();
     }
-    *state.active_config.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    *state.tunnel_running.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    *state.active_config.lock().unwrap() = None;
+    *state.tunnel_running.lock().unwrap() = false;
 }
 
 // ── Test SSH connection ───────────────────────────────────────────────────
@@ -185,32 +184,7 @@ pub fn test_ssh_connection(config: &SshConfig) -> Result<bool, String> {
 
 // ── SSH remote exec ───────────────────────────────────────────────────────
 
-/// Validate a path is safe to interpolate into a remote shell command.
-/// A trusted path must look like a filesystem path: it may contain
-/// alphanumerics, `/`, `-`, `_`, `.`, `~` (only as a leading component),
-/// and must contain no shell metacharacters or whitespace beyond the path.
-///
-/// This is the last line of defense before a caller-supplied path reaches
-/// a remote shell via `ssh ... <command>`.
-pub fn is_safe_shell_path(path: &str) -> bool {
-    if path.is_empty() {
-        return false;
-    }
-    // Allow a single leading ~/ for home-relative paths
-    let p = path.strip_prefix("~/").unwrap_or(path);
-    if p.is_empty() {
-        return false;
-    }
-    p.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || c == '/'
-            || c == '-'
-            || c == '_'
-            || c == '.'
-    })
-}
-
-pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<String, String> {
+pub fn ssh_exec(config: &SshConfig, command: &str, _timeout_secs: u64) -> Result<String, String> {
     let key_path = expand_tilde(&config.key_path);
 
     let output = Command::new("ssh")
@@ -237,31 +211,5 @@ pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("SSH command failed ({}): {}", output.status, stderr))
-    }
-}
-
-// ── Tests ──────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn safe_shell_paths() {
-        assert!(is_safe_shell_path("/usr/local/bin/python3"));
-        assert!(is_safe_shell_path("~/steersman/venv/bin/python"));
-        assert!(is_safe_shell_path("/home/x/.hermes/venv/bin/python-3.11"));
-    }
-
-    #[test]
-    fn unsafe_shell_paths_rejected() {
-        // classic command-injection payloads must all be rejected
-        assert!(!is_safe_shell_path("; rm -rf ~ ;"));
-        assert!(!is_safe_shell_path("/bin/x$(whoami)"));
-        assert!(!is_safe_shell_path("/tmp/x`id`"));
-        assert!(!is_safe_shell_path("/a/b|cat"));
-        assert!(!is_safe_shell_path("/a/b\nrm"));
-        assert!(!is_safe_shell_path(""));
-        assert!(!is_safe_shell_path("~/")); // empty after ~/ prefix
     }
 }

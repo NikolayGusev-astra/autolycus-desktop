@@ -11,7 +11,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::config::expand_tilde;
 
 // ── OAuth-capable providers ──────────────────────────────────────────────
 

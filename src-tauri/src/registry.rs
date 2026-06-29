@@ -3,7 +3,6 @@
 // Ported from fathah/hermes-desktop src/main/registry.rs (simplified)
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 
 // ── Types ─────────────────────────────────────────────────────────────────

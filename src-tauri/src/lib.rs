@@ -29,8 +29,8 @@ mod validation;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use serde::Serialize;
+use tauri::{AppHandle, State};
 
 // ── Re-exports ───────────────────────────────────────────────────────────
 
@@ -342,7 +342,7 @@ async fn set_connection_config(
 /// Test connection (ping remote or check SSH)
 #[tauri::command]
 async fn test_connection(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     mode: String,
     url: String,
     ssh_config: Option<SshConfig>,
@@ -857,7 +857,7 @@ async fn ssh_tunnel_status_cmd(
 /// Send Telegram message
 #[tauri::command]
 async fn send_telegram_message_cmd(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     bot_token: String,
     chat_id: String,
     text: String,

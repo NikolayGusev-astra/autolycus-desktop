@@ -133,7 +133,7 @@ impl SseParser {
         let delta = parsed.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta"));
 
         // Extract usage
-        if let Some(usage) = parsed.get("usage") {
+        if let Some(_usage) = parsed.get("usage") {
             // Usage is typically in the final chunk
         }
 
@@ -205,7 +205,7 @@ pub async fn send_message_via_api(
     }));
 
     // Generate session ID
-    let sid = session_id
+    let _sid = session_id
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("desk-{}", uuid::Uuid::new_v4()));
 
@@ -282,7 +282,7 @@ pub async fn send_message_via_api(
 
 pub fn send_message_via_gateway(
     gateway_stdout: BufReader<ChildStdout>,
-    message: &str,
+    _message: &str,
     session_id: Option<String>,
     app_handle: &AppHandle,
 ) -> Result<(), String> {

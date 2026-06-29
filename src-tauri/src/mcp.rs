@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -234,7 +233,7 @@ pub fn set_mcp_server_enabled(
 pub fn test_mcp_server(
     _hermes_home: &Path,
     _profile: Option<&str>,
-    name: &str,
+    _name: &str,
 ) -> Result<(bool, Option<String>, Option<Vec<McpToolInfo>>), String> {
     // In a real implementation, this would connect to the MCP server and list tools
     Ok((
@@ -270,7 +269,7 @@ pub fn list_mcp_catalog(
 pub fn install_mcp_catalog_entry(
     _hermes_home: &Path,
     _profile: Option<&str>,
-    name: &str,
+    _name: &str,
     _env: Option<HashMap<String, String>>,
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
     Ok((true, None, Some("installed".to_string()), None))

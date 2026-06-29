@@ -6,15 +6,14 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::AppHandle;
 
-use crate::config::{self, expand_tilde, profile_home, read_env, ModelConfig};
+use crate::config::profile_home;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

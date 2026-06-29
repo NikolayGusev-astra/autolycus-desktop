@@ -3,7 +3,6 @@
 // Ported from fathah/hermes-desktop src/main/model-discovery.ts (simplified)
 
 use serde::Serialize;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredModel {

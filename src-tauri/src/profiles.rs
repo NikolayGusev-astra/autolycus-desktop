@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, profile_home, read_env};
+use crate::config::{profile_home, read_env};
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

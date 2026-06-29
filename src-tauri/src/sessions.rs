@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use rusqlite::{params, Connection, Result as SqliteResult};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::config::profile_home;
 

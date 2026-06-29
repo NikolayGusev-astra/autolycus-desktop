@@ -2,7 +2,6 @@
 // Configuration health audit — ported from fathah/hermes-desktop src/main/config-health.ts
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,7 +3,6 @@
 // Ported from fathah/hermes-desktop src/main/media.ts (simplified)
 
 use serde::Serialize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
