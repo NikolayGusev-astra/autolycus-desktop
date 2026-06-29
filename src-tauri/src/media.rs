@@ -97,3 +97,29 @@ pub fn ensure_media_dir(hermes_home: &Path) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| format!("Create media dir error: {}", e))?;
     Ok(())
 }
+
+/// Persist a blob of media bytes (e.g. a recorded voice clip, or an uploaded
+/// attachment) into the instance's media cache dir and return its absolute
+/// path. The caller chooses the extension; we generate a unique filename.
+pub fn save_media_blob(
+    hermes_home: &Path,
+    bytes: &[u8],
+    ext: &str,
+) -> Result<PathBuf, String> {
+    ensure_media_dir(hermes_home)?;
+    let dir = media_cache_dir(hermes_home);
+    let name = format!(
+        "{}-{}.{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S"),
+        uuid::Uuid::new_v4().simple(),
+        ext.trim_start_matches('.')
+    );
+    let path = dir.join(name);
+    fs::write(&path, bytes).map_err(|e| format!("Write media error: {}", e))?;
+    Ok(path)
+}
+
+/// MIME type for a file extension (thin wrapper around the existing map).
+pub fn mime_for_ext(ext: &str) -> Option<&'static str> {
+    mime_by_ext(ext)
+}

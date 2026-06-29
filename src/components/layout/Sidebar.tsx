@@ -25,9 +25,12 @@ export function Sidebar({ activeTab, onTabChange, onOpenSettings }: SidebarProps
   // ADR-006: the sidebar holds only genuine WORK areas. Everything that is
   // configuration or maintenance (models, providers, gateway, tools, diagnose,
   // versions) now lives under the unified Settings panel reached via the gear.
+  // ADR (unified chat): there is now a single chat surface — "Штурман" —
+  // which is the main chat (real gateway, streaming, tools) with all the
+  // capabilities (voice, media, history) folded in. The old separate
+  // "steersman" tab is gone.
   const tabs = [
-    { id: "chat", icon: MessageSquare, label: t("nav.chat") },
-    { id: "steersman", icon: Compass, label: "Штурман" },
+    { id: "chat", icon: MessageSquare, label: "Штурман" },
     { id: "sessions", icon: Clock, label: t("nav.sessions") },
     { id: "kanban", icon: Layers, label: t("nav.kanban") },
     { id: "memory", icon: Brain, label: t("nav.memory") },

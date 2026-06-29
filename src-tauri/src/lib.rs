@@ -9,6 +9,7 @@ mod config_health;
 mod cronjobs;
 mod discovery;
 mod gateway;
+mod install;
 mod kanban;
 mod media;
 mod memory;
@@ -312,6 +313,187 @@ struct AutoConnectResult {
     gateway_running: bool,
     label: Option<String>,
     error: Option<String>,
+}
+
+// ── Soul / Personality ────────────────────────────────────────────────────
+//
+// The agent's identity lives in two places: the free-form `soul.md` file
+// (personality text the user can edit) and the `personalities` map in
+// config.yaml with a `display.personality` pointer selecting the active one.
+// These commands expose both so the onboarding wizard and the Settings → Soul
+// tab can read/customize the agent's "soul".
+
+#[derive(Debug, Serialize, Clone)]
+struct Personality {
+    id: String,
+    description: String,
+}
+
+/// Read the agent's soul.md (persona text). Empty string if absent.
+#[tauri::command]
+fn read_soul_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    Ok(memory::read_soul(&hermes_home, None))
+}
+
+/// Write the agent's soul.md (persona text).
+#[tauri::command]
+fn write_soul_cmd(state: State<'_, AppState>, content: String) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    memory::write_soul(&hermes_home, None, &content)
+}
+
+/// Reset soul.md to the default and return the new content.
+#[tauri::command]
+fn reset_soul_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    Ok(memory::reset_soul(&hermes_home, None))
+}
+
+/// List the available personalities from config.yaml (the `personalities` map).
+#[tauri::command]
+fn get_personalities_cmd(state: State<'_, AppState>) -> Result<Vec<Personality>, String> {
+    let hermes_home = state.hermes_home()?;
+    let yaml = config::read_config_yaml(&hermes_home, None).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(personalities) = yaml.get("personalities").and_then(|v| v.as_object()) {
+        for (id, desc) in personalities {
+            let description = desc
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| desc.to_string());
+            out.push(Personality {
+                id: id.clone(),
+                description,
+            });
+        }
+    }
+    // Guarantee a sensible default is always offered even if the install
+    // shipped a trimmed config.
+    if out.is_empty() {
+        out.push(Personality {
+            id: "helpful".to_string(),
+            description: "You are a helpful, friendly AI assistant.".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read the active personality id (`display.personality` in config.yaml).
+#[tauri::command]
+fn get_personality_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    let yaml = config::read_config_yaml(&hermes_home, None).unwrap_or_default();
+    let active = yaml
+        .get("display")
+        .and_then(|d| d.get("personality"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("helpful")
+        .to_string();
+    Ok(active)
+}
+
+/// Set the active personality (`display.personality`). Done via a targeted
+/// text rewrite of config.yaml rather than a full re-serialize, to preserve
+/// comments and unrelated keys.
+#[tauri::command]
+fn set_personality_cmd(state: State<'_, AppState>, personality: String) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    set_config_scalar(&hermes_home, None, "personality", &personality)
+}
+
+/// Generic helper: set a scalar leaf under a one-level parent in config.yaml
+/// (e.g. `display.personality`). Used because we don't want to rewrite the
+/// whole YAML (which would lose comments/ordering).
+fn set_config_scalar(
+    hermes_home: &std::path::Path,
+    profile: Option<&str>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let path = profile_config_yaml_path(hermes_home, profile);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Read config.yaml error: {}", e))?;
+
+    // Look for an existing `display:` block and update the key inside it; or
+    // append a fresh block if absent. We operate on lines so formatting is
+    // preserved.
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let mut in_display = false;
+    let mut display_indent: Option<usize> = None;
+    let mut replaced = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if trimmed.starts_with("display:") {
+            in_display = true;
+            display_indent = Some(indent);
+            continue;
+        }
+        if in_display {
+            // A line indented less-or-equal to the `display:` header (and not
+            // blank) means we left the block.
+            if !trimmed.is_empty() && indent <= display_indent.unwrap_or(0) {
+                in_display = false;
+                continue;
+            }
+            // Same indent as expected children → candidate for our key.
+            if trimmed.starts_with(&format!("{}:", key)) {
+                *line = format!(
+                    "{}{}: {}",
+                    " ".repeat(display_indent.unwrap_or(0) + 2),
+                    key,
+                    value
+                );
+                replaced = true;
+            }
+        }
+    }
+
+    if !replaced {
+        // Either no display block or no such key: append a clean block.
+        let block = format!(
+            "display:\n  {}: {}\n",
+            key, value
+        );
+        lines.push(block);
+    }
+
+    let new_content = lines.join("\n");
+    std::fs::write(&path, new_content).map_err(|e| format!("Write config.yaml error: {}", e))?;
+    Ok(())
+}
+
+fn profile_config_yaml_path(hermes_home: &std::path::Path, profile: Option<&str>) -> std::path::PathBuf {
+    match profile {
+        Some(p) if p != "default" && !p.is_empty() => {
+            hermes_home.join("profiles").join(p).join("config.yaml")
+        }
+        _ => hermes_home.join("config.yaml"),
+    }
+}
+
+/// Save a provider API key to the instance's `.env` (where Hermes reads it) and
+/// optionally remember the provider/model. Used by the onboarding wizard.
+#[tauri::command]
+fn save_provider_key_cmd(
+    state: State<'_, AppState>,
+    env_key: String,
+    api_key: String,
+    provider: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    config::write_env_value(&hermes_home, None, &env_key, &api_key)?;
+    // Persist the active provider/model if supplied, so the freshly-installed
+    // agent picks them up immediately.
+    if let (Some(p), Some(m)) = (provider, model) {
+        let b = base_url.unwrap_or_default();
+        config::set_model_config(&hermes_home, None, &p, &m, &b);
+    }
+    Ok(())
 }
 
 /// Detect Python/steersman instances on a remote machine via SSH
@@ -993,6 +1175,19 @@ async fn list_media_files_cmd(dir: String) -> Result<Vec<media::MediaInfo>, Stri
     Ok(media::list_media_files(&dir))
 }
 
+/// Save a media blob (voice clip or attachment) to the instance media cache.
+/// Accepts raw bytes + extension, returns the saved file path.
+#[tauri::command]
+async fn save_media_blob_cmd(
+    state: State<'_, AppState>,
+    data: Vec<u8>,
+    ext: String,
+) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    let path = media::save_media_blob(&hermes_home, &data, &ext)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 // ── Model Discovery Commands ──────────────────────────────────────────────
 
 /// Discover models from provider
@@ -1384,6 +1579,7 @@ pub fn run() {
             }
         }))
         .manage(AppState::new())
+        .manage(install::InstallState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -1491,6 +1687,16 @@ pub fn run() {
             detect_local_instances_cmd,
             connect_to_instance,
             auto_connect_local_cmd,
+            // Soul / personality / provider-key (onboarding + Settings → Soul)
+            read_soul_cmd,
+            write_soul_cmd,
+            reset_soul_cmd,
+            get_personalities_cmd,
+            get_personality_cmd,
+            set_personality_cmd,
+            save_provider_key_cmd,
+            // Local Hermes install (onboarding wizard)
+            install::install_hermes_cmd,
             detect_remote_instances_cmd,
             get_app_version,
             get_versions_cmd,
@@ -1551,6 +1757,7 @@ pub fn run() {
             get_media_info_cmd,
             read_media_data_url_cmd,
             list_media_files_cmd,
+            save_media_blob_cmd,
             // Model Discovery
             discover_models_cmd,
             is_discoverable_cmd,

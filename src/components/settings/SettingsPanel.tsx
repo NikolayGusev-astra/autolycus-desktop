@@ -10,6 +10,7 @@
 // ProfilesScreen, Versions) and an Appearance tab wired to the ThemeProvider.
 
 import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   X,
   Server,
@@ -27,6 +28,7 @@ import {
   Stethoscope,
   Info,
   KeyRound,
+  Sparkles,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";
@@ -45,6 +47,7 @@ type SettingsTab =
   | "general"
   | "appearance"
   | "connection"
+  | "soul"
   | "models"
   | "providers"
   | "gateway"
@@ -191,6 +194,91 @@ function AppearanceTab() {
           {rounded ? t("telegram_on") : t("telegram_off")}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── Soul tab — agent persona/identity, same controls as the onboarding wizard
+// but editable any time. ───────────────────────────────────────────────────
+function SoulTab() {
+  const { t } = useTranslation();
+  const [personalities, setPersonalities] = useState<{ id: string; description: string }[]>([]);
+  const [active, setActive] = useState("helpful");
+  const [soul, setSoul] = useState("");
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    invoke<{ id: string; description: string }[]>("get_personalities_cmd")
+      .then(setPersonalities)
+      .catch(() => setPersonalities([{ id: "helpful", description: "You are a helpful, friendly AI assistant." }]));
+    invoke<string>("get_personality_cmd").then(setActive).catch(() => {});
+    invoke<string>("read_soul_cmd").then(setSoul).catch(() => {});
+  }, []);
+
+  const save = async () => {
+    try {
+      await invoke("write_soul_cmd", { content: soul });
+      await invoke("set_personality_cmd", { personality: active });
+      setStatus("✓ " + (t("saved")));
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const reset = async () => {
+    try {
+      const def = await invoke<string>("reset_soul_cmd");
+      setSoul(def);
+      setStatus("✓ " + (t("saved")));
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="ac-section-title mb-1.5 block">{t("onb.persona")}</label>
+        <select
+          className="ac-input w-full px-3 py-2 text-sm"
+          value={active}
+          onChange={(e) => setActive(e.target.value)}
+        >
+          {personalities.map((p) => (
+            <option key={p.id} value={p.id}>{p.id}</option>
+          ))}
+        </select>
+        {active && personalities.find((p) => p.id === active) && (
+          <p className="text-[11px] text-ac-muted mt-1.5">
+            {personalities.find((p) => p.id === active)?.description}
+          </p>
+        )}
+      </div>
+
+      <div>
+        <label className="ac-section-title mb-1.5 block">soul.md</label>
+        <textarea
+          className="ac-input w-full px-3 py-2 text-sm font-mono"
+          rows={10}
+          value={soul}
+          onChange={(e) => setSoul(e.target.value)}
+        />
+        <p className="text-[11px] text-ac-muted mt-1">
+          {t("settings.soulHint")}
+        </p>
+      </div>
+
+      <div className="flex gap-2">
+        <button onClick={save} className="ac-btn px-4 py-2 text-sm">{t("save_button")}</button>
+        <button onClick={reset} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md hover:text-ac-ink">
+          {t("btn.refresh")}
+        </button>
+      </div>
+      {status && (
+        <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>
+      )}
     </div>
   );
 }
@@ -659,6 +747,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const tabs: { id: SettingsTab; label: string; icon: typeof Sun }[] = [
     { id: "general", label: t("settings_general"), icon: Sun },
     { id: "appearance", label: t("settings.appearance"), icon: Palette },
+    { id: "soul", label: t("settings.soul"), icon: Sparkles },
     { id: "connection", label: t("settings_connection"), icon: Globe },
     { id: "models", label: t("settings_models"), icon: Cpu },
     { id: "providers", label: t("settings.providers"), icon: KeyRound },
@@ -709,6 +798,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             {activeTab === "general" && <GeneralTab />}
             {activeTab === "appearance" && <AppearanceTab />}
             {activeTab === "connection" && <ConnectionTab />}
+            {activeTab === "soul" && <SoulTab />}
             {activeTab === "models" && <ModelsTab />}
             {activeTab === "providers" && (
               <div className="-m-4"><ProvidersScreen /></div>

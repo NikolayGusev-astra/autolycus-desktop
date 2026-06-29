@@ -15,23 +15,25 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { KanbanBoard } from "./components/kanban/KanbanBoard";
-import { SteersmanScreen } from "./steersman/SteersmanChatView";
 import { MemoryScreen } from "./components/memory/MemoryScreen";
 import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
+import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
 
 
-type AppScreen = "splash" | "welcome" | "connection" | "main";
+type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
 
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
   const [activeTab, setActiveTab] = useState("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
   const [appVersion, setAppVersion] = useState<string>("");
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
@@ -120,14 +122,16 @@ export function App() {
             return;
           }
           // Found an instance but the gateway didn't come up — surface the
-          // reason and fall through to the connection screen for manual retry.
+          // reason and fall through to onboarding for manual setup.
           if (result.found && result.error) {
             setError(result.error);
           }
         } catch (err) {
           console.error("Auto-connect failed:", err);
         }
-        setScreen("connection");
+        // No usable local agent → show the onboarding wizard, where the user
+        // chooses: connect to a remote server, or install Hermes locally.
+        setScreen("onboarding");
         return;
       }
       setScreen("welcome");
@@ -168,6 +172,31 @@ export function App() {
     setError(null);
     setScreen("main");
   }, [setConnected, setError]);
+
+  // Onboarding finished (remote configured, or Hermes installed+configured).
+  // Re-run auto-connect so the just-configured instance is adopted and the
+  // gateway started, then land in the main UI.
+  const handleOnboardingDone = useCallback(async () => {
+    try {
+      const result = await invoke<{
+        found: boolean;
+        hermes_home: string | null;
+        gateway_running: boolean;
+        error: string | null;
+      }>("auto_connect_local_cmd");
+      if (result.hermes_home) setHermesHome(result.hermes_home);
+      if (result.found) {
+        setConnected(true);
+        setError(null);
+        setScreen("main");
+        return;
+      }
+    } catch (err) {
+      console.error("Post-onboarding connect failed:", err);
+    }
+    // Fall back to the connection screen for a manual retry.
+    setScreen("connection");
+  }, [setHermesHome, setConnected, setError]);
 
   const handleApprovalDecision = useCallback(
     async (decision: "approved" | "denied" | "approved_always") => {
@@ -212,6 +241,10 @@ export function App() {
     );
   }
 
+  if (screen === "onboarding") {
+    return <OnboardingScreen onDone={handleOnboardingDone} onConnected={handleConnected} />;
+  }
+
   if (screen === "connection" && !connected) {
     return <ConnectionScreen onConnected={handleConnected} error={error} />;
   }
@@ -230,7 +263,11 @@ export function App() {
       )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        <Header onSettingsClick={() => setSettingsOpen(true)} />
+        <Header
+          onSettingsClick={() => setSettingsOpen(true)}
+          onToggleHistory={() => setHistoryOpen((v) => !v)}
+          historyOpen={historyOpen}
+        />
 
         <div className="flex-1 overflow-hidden">
           <ConfigHealthBanner profile={undefined} />
@@ -250,7 +287,6 @@ export function App() {
               )}
             </>
           )}
-          {activeTab === "steersman" && <SteersmanScreen />}
           {activeTab === "sessions" && <SessionList />}
           {activeTab === "kanban" && <KanbanBoard />}
           {activeTab === "memory" && <MemoryScreen />}
@@ -260,6 +296,11 @@ export function App() {
 
         <StatusBar />
       </div>
+
+      {/* Right-hand conversation history (only relevant alongside the chat). */}
+      {historyOpen && activeTab === "chat" && (
+        <HistoryPanel onClose={() => setHistoryOpen(false)} />
+      )}
 
       {/* Unified settings panel — a modal over whatever tab is active (ADR-006).
           Reached from the sidebar gear or the header gear. */}

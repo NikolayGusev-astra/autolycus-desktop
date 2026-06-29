@@ -1,10 +1,23 @@
 import { useState, useRef, useCallback, type KeyboardEvent } from "react";
-import { Send, Paperclip, X } from "lucide-react";
+import { Send, Paperclip, X, Mic } from "lucide-react";
 import type { AgentStatus } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
+import { VoiceInput } from "./VoiceInput";
+
+/** A user attachment. Either a browser File (will be saved on send) or a
+ * media clip already saved to disk by the backend (e.g. a voice recording). */
+export interface Attachment {
+  file?: File;
+  /** For saved clips (voice). */
+  path?: string;
+  kind: "image" | "audio" | "video" | "file";
+  mime?: string;
+  name: string;
+  size?: number;
+}
 
 interface ChatInputProps {
-  onSend: (message: string, attachments?: File[]) => void;
+  onSend: (message: string, attachments?: Attachment[]) => void;
   disabled?: boolean;
   agentStatus?: AgentStatus;
 }
@@ -17,20 +30,36 @@ const STATUS_PLACEHOLDER_KEY: Record<AgentStatus, string> = {
   error: "chat_placeholder_error",
 };
 
+/** Heuristic kind from a file's mime/extension. */
+function kindOf(file: File): Attachment["kind"] {
+  const t = file.type.toLowerCase();
+  if (t.startsWith("image/")) return "image";
+  if (t.startsWith("audio/")) return "audio";
+  if (t.startsWith("video/")) return "video";
+  return "file";
+}
+
+const URL_RE = /https?:\/\/[^\s]+/;
+
 export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputProps) {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [attachments, setAttachments] = useState<File[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useTranslation();
 
-  const isBlocked = disabled || isSending || agentStatus === "thinking" || agentStatus === "streaming" || agentStatus === "tool_calling";
+  const isBlocked =
+    disabled ||
+    isSending ||
+    agentStatus === "thinking" ||
+    agentStatus === "streaming" ||
+    agentStatus === "tool_calling";
   const placeholder = t(STATUS_PLACEHOLDER_KEY[agentStatus] || "chat_placeholder_idle");
 
   const handleSend = useCallback(async () => {
-    if (text.trim() && !isBlocked) {
+    if ((text.trim() || attachments.length > 0) && !isBlocked) {
       setIsSending(true);
       try {
         await onSend(text.trim(), attachments.length > 0 ? attachments : undefined);
@@ -51,7 +80,15 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
 
   const handleFileSelect = (files: FileList | null) => {
     if (!files) return;
-    const valid = Array.from(files).filter((f) => f.size < 50 * 1024 * 1024); // 50MB
+    const valid = Array.from(files)
+      .filter((f) => f.size < 50 * 1024 * 1024) // 50MB
+      .map<Attachment>((f) => ({
+        file: f,
+        kind: kindOf(f),
+        mime: f.type,
+        name: f.name,
+        size: f.size,
+      }));
     setAttachments((prev) => [...prev, ...valid]);
   };
 
@@ -75,6 +112,22 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
     setIsDragging(false);
   };
 
+  // Detect a pasted/typed URL — surface it as an attachment chip the agent can
+  // fetch/transcribe (mirrors shturman.ai URL handling).
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const pasted = e.clipboardData.getData("text");
+    const url = pasted.trim().match(URL_RE)?.[0];
+    if (url) {
+      e.preventDefault();
+      setAttachments((prev) => [
+        ...prev,
+        { kind: "file", name: url, mime: "text/uri-list" },
+      ]);
+      // Also keep the URL in the text so it's visible/editable.
+      setText((prev) => (prev ? `${prev} ${url}` : url));
+    }
+  };
+
   return (
     <div
       className={`flex flex-col gap-2 px-4 py-3 border-t border-ac-border ${isDragging ? "bg-ac-glow" : ""}`}
@@ -85,14 +138,20 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
       {/* Attachments preview */}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {attachments.map((file, idx) => (
+          {attachments.map((att, idx) => (
             <div
               key={idx}
-              className="flex items-center gap-1.5 rounded-md bg-ac-surface px-2 py-1 text-xs text-ac-stone"
+              className="flex items-center gap-1.5 rounded-md bg-ac-surface px-2 py-1 text-xs text-ac-muted"
             >
-              <Paperclip className="w-3 h-3" />
-              <span className="max-w-32 truncate">{file.name}</span>
-              <span className="text-ac-stone/50">{(file.size / 1024).toFixed(0)}KB</span>
+              {att.kind === "audio" ? (
+                <Mic className="w-3 h-3" />
+              ) : (
+                <Paperclip className="w-3 h-3" />
+              )}
+              <span className="max-w-40 truncate">{att.name}</span>
+              {att.size ? (
+                <span className="text-ac-faint">{(att.size / 1024).toFixed(0)}KB</span>
+              ) : null}
               <button onClick={() => removeAttachment(idx)} className="hover:text-ac-red">
                 <X className="w-3 h-3" />
               </button>
@@ -101,7 +160,7 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
         </div>
       )}
 
-      <div className="flex gap-2 items-center">
+      <div className="flex gap-2 items-center relative">
         {/* Attach button */}
         <input
           ref={fileInputRef}
@@ -114,10 +173,17 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
           onClick={() => fileInputRef.current?.click()}
           disabled={isBlocked}
           title={t("chat.attach_file") || "Прикрепить файл"}
-          className="p-2 rounded-lg hover:bg-ac-surface transition-colors disabled:opacity-30"
+          className="p-2 rounded-lg hover:bg-ac-surface transition-colors disabled:opacity-30 text-ac-muted"
         >
           <Paperclip className="w-4 h-4" />
         </button>
+
+        {/* Voice input — records via MediaRecorder, saves a clip on stop. */}
+        <VoiceInput
+          onRecorded={(att) =>
+            setAttachments((prev) => [...prev, att])
+          }
+        />
 
         <input
           ref={inputRef}
@@ -125,6 +191,7 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={placeholder}
           disabled={isBlocked}
           className="ac-input flex-1 px-3.5 py-2 text-sm"
