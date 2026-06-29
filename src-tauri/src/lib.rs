@@ -23,6 +23,7 @@ mod secrets;
 mod sessions;
 mod skills;
 mod ssh;
+mod stt;
 mod telegram;
 mod terminal;
 mod validation;
@@ -1697,6 +1698,8 @@ pub fn run() {
             save_provider_key_cmd,
             // Local Hermes install (onboarding wizard)
             install::install_hermes_cmd,
+            // On-the-fly voice transcription (Groq/OpenAI Whisper)
+            stt::transcribe_audio_cmd,
             detect_remote_instances_cmd,
             get_app_version,
             get_versions_cmd,

@@ -276,12 +276,20 @@ export function ChatView() {
           : `[вложения: ${savedPaths.join(", ")}]`;
       }
 
-      // Add user message to UI immediately.
+      // Add user message to UI immediately (with attachment previews).
       const userMsg = {
         id: `user-${Date.now()}`,
         role: "user" as const,
         content: messageText,
         timestamp: Date.now(),
+        attachments: (attachments ?? []).map((a) => ({
+          kind: a.kind === "file" && a.mime?.startsWith("image/") ? "image" as const
+            : a.kind === "file" && a.mime?.startsWith("video/") ? "video" as const
+            : a.kind,
+          path: a.path,
+          name: a.name,
+          mime: a.mime,
+        })),
       };
       addMessage(userMsg);
 

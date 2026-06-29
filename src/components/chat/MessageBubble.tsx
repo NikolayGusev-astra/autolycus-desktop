@@ -1,7 +1,9 @@
-import { useState } from "react";
-import { Copy, RefreshCw, Check, User } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Copy, RefreshCw, Check, User, Mic, FileText, Link as LinkIcon } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { AgentMarkdown } from "../AgentMarkdown";
 import { useTranslation } from "../../hooks/useTranslation";
+import type { MessageAttachment } from "../../lib/types";
 
 interface Message {
   id: string;
@@ -9,12 +11,62 @@ interface Message {
   content: string;
   timestamp: number;
   isStreaming?: boolean;
+  attachments?: MessageAttachment[];
 }
 
 interface MessageBubbleProps {
   message: Message;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
+}
+
+/** Renders a single attachment as an inline preview. Images load their data URL
+ * lazily via the media backend; audio shows a native player once resolved;
+ * other files show a chip. */
+function AttachmentView({ att }: { att: MessageAttachment }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(att.dataUrl ?? null);
+
+  useEffect(() => {
+    if (att.kind === "image" && att.path && !dataUrl) {
+      invoke<string | null>("read_media_data_url_cmd", { path: att.path })
+        .then((u) => u && setDataUrl(u))
+        .catch(() => {});
+    }
+  }, [att.kind, att.path, dataUrl]);
+
+  if (att.kind === "url" || (!att.path && att.mime === "text/uri-list")) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-ac-brand break-all">
+        <LinkIcon className="w-3 h-3 shrink-0" />
+        {att.name}
+      </span>
+    );
+  }
+
+  if (att.kind === "image") {
+    return dataUrl ? (
+      <img src={dataUrl} alt={att.name} className="max-h-40 rounded-md border border-ac-border" />
+    ) : (
+      <span className="text-xs text-ac-muted">{att.name}</span>
+    );
+  }
+
+  if (att.kind === "audio") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs bg-ac-bg rounded-md px-2 py-1 border border-ac-border">
+        <Mic className="w-3.5 h-3.5 text-ac-brand" />
+        <span className="text-ac-muted">{att.name}</span>
+      </span>
+    );
+  }
+
+  // Generic file
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs bg-ac-bg rounded-md px-2 py-1 border border-ac-border">
+      <FileText className="w-3.5 h-3.5 text-ac-muted" />
+      <span className="text-ac-muted truncate max-w-48">{att.name}</span>
+    </span>
+  );
 }
 
 export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageBubbleProps) {
@@ -49,6 +101,15 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
 
       {/* Content */}
       <div className={`flex flex-col gap-1 max-w-[80%] ${isUser ? "items-end" : "items-start"}`}>
+        {/* Attachment previews (above the text) */}
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1">
+            {message.attachments.map((att, i) => (
+              <AttachmentView key={i} att={att} />
+            ))}
+          </div>
+        )}
+
         <div
           className={`rounded-lg px-4 py-2 text-sm ${
             isUser
@@ -57,7 +118,9 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
           }`}
         >
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            message.content ? (
+              <p className="whitespace-pre-wrap">{message.content}</p>
+            ) : null
           ) : (
             <AgentMarkdown>{message.content}</AgentMarkdown>
           )}
@@ -67,7 +130,7 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
         </div>
 
         {/* Action buttons — visible on hover */}
-        {!message.isStreaming && (
+        {!message.isStreaming && message.content && (
           <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
               onClick={handleCopy}

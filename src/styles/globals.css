@@ -38,6 +38,102 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
+/* ── Theme overrides ─────────────────────────────────────────────────────
+   ThemeProvider sets data-theme on <html>; these rules re-define the color
+   tokens per theme so the Appearance tab actually changes the UI. "light" is
+   the @theme default; dark variants override background/ink/surface tokens
+   (brand red stays consistent across all Штурман themes). */
+:root[data-theme="dark"],
+:root[data-theme="dracula"],
+:root[data-theme="nord"],
+:root[data-theme="one-dark"],
+:root[data-theme="github-dark"],
+:root[data-theme="monokai"],
+:root[data-theme="solarized-dark"],
+:root[data-theme="gruvbox-dark"],
+:root[data-theme="tokyo-night"] {
+  --color-ac-ink: #e8e8e8;
+  --color-ac-ink-2: #cfcfcf;
+  --color-ac-muted: #9aa0a6;
+  --color-ac-faint: #6b7280;
+  --color-ac-bg: #15161a;
+  --color-ac-surface: #1d1e24;
+  --color-ac-surface-2: #262830;
+  --color-ac-border: #303239;
+  /* legacy aliases follow the dark mapping */
+  --color-ac-ivory: #e8e8e8;
+  --color-ac-pitch: #15161a;
+  --color-ac-stone: #9aa0a6;
+  color-scheme: dark;
+}
+
+:root[data-theme="dracula"] {
+  --color-ac-brand: #bd93f9; --color-ac-brand-dark: #a678ea;
+  --color-ac-brand-soft: rgba(189,147,249,.10); --color-ac-brand-border: rgba(189,147,249,.30);
+  --color-ac-bg: #282a36; --color-ac-surface: #2f313e; --color-ac-surface-2: #383a47; --color-ac-border: #44475a;
+  --color-ac-amber: #bd93f9; --color-ac-ivory: #f8f8f2; --color-ac-pitch: #282a36; --color-ac-stone: #8b8fa3;
+}
+:root[data-theme="nord"] {
+  --color-ac-brand: #88c0d0; --color-ac-brand-dark: #6fa3b4;
+  --color-ac-brand-soft: rgba(136,192,208,.10); --color-ac-brand-border: rgba(136,192,208,.30);
+  --color-ac-bg: #2e3440; --color-ac-surface: #3b4252; --color-ac-surface-2: #434c5e; --color-ac-border: #4c566a;
+  --color-ac-amber: #88c0d0; --color-ac-ivory: #eceff4; --color-ac-pitch: #2e3440; --color-ac-stone: #8893a8;
+}
+:root[data-theme="one-dark"] {
+  --color-ac-brand: #61afef; --color-ac-brand-dark: #4a9ee0;
+  --color-ac-brand-soft: rgba(97,175,239,.10); --color-ac-brand-border: rgba(97,175,239,.30);
+  --color-ac-bg: #282c34; --color-ac-surface: #2c313c; --color-ac-surface-2: #353b47; --color-ac-border: #3e4451;
+  --color-ac-amber: #61afef; --color-ac-ivory: #abb2bf; --color-ac-pitch: #282c34; --color-ac-stone: #7f848e;
+}
+:root[data-theme="github-dark"] {
+  --color-ac-brand: #58a6ff; --color-ac-brand-dark: #478be0;
+  --color-ac-brand-soft: rgba(88,166,255,.10); --color-ac-brand-border: rgba(88,166,255,.30);
+  --color-ac-bg: #0d1117; --color-ac-surface: #161b22; --color-ac-surface-2: #21262d; --color-ac-border: #30363d;
+  --color-ac-amber: #58a6ff; --color-ac-ivory: #c9d1d9; --color-ac-pitch: #0d1117; --color-ac-stone: #8b949e;
+}
+:root[data-theme="monokai"] {
+  --color-ac-brand: #f92672; --color-ac-brand-dark: #e21162;
+  --color-ac-brand-soft: rgba(249,38,114,.10); --color-ac-brand-border: rgba(249,38,114,.30);
+  --color-ac-bg: #272822; --color-ac-surface: #2e2f29; --color-ac-surface-2: #3a3b32; --color-ac-border: #49483e;
+  --color-ac-amber: #f92672; --color-ac-ivory: #f8f8f2; --color-ac-pitch: #272822; --color-ac-stone: #90908a;
+}
+:root[data-theme="solarized-dark"] {
+  --color-ac-brand: #268bd2; --color-ac-brand-dark: #1e76ad;
+  --color-ac-brand-soft: rgba(38,139,210,.10); --color-ac-brand-border: rgba(38,139,210,.30);
+  --color-ac-bg: #002b36; --color-ac-surface: #073642; --color-ac-surface-2: #0e4754; --color-ac-border: #1d4b58;
+  --color-ac-amber: #268bd2; --color-ac-ivory: #93a1a1; --color-ac-pitch: #002b36; --color-ac-stone: #748484;
+}
+:root[data-theme="gruvbox-dark"] {
+  --color-ac-brand: #fe8019; --color-ac-brand-dark: #e6710c;
+  --color-ac-brand-soft: rgba(254,128,25,.10); --color-ac-brand-border: rgba(254,128,25,.30);
+  --color-ac-bg: #282828; --color-ac-surface: #32302f; --color-ac-surface-2: #3c3836; --color-ac-border: #504945;
+  --color-ac-amber: #fe8019; --color-ac-ivory: #ebdbb2; --color-ac-pitch: #282828; --color-ac-stone: #928374;
+}
+:root[data-theme="tokyo-night"] {
+  --color-ac-brand: #7aa2f7; --color-ac-brand-dark: #6088e4;
+  --color-ac-brand-soft: rgba(122,162,247,.10); --color-ac-brand-border: rgba(122,162,247,.30);
+  --color-ac-bg: #1a1b26; --color-ac-surface: #24283b; --color-ac-surface-2: #2e334d; --color-ac-border: #3b4261;
+  --color-ac-amber: #7aa2f7; --color-ac-ivory: #c0caf5; --color-ac-pitch: #1a1b26; --color-ac-stone: #8a9bb8;
+}
+:root[data-theme="solarized-light"] {
+  --color-ac-brand: #268bd2; --color-ac-brand-dark: #1e76ad;
+  --color-ac-brand-soft: rgba(38,139,210,.08); --color-ac-brand-border: rgba(38,139,210,.25);
+  --color-ac-bg: #fdf6e3; --color-ac-surface: #eee8d5; --color-ac-surface-2: #e6dcc0; --color-ac-border: #d6cdb0;
+  --color-ac-amber: #268bd2; --color-ac-ivory: #073642; --color-ac-pitch: #fdf6e3; --color-ac-stone: #657b83;
+}
+:root[data-theme="github-light"] {
+  --color-ac-bg: #ffffff; --color-ac-surface: #f6f8fa; --color-ac-surface-2: #eaeef2; --color-ac-border: #d0d7de;
+}
+
+/* Radius toggle: data-radius="none" squares off all corners via a 0 radius. */
+:root[data-radius="none"] {
+  --radius: 0px;
+}
+:root:not([data-radius="none"]) {
+  --radius: 8px;
+}
+
+
 @layer base {
   * {
     box-sizing: border-box;

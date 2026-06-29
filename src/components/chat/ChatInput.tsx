@@ -178,8 +178,14 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
           <Paperclip className="w-4 h-4" />
         </button>
 
-        {/* Voice input — records via MediaRecorder, saves a clip on stop. */}
+        {/* Voice input — two modes: on-the-fly transcription (text into the
+            input box) or voice-note attachment. */}
         <VoiceInput
+          onTranscribed={(text) => {
+            // Append recognized text to the current input (with a separator).
+            setText((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
+            inputRef.current?.focus();
+          }}
           onRecorded={(att) =>
             setAttachments((prev) => [...prev, att])
           }

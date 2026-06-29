@@ -23,6 +23,7 @@ const translations = {
   'nav.schedules': { en: 'Schedules', ru: 'Расписания' },
   'nav.settings': { en: 'Settings', ru: 'Настройки' },
   'sidebar_collapse': { en: 'Collapse sidebar', ru: 'Свернуть панель' },
+  'sidebar_expand': { en: 'Expand sidebar', ru: 'Развернуть панель' },
 
   // Buttons
   'btn.connect': { en: 'Connect', ru: 'Подключиться' },

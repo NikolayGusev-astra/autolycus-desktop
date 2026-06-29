@@ -8,6 +8,17 @@ export interface Message {
   thinking?: string;
   tools?: ToolCall[];
   isStreaming?: boolean;
+  /** Attachments sent with the message (images, voice clips, files). */
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  kind: "image" | "audio" | "video" | "file" | "url";
+  path?: string;
+  name: string;
+  mime?: string;
+  /** Resolved data URL for inline preview (filled lazily). */
+  dataUrl?: string;
 }
 
 export interface ToolCall {

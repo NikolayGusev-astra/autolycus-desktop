@@ -153,48 +153,86 @@ function AppearanceTab() {
   return (
     <div className="space-y-5">
       <div>
-        <label className="ac-section-title mb-1.5 block">{t("settings.theme")}</label>
-        <div className="flex gap-2 mb-3 flex-wrap">
-          <button
-            onClick={() => setTheme("system")}
-            className={`ac-pill ${theme === "system" ? "active" : ""}`}
+        <label className="ac-section-title mb-2 block">{t("settings.theme")}</label>
+        <div className="space-y-1.5">
+          {/* System option as a radio row */}
+          <label
+            className={`flex items-center gap-3 px-3 py-2 rounded-md border cursor-pointer transition-colors ${
+              theme === "system"
+                ? "border-ac-brand bg-ac-brand/5"
+                : "border-ac-border hover:border-ac-muted"
+            }`}
           >
-            {t("settings.systemTheme")}
-          </button>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          {THEMES.map((th) => (
-            <button
-              key={th.id}
-              onClick={() => setTheme(th.id)}
-              className={`px-3 py-2 text-xs rounded-md border transition-colors text-left ${
-                theme === th.id
-                  ? "border-ac-brand bg-ac-brand/10 text-ac-brand"
-                  : "border-ac-border text-ac-ink-2 hover:border-ac-muted"
-              }`}
-            >
-              <span className="block font-medium">{th.name}</span>
-              <span className="text-[10px] text-ac-muted uppercase tracking-wide">
-                {th.appearance}
-              </span>
-            </button>
-          ))}
+            <input
+              type="radio"
+              name="theme"
+              className="accent-ac-brand"
+              checked={theme === "system"}
+              onChange={() => setTheme("system")}
+            />
+            <span className="text-sm text-ac-ink">{t("settings.systemTheme")}</span>
+          </label>
+
+          {/* Named themes as a radio grid */}
+          <div className="grid grid-cols-2 gap-1.5 mt-1">
+            {THEMES.map((th) => (
+              <label
+                key={th.id}
+                className={`flex items-center gap-2.5 px-3 py-2 rounded-md border cursor-pointer transition-colors ${
+                  theme === th.id
+                    ? "border-ac-brand bg-ac-brand/5"
+                    : "border-ac-border hover:border-ac-muted"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="theme"
+                  className="accent-ac-brand"
+                  checked={theme === th.id}
+                  onChange={() => setTheme(th.id)}
+                />
+                <span className="flex-1 min-w-0">
+                  <span className="block text-sm text-ac-ink truncate">{th.name}</span>
+                  <span className="block text-[10px] text-ac-muted uppercase tracking-wide">
+                    {th.appearance}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
         </div>
       </div>
 
+      {/* Radius toggle as an explicit switch */}
       <div className="flex items-center justify-between border-t border-ac-border pt-4">
-        <div>
+        <div className="pr-3">
           <label className="ac-section-title block">{t("settings.radius")}</label>
           <p className="text-[11px] text-ac-muted">{t("settings.radiusHint")}</p>
         </div>
-        <button
-          onClick={() => setRounded(!rounded)}
-          className={`ac-pill ${rounded ? "active" : ""}`}
-        >
-          {rounded ? t("telegram_on") : t("telegram_off")}
-        </button>
+        <Switch checked={rounded} onChange={setRounded} />
       </div>
     </div>
+  );
+}
+
+/** A small accessible on/off switch. */
+function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative w-10 h-6 rounded-full transition-colors shrink-0 ${
+        checked ? "bg-ac-brand" : "bg-ac-border"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+          checked ? "translate-x-4" : "translate-x-0"
+        }`}
+      />
+    </button>
   );
 }
 

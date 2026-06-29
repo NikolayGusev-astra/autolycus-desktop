@@ -23,14 +23,33 @@ pub fn resolve_hermes_home() -> PathBuf {
         }
     }
 
-    // 2. Override file
+    // 2. Override file (set by discovery's "adopt instance")
     if let Some(override_path) = read_override_file() {
         if override_path.exists() {
             return override_path;
         }
     }
 
-    // 3. Platform default
+    // 3a. Windows: %LOCALAPPDATA%\hermes (the real install location for a
+    // uv-managed Hermes checkout). The old code only looked at ~/.hermes, so
+    // sessions/memory/state.db under AppData\Local\hermes were invisible.
+    if cfg!(windows) {
+        if let Some(local) = dirs::data_local_dir() {
+            let cand = local.join("hermes");
+            if cand.is_dir() && looks_like_hermes_home(&cand) {
+                return cand;
+            }
+        }
+        // Some installs live under %APPDATA%\hermes
+        if let Some(appdata) = dirs::data_dir() {
+            let cand = appdata.join("hermes");
+            if cand.is_dir() && looks_like_hermes_home(&cand) {
+                return cand;
+            }
+        }
+    }
+
+    // 3b. Platform default ~/.hermes
     if let Some(home) = dirs::home_dir() {
         let default = home.join(".hermes");
         if default.exists() {
@@ -42,6 +61,18 @@ pub fn resolve_hermes_home() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(".hermes"))
         .unwrap_or_else(|| PathBuf::from("/tmp/.hermes"))
+}
+
+/// A directory is a Hermes home if it holds config.yaml/.env OR the data files
+/// we actually want to read (state.db, sessions/, memories/). Distinguishes a
+/// real home from a stale empty folder.
+fn looks_like_hermes_home(dir: &Path) -> bool {
+    for marker in ["config.yaml", "config.yml", ".env", "auth.json", "state.db"] {
+        if dir.join(marker).exists() {
+            return true;
+        }
+    }
+    false
 }
 
 fn read_override_file() -> Option<PathBuf> {
@@ -534,15 +565,29 @@ pub fn has_api_key_for_provider(
     false
 }
 
-pub fn looks_like_hermes_home(dir: &Path) -> bool {
-    if !dir.exists() {
-        return false;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify resolve_hermes_home points at the real Hermes install (the one
+    /// holding state.db), not a stale ~/.hermes. Run with:
+    ///   cargo test --lib resolve_real_home -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn resolve_real_home() {
+        let home = resolve_hermes_home();
+        println!("resolved hermes_home = {}", home.display());
+        let db = home.join("state.db");
+        println!("state.db exists = {}", db.exists());
+        if db.exists() {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let n: i64 = conn
+                .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
+                .unwrap();
+            println!("sessions count = {}", n);
+            assert!(n > 0, "expected sessions in the resolved home");
+        }
     }
-    dir.join("hermes-agent").exists()
-        || dir.join("gateway.pid").exists()
-        || dir.join("config.yaml").exists()
-        || dir.join("active_profile").exists()
-        || dir.join(".env").exists()
 }
 
 // ── Config Health Check ───────────────────────────────────────────────────

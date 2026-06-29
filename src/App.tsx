@@ -20,6 +20,7 @@ import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
 import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
+import { useTranslation as useTranslationHook } from "./hooks/useTranslation";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
@@ -47,7 +48,8 @@ export function App() {
       label?: string;
     }>
   >([]);
-  const { sidebarOpen } = useUIStore();
+  const { sidebarOpen, toggleSidebar } = useUIStore();
+  const { t } = useTranslationHook();
   const {
     connected,
     error,
@@ -254,12 +256,25 @@ export function App() {
   // screen — including splash/welcome/connection — shares one theme.
   return (
     <div className="flex h-full">
-      {sidebarOpen && (
+      {sidebarOpen ? (
         <Sidebar
           activeTab={activeTab}
           onTabChange={setActiveTab}
           onOpenSettings={() => setSettingsOpen(true)}
         />
+      ) : (
+        // Collapsed rail: a thin strip with a button to re-open the sidebar.
+        // Without this the sidebar was unreachable once collapsed.
+        <button
+          onClick={toggleSidebar}
+          className="w-6 shrink-0 border-r border-ac-border bg-ac-bg flex items-center justify-center text-ac-muted hover:text-ac-brand"
+          title={t("sidebar_expand")}
+          aria-label={t("sidebar_expand")}
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M6 4L10 8L6 12" />
+          </svg>
+        </button>
       )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
