@@ -9,6 +9,7 @@ mod config_health;
 mod cronjobs;
 mod discovery;
 mod gateway;
+mod install;
 mod kanban;
 mod media;
 mod memory;
@@ -168,29 +169,25 @@ struct InitResult {
     version: String,
 }
 
-/// Detect available Python instances
+/// Detect available Python instances.
+///
+/// Thin adapter over the unified cross-platform discovery
+/// (`discovery::detect_local_instances`, ADR-001). The legacy function kept a
+/// hard-coded unix-only candidate list that found nothing on Windows; we now
+/// surface whatever the real discovery detects, mapped to the legacy
+/// `{path, instance, exists}` shape so the existing frontend (ConnectScreen)
+/// keeps working unchanged.
 #[tauri::command]
 async fn detect_instances() -> Result<Vec<InstanceInfo>, String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-
-    let candidates: Vec<(PathBuf, &str)> = vec![
-        (home.join("steersman/venv/bin/python"), "steersman"),
-        (home.join("steersman/venv/bin/python3"), "steersman"),
-        (home.join(".steersman/venv/bin/python"), "steersman"),
-        (home.join(".hermes/venv/bin/python"), "hermes"),
-        (home.join(".hermes/hermes-agent/venv/bin/python"), "hermes-agent"),
-        (PathBuf::from("/usr/local/bin/python3"), "system"),
-    ];
-
-    let mut result = Vec::new();
-    for (path, instance) in candidates {
-        result.push(InstanceInfo {
-            path: path.to_string_lossy().to_string(),
-            instance: instance.to_string(),
-            exists: path.exists(),
-        });
-    }
-
+    let detected = discovery::detect_local_instances();
+    let result = detected
+        .into_iter()
+        .map(|inst| InstanceInfo {
+            path: inst.path,
+            instance: inst.instance_type,
+            exists: true, // discovery only returns existing interpreters
+        })
+        .collect();
     Ok(result)
 }
 
@@ -235,6 +232,268 @@ async fn connect_to_instance(
     state.hermes_home.store(Some(std::sync::Arc::new(home.clone())));
 
     Ok(home.to_string_lossy().to_string())
+}
+
+/// Auto-discover and adopt the local Hermes instance in one shot (ADR-003).
+///
+/// Runs discovery; if an instance is found, adopts its HERMES_HOME and starts
+/// the gateway, returning the resolved home + whether the gateway came up.
+/// The frontend uses this on startup to go straight to the chat screen when a
+/// local agent exists (the shturman.ai "Подключен" experience), without ever
+/// showing the manual connection screen.
+#[tauri::command]
+async fn auto_connect_local_cmd(
+    state: State<'_, AppState>,
+) -> Result<AutoConnectResult, String> {
+    let instance = match discovery::primary_instance() {
+        Some(i) => i,
+        None => {
+            return Ok(AutoConnectResult {
+                found: false,
+                hermes_home: None,
+                gateway_running: false,
+                label: None,
+                error: Some("No local Hermes installation detected".to_string()),
+            });
+        }
+    };
+
+    // Adopt the instance's home dir (if known), else fall back to the default.
+    let home = match &instance.home_dir {
+        Some(h) if !h.is_empty() && PathBuf::from(h).is_dir() => PathBuf::from(h),
+        _ => {
+            // No explicit home dir; rely on the resolved default, but only if it
+            // looks like an agent home so we don't adopt a phantom dir.
+            let resolved = config::resolve_hermes_home();
+            if resolved.is_dir() {
+                resolved
+            } else {
+                return Ok(AutoConnectResult {
+                    found: true,
+                    hermes_home: None,
+                    gateway_running: instance.gateway_running,
+                    label: instance.label.clone(),
+                    error: Some("Detected instance but could not resolve its home directory".to_string()),
+                });
+            }
+        }
+    };
+
+    state
+        .hermes_home
+        .store(Some(std::sync::Arc::new(home.clone())));
+
+    // Start the gateway if it isn't already up. primary_instance prefers a
+    // running gateway; if it's already running we just report that.
+    let gateway_running = if instance.gateway_running {
+        true
+    } else {
+        let result = gateway::start_gateway(&state.gateway, &home, None);
+        result.success
+    };
+
+    Ok(AutoConnectResult {
+        found: true,
+        hermes_home: Some(home.to_string_lossy().to_string()),
+        gateway_running,
+        label: instance.label.clone(),
+        error: if gateway_running {
+            None
+        } else {
+            Some("Instance adopted but gateway failed to start".to_string())
+        },
+    })
+}
+
+/// Result of an auto-connect attempt.
+#[derive(Debug, Serialize)]
+struct AutoConnectResult {
+    found: bool,
+    hermes_home: Option<String>,
+    gateway_running: bool,
+    label: Option<String>,
+    error: Option<String>,
+}
+
+// ── Soul / Personality ────────────────────────────────────────────────────
+//
+// The agent's identity lives in two places: the free-form `soul.md` file
+// (personality text the user can edit) and the `personalities` map in
+// config.yaml with a `display.personality` pointer selecting the active one.
+// These commands expose both so the onboarding wizard and the Settings → Soul
+// tab can read/customize the agent's "soul".
+
+#[derive(Debug, Serialize, Clone)]
+struct Personality {
+    id: String,
+    description: String,
+}
+
+/// Read the agent's soul.md (persona text). Empty string if absent.
+#[tauri::command]
+fn read_soul_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    Ok(memory::read_soul(&hermes_home, None))
+}
+
+/// Write the agent's soul.md (persona text).
+#[tauri::command]
+fn write_soul_cmd(state: State<'_, AppState>, content: String) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    memory::write_soul(&hermes_home, None, &content)
+}
+
+/// Reset soul.md to the default and return the new content.
+#[tauri::command]
+fn reset_soul_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    Ok(memory::reset_soul(&hermes_home, None))
+}
+
+/// List the available personalities from config.yaml (the `personalities` map).
+#[tauri::command]
+fn get_personalities_cmd(state: State<'_, AppState>) -> Result<Vec<Personality>, String> {
+    let hermes_home = state.hermes_home()?;
+    let yaml = config::read_config_yaml(&hermes_home, None).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(personalities) = yaml.get("personalities").and_then(|v| v.as_object()) {
+        for (id, desc) in personalities {
+            let description = desc
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| desc.to_string());
+            out.push(Personality {
+                id: id.clone(),
+                description,
+            });
+        }
+    }
+    // Guarantee a sensible default is always offered even if the install
+    // shipped a trimmed config.
+    if out.is_empty() {
+        out.push(Personality {
+            id: "helpful".to_string(),
+            description: "You are a helpful, friendly AI assistant.".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read the active personality id (`display.personality` in config.yaml).
+#[tauri::command]
+fn get_personality_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    let yaml = config::read_config_yaml(&hermes_home, None).unwrap_or_default();
+    let active = yaml
+        .get("display")
+        .and_then(|d| d.get("personality"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("helpful")
+        .to_string();
+    Ok(active)
+}
+
+/// Set the active personality (`display.personality`). Done via a targeted
+/// text rewrite of config.yaml rather than a full re-serialize, to preserve
+/// comments and unrelated keys.
+#[tauri::command]
+fn set_personality_cmd(state: State<'_, AppState>, personality: String) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    set_config_scalar(&hermes_home, None, "personality", &personality)
+}
+
+/// Generic helper: set a scalar leaf under a one-level parent in config.yaml
+/// (e.g. `display.personality`). Used because we don't want to rewrite the
+/// whole YAML (which would lose comments/ordering).
+fn set_config_scalar(
+    hermes_home: &std::path::Path,
+    profile: Option<&str>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let path = profile_config_yaml_path(hermes_home, profile);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Read config.yaml error: {}", e))?;
+
+    // Look for an existing `display:` block and update the key inside it; or
+    // append a fresh block if absent. We operate on lines so formatting is
+    // preserved.
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let mut in_display = false;
+    let mut display_indent: Option<usize> = None;
+    let mut replaced = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if trimmed.starts_with("display:") {
+            in_display = true;
+            display_indent = Some(indent);
+            continue;
+        }
+        if in_display {
+            // A line indented less-or-equal to the `display:` header (and not
+            // blank) means we left the block.
+            if !trimmed.is_empty() && indent <= display_indent.unwrap_or(0) {
+                in_display = false;
+                continue;
+            }
+            // Same indent as expected children → candidate for our key.
+            if trimmed.starts_with(&format!("{}:", key)) {
+                *line = format!(
+                    "{}{}: {}",
+                    " ".repeat(display_indent.unwrap_or(0) + 2),
+                    key,
+                    value
+                );
+                replaced = true;
+            }
+        }
+    }
+
+    if !replaced {
+        // Either no display block or no such key: append a clean block.
+        let block = format!(
+            "display:\n  {}: {}\n",
+            key, value
+        );
+        lines.push(block);
+    }
+
+    let new_content = lines.join("\n");
+    std::fs::write(&path, new_content).map_err(|e| format!("Write config.yaml error: {}", e))?;
+    Ok(())
+}
+
+fn profile_config_yaml_path(hermes_home: &std::path::Path, profile: Option<&str>) -> std::path::PathBuf {
+    match profile {
+        Some(p) if p != "default" && !p.is_empty() => {
+            hermes_home.join("profiles").join(p).join("config.yaml")
+        }
+        _ => hermes_home.join("config.yaml"),
+    }
+}
+
+/// Save a provider API key to the instance's `.env` (where Hermes reads it) and
+/// optionally remember the provider/model. Used by the onboarding wizard.
+#[tauri::command]
+fn save_provider_key_cmd(
+    state: State<'_, AppState>,
+    env_key: String,
+    api_key: String,
+    provider: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    config::write_env_value(&hermes_home, None, &env_key, &api_key)?;
+    // Persist the active provider/model if supplied, so the freshly-installed
+    // agent picks them up immediately.
+    if let (Some(p), Some(m)) = (provider, model) {
+        let b = base_url.unwrap_or_default();
+        config::set_model_config(&hermes_home, None, &p, &m, &b);
+    }
+    Ok(())
 }
 
 /// Detect Python/steersman instances on a remote machine via SSH
@@ -431,11 +690,15 @@ async fn start_remote_gateway_cmd(
 
     let remote_port = ssh_config.remote_port;
 
-    // Start remote gateway via SSH in background. Both python_path (validated)
-    // and remote_port (u16, no metacharacters) are safe to interpolate.
+    // Start remote gateway via SSH in background (ADR-002). The Hermes gateway
+    // is a `hermes gateway` subcommand, not a `python -m hermes` module, and it
+    // does not take a `--port` flag (the port comes from API_SERVER_PORT or
+    // config.yaml). Prefer the `hermes` launcher on PATH, else fall back to
+    // invoking the CLI module through the interpreter. remote_port (u16) is
+    // safe to interpolate.
     let cmd = format!(
-        "nohup {} -m hermes gateway --port {} > /tmp/gateway.log 2>&1 &",
-        python_path, remote_port
+        "nohup sh -c 'API_SERVER_PORT={} hermes gateway 2>/dev/null || API_SERVER_PORT={} {} -m hermes_cli.main gateway' > /tmp/gateway.log 2>&1 &",
+        remote_port, remote_port, python_path
     );
 
     ssh::ssh_exec(&ssh_config, &cmd, 10)?;
@@ -912,6 +1175,19 @@ async fn list_media_files_cmd(dir: String) -> Result<Vec<media::MediaInfo>, Stri
     Ok(media::list_media_files(&dir))
 }
 
+/// Save a media blob (voice clip or attachment) to the instance media cache.
+/// Accepts raw bytes + extension, returns the saved file path.
+#[tauri::command]
+async fn save_media_blob_cmd(
+    state: State<'_, AppState>,
+    data: Vec<u8>,
+    ext: String,
+) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    let path = media::save_media_blob(&hermes_home, &data, &ext)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 // ── Model Discovery Commands ──────────────────────────────────────────────
 
 /// Discover models from provider
@@ -1303,6 +1579,7 @@ pub fn run() {
             }
         }))
         .manage(AppState::new())
+        .manage(install::InstallState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -1409,6 +1686,17 @@ pub fn run() {
             check_python_path,
             detect_local_instances_cmd,
             connect_to_instance,
+            auto_connect_local_cmd,
+            // Soul / personality / provider-key (onboarding + Settings → Soul)
+            read_soul_cmd,
+            write_soul_cmd,
+            reset_soul_cmd,
+            get_personalities_cmd,
+            get_personality_cmd,
+            set_personality_cmd,
+            save_provider_key_cmd,
+            // Local Hermes install (onboarding wizard)
+            install::install_hermes_cmd,
             detect_remote_instances_cmd,
             get_app_version,
             get_versions_cmd,
@@ -1469,6 +1757,7 @@ pub fn run() {
             get_media_info_cmd,
             read_media_data_url_cmd,
             list_media_files_cmd,
+            save_media_blob_cmd,
             // Model Discovery
             discover_models_cmd,
             is_discoverable_cmd,

@@ -1,13 +1,16 @@
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { invoke } from "@tauri-apps/api/core";
-import { Power, Cpu, Settings } from "lucide-react";
+import { Power, Cpu, Settings, PanelRight } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 
 interface HeaderProps {
   onSettingsClick: () => void;
+  /** Toggle the right-hand conversation-history panel. */
+  onToggleHistory?: () => void;
+  historyOpen?: boolean;
 }
 
-export function Header({ onSettingsClick }: HeaderProps) {
+export function Header({ onSettingsClick, onToggleHistory, historyOpen }: HeaderProps) {
   const {
     agentStatus,
     connected,
@@ -98,6 +101,15 @@ export function Header({ onSettingsClick }: HeaderProps) {
         >
           <Settings className="w-3.5 h-3.5" />
         </button>
+        {onToggleHistory && (
+          <button
+            onClick={onToggleHistory}
+            className={`transition-colors ${historyOpen ? "text-ac-amber" : "text-ac-stone hover:text-ac-ivory"}`}
+            title={t("nav.sessions")}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+          </button>
+        )}
         <div className="flex items-center gap-1.5">
           <span
             className={

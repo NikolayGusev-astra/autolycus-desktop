@@ -2,8 +2,8 @@
 
 **Native desktop AI assistant** — full port of [Hermes Agent](https://github.com/NousResearch/hermes-agent) desktop from Electron to Tauri 2 + Rust.
 
-[![Build](https://github.com/NikolayGusev-astra/steersman-desktop/actions/workflows/release.yml/badge.svg)](https://github.com/NikolayGusev-astra/steersman-desktop/actions/workflows/release.yml)
-[![Release](https://img.shields.io/github/v/release/NikolayGusev-astra/steersman-desktop)](https://github.com/NikolayGusev-astra/steersman-desktop/releases)
+[![Build](https://github.com/NikolayGusev-astra/autolycus-desktop/actions/workflows/release.yml/badge.svg)](https://github.com/NikolayGusev-astra/autolycus-desktop/actions/workflows/release.yml)
+[![Release](https://img.shields.io/github/v/release/NikolayGusev-astra/autolycus-desktop)](https://github.com/NikolayGusev-astra/autolycus-desktop/releases)
 
 ## Features
 
@@ -30,9 +30,9 @@
 
 | Platform | Format | Latest |
 |----------|--------|--------|
-| Linux | AppImage | [v0.8.1](https://github.com/NikolayGusev-astra/steersman-desktop/releases/download/v0.8.1/Штурман.Desktop_0.8.1_amd64.AppImage) |
-| Linux | deb | [v0.8.1](https://github.com/NikolayGusev-astra/steersman-desktop/releases/download/v0.8.1/Штурман.Desktop_0.8.1_amd64.deb) |
-| Windows | MSI | [v0.8.1](https://github.com/NikolayGusev-astra/steersman-desktop/releases/download/v0.8.1/Штурман.Desktop_0.8.1_x64_en-US.msi) |
+| Linux | AppImage | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
+| Linux | deb | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
+| Windows | NSIS / MSI | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
 
 ## Development
 

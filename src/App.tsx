@@ -1,6 +1,8 @@
 // src/App.tsx
-// v0.5.0: Multi-mode connection, kanban, extended settings
-// Flow: Splash → Welcome → Connection → Main
+// Startup flow: Splash → (auto-adopt local Hermes) → Main, with Welcome /
+// Connection as fallbacks when no local instance is detected (ADR-003).
+// ThemeProvider wraps the whole app from main.tsx so every screen shares one
+// theme (ADR-004).
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -13,30 +15,25 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { KanbanBoard } from "./components/kanban/KanbanBoard";
-import { SteersmanScreen } from "./steersman/SteersmanChatView";
 import { MemoryScreen } from "./components/memory/MemoryScreen";
 import { SkillsScreen } from "./components/skills/SkillsScreen";
 import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
-import { ProfilesScreen } from "./components/profiles/ProfilesScreen";
-import ProvidersScreen from "./components/providers/ProvidersScreen";
+import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
-import { ThemeProvider } from "./components/ThemeProvider";
-import { DiagnoseScreen } from "./components/settings/DiagnoseScreen";
-import { GatewayScreen } from "./components/gateway/GatewayScreen";
-import { ToolsScreen } from "./components/tools/ToolsScreen";
-import { Versions } from "./components/Versions";
+import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useUIStore } from "./stores/uiStore";
 
 
-type AppScreen = "splash" | "welcome" | "connection" | "main";
+type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
 
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
   const [activeTab, setActiveTab] = useState("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
   const [appVersion, setAppVersion] = useState<string>("");
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
@@ -101,9 +98,46 @@ export function App() {
     detect();
   }, []);
 
-  const handleSplashComplete = useCallback((autoconnect: boolean) => {
-    setScreen(autoconnect ? "connection" : "welcome");
-  }, []);
+  const handleSplashComplete = useCallback(
+    async (autoconnect: boolean) => {
+      // ADR-003: when autoconnect is requested, try to auto-discover and adopt
+      // the local Hermes instance in one shot. On success we go straight to the
+      // main UI (the shturman.ai "Подключен" experience) without showing the
+      // manual connection screen. If discovery finds nothing, fall through to
+      // the welcome/connection screens as before.
+      if (autoconnect) {
+        try {
+          const result = await invoke<{
+            found: boolean;
+            hermes_home: string | null;
+            gateway_running: boolean;
+            label: string | null;
+            error: string | null;
+          }>("auto_connect_local_cmd");
+          if (result.found && result.gateway_running && result.hermes_home) {
+            setHermesHome(result.hermes_home);
+            setConnected(true);
+            setError(null);
+            setScreen("main");
+            return;
+          }
+          // Found an instance but the gateway didn't come up — surface the
+          // reason and fall through to onboarding for manual setup.
+          if (result.found && result.error) {
+            setError(result.error);
+          }
+        } catch (err) {
+          console.error("Auto-connect failed:", err);
+        }
+        // No usable local agent → show the onboarding wizard, where the user
+        // chooses: connect to a remote server, or install Hermes locally.
+        setScreen("onboarding");
+        return;
+      }
+      setScreen("welcome");
+    },
+    [setHermesHome, setConnected, setError]
+  );
 
   const handleGetStarted = useCallback(() => {
     setScreen("connection");
@@ -138,6 +172,31 @@ export function App() {
     setError(null);
     setScreen("main");
   }, [setConnected, setError]);
+
+  // Onboarding finished (remote configured, or Hermes installed+configured).
+  // Re-run auto-connect so the just-configured instance is adopted and the
+  // gateway started, then land in the main UI.
+  const handleOnboardingDone = useCallback(async () => {
+    try {
+      const result = await invoke<{
+        found: boolean;
+        hermes_home: string | null;
+        gateway_running: boolean;
+        error: string | null;
+      }>("auto_connect_local_cmd");
+      if (result.hermes_home) setHermesHome(result.hermes_home);
+      if (result.found) {
+        setConnected(true);
+        setError(null);
+        setScreen("main");
+        return;
+      }
+    } catch (err) {
+      console.error("Post-onboarding connect failed:", err);
+    }
+    // Fall back to the connection screen for a manual retry.
+    setScreen("connection");
+  }, [setHermesHome, setConnected, setError]);
 
   const handleApprovalDecision = useCallback(
     async (decision: "approved" | "denied" | "approved_always") => {
@@ -182,20 +241,33 @@ export function App() {
     );
   }
 
+  if (screen === "onboarding") {
+    return <OnboardingScreen onDone={handleOnboardingDone} onConnected={handleConnected} />;
+  }
+
   if (screen === "connection" && !connected) {
     return <ConnectionScreen onConnected={handleConnected} error={error} />;
   }
 
-  // Main UI (or auto-transitioned from connection → main)
+  // Main UI (or auto-transitioned from connection → main).
+  // ThemeProvider now wraps the whole app from main.tsx (ADR-004), so every
+  // screen — including splash/welcome/connection — shares one theme.
   return (
-    <ThemeProvider>
     <div className="flex h-full">
       {sidebarOpen && (
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
       )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        <Header onSettingsClick={() => setSettingsOpen(true)} />
+        <Header
+          onSettingsClick={() => setSettingsOpen(true)}
+          onToggleHistory={() => setHistoryOpen((v) => !v)}
+          historyOpen={historyOpen}
+        />
 
         <div className="flex-1 overflow-hidden">
           <ConfigHealthBanner profile={undefined} />
@@ -215,32 +287,26 @@ export function App() {
               )}
             </>
           )}
-          {activeTab === "steersman" && <SteersmanScreen />}
           {activeTab === "sessions" && <SessionList />}
           {activeTab === "kanban" && <KanbanBoard />}
-          {activeTab === "models" && <ProfilesScreen />}
-          {activeTab === "settings" && settingsOpen && (
-            <SettingsPanel onClose={() => setSettingsOpen(false)} />
-          )}
-
-          {/* Coming soon tabs */}
           {activeTab === "memory" && <MemoryScreen />}
           {activeTab === "skills" && <SkillsScreen />}
-          {activeTab === "providers" && <ProvidersScreen />}
-          {activeTab === "diagnose" && <DiagnoseScreen />}
-          {activeTab === "gateway" && <GatewayScreen />}
-          {activeTab === "tools" && <ToolsScreen />}
-          {activeTab === "versions" && <Versions />}
           {activeTab === "schedules" && <SchedulesScreen />}
         </div>
 
         <StatusBar />
       </div>
 
-      {settingsOpen && activeTab !== "settings" && (
+      {/* Right-hand conversation history (only relevant alongside the chat). */}
+      {historyOpen && activeTab === "chat" && (
+        <HistoryPanel onClose={() => setHistoryOpen(false)} />
+      )}
+
+      {/* Unified settings panel — a modal over whatever tab is active (ADR-006).
+          Reached from the sidebar gear or the header gear. */}
+      {settingsOpen && (
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
       )}
     </div>
-    </ThemeProvider>
   );
 }

@@ -121,23 +121,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
   fetchGatewayStatus: async () => {
     try {
-      const status = await invoke<{
-        model?: string;
-        tokens_used?: number;
-        tokens_limit?: number;
-        cost_usd?: number;
-      }>("gateway_status_cmd");
-      if (status) {
-        set({
-          gatewayStatus: {
-            connected: true,
-            model: status.model,
-            tokensUsed: status.tokens_used,
-            tokensLimit: status.tokens_limit,
-            costUsd: status.cost_usd,
-          },
-        });
-      }
+      // gateway_status_cmd returns a boolean (is the gateway process alive),
+      // not a metrics object. Pipeline metrics (model/tokens/cost) arrive via
+      // the `pipeline_status` chat events pushed into gatewayStore. So here we
+      // only reflect connected/not-connected.
+      const running = await invoke<boolean>("gateway_status_cmd");
+      set((s) => ({
+        gatewayStatus: {
+          ...s.gatewayStatus,
+          connected: running,
+        },
+      }));
     } catch {
       // gateway_status_cmd may not exist yet
     }

@@ -236,28 +236,73 @@ export function ChatView() {
   }, [addMessage, setAgentStatus, setPipelineStatus, setPendingApproval]);
 
   const handleSend = useCallback(
-    async (text: string) => {
-      if (!text.trim()) return;
+    async (text: string, attachments?: import("./ChatInput").Attachment[]) => {
+      if (!text.trim() && !(attachments && attachments.length)) return;
 
-      // Clear previous messages for new conversation
-      useGatewayStore.setState({ messages: [] });
+      // Resolve attachments to references the agent can act on:
+      //  - File attachments (images/docs/etc.) are saved to the media cache and
+      //    turned into a path the agent can read.
+      //  - Voice clips already have a path (saved by VoiceInput on stop).
+      //  - URL chips are passed through as-is in the message text.
+      let messageText = text.trim();
+      const savedPaths: string[] = [];
+      if (attachments && attachments.length) {
+        for (const att of attachments) {
+          if (att.path) {
+            savedPaths.push(att.path);
+          } else if (att.file) {
+            try {
+              const buf = new Uint8Array(await att.file.arrayBuffer());
+              const ext = att.file.name.split(".").pop() || "bin";
+              const path = await invoke<string>("save_media_blob_cmd", {
+                data: Array.from(buf),
+                ext,
+              });
+              savedPaths.push(path);
+            } catch (e) {
+              console.error("Failed to save attachment:", e);
+            }
+          } else if (att.name && !att.path && !att.file) {
+            // URL chip — already in text; nothing else to do.
+          }
+        }
+      }
+      if (savedPaths.length) {
+        // Make the paths visible to the agent: images can be inlined as data
+        // URLs by the backend; for audio/video we hand the path so the agent
+        // transcribes via its STT/Whisper tool.
+        messageText = messageText
+          ? `${messageText}\n\n[вложения: ${savedPaths.join(", ")}]`
+          : `[вложения: ${savedPaths.join(", ")}]`;
+      }
 
-      // Add user message to UI immediately
+      // Add user message to UI immediately.
       const userMsg = {
         id: `user-${Date.now()}`,
         role: "user" as const,
-        content: text.trim(),
+        content: messageText,
         timestamp: Date.now(),
       };
       addMessage(userMsg);
+
+      // Build conversation history from prior messages so the agent has
+      // context (the previous implementation sent history:null, so every turn
+      // was amnesic). Keep the last few real turns (skip transient streaming
+      // / tool-status markers that carry no user content).
+      const prior = useGatewayStore.getState().messages;
+      const HISTORY_TURNS = 10;
+      const history = prior
+        .filter((m) => !m.isStreaming && (m.role === "user" || m.role === "assistant"))
+        .slice(-HISTORY_TURNS)
+        .map((m) => ({ role: m.role, content: m.content }));
 
       try {
         // Use send_message_cmd Tauri command
         await invoke<string>("send_message_cmd", {
           request: {
-            text: text.trim(),
+            text: messageText,
             session_id: currentSessionId,
-            history: null,
+            history,
           },
         });
       } catch (err) {

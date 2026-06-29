@@ -37,15 +37,15 @@ export function ConnectScreen({
   const { t } = useTranslation();
 
   return (
-    <div className="fixed inset-0 bg-ac-pitch flex items-center justify-center">
+    <div className="fixed inset-0 bg-ac-bg flex items-center justify-center">
       <div className="w-full max-w-md px-6">
         <div className="text-center mb-8">
           <div className="ac-display mb-2">{t("steersman_title")}</div>
-          <p className="text-sm text-ac-stone">{t("ai_assistant")}</p>
+          <p className="text-sm text-ac-muted">{t("ai_assistant")}</p>
         </div>
 
         {/* Mode Tabs */}
-        <div className="flex gap-1 mb-4 bg-ac-bg rounded-lg p-1 border border-ac-border">
+        <div className="flex gap-1 mb-4 bg-ac-surface rounded-lg p-1 border border-ac-border">
           {[
             { id: "local" as ConnectionMode, icon: FolderOpen, label: t("conn.local") },
             { id: "remote" as ConnectionMode, icon: Globe, label: t("conn.remote") },
@@ -56,8 +56,8 @@ export function ConnectScreen({
               onClick={() => setMode(tab.id)}
               className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs rounded-md transition-colors ${
                 mode === tab.id
-                  ? "bg-ac-amber/10 text-ac-amber"
-                  : "text-ac-stone hover:text-ac-stone/70"
+                  ? "bg-ac-brand/10 text-ac-brand"
+                  : "text-ac-muted hover:text-ac-muted/70"
               }`}
             >
               <tab.icon className="w-3.5 h-3.5" />
@@ -112,13 +112,13 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
   return (
     <div className="ac-card">
       <div className="flex items-center gap-2 mb-4">
-        <Server className="w-4 h-4 text-ac-amber" />
+        <Server className="w-4 h-4 text-ac-brand" />
         <span className="ac-section-title">{t("connect_title")}</span>
       </div>
 
       {existingInstances.length > 0 && (
         <div className="mb-4">
-          <label className="text-[11px] text-ac-stone mb-2 block">{t("found_instances")}</label>
+          <label className="text-[11px] text-ac-muted mb-2 block">{t("found_instances")}</label>
           <div className="space-y-1.5 max-h-32 overflow-y-auto">
             {instances.map((inst, idx) => (
               <button
@@ -127,13 +127,13 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
                 disabled={!inst.exists}
                 className={`w-full text-left px-3 py-2 text-xs border transition-colors flex items-center gap-2 ${
                   !inst.exists
-                    ? "border-ac-border/30 text-ac-stone/30 cursor-not-allowed"
+                    ? "border-ac-border/30 text-ac-muted/30 cursor-not-allowed"
                     : selectedIdx === idx
-                    ? "border-ac-amber/30 bg-ac-amber/8 text-ac-amber"
-                    : "border-ac-border text-ac-stone hover:border-ac-stone/30"
+                    ? "border-ac-brand/30 bg-ac-brand/8 text-ac-brand"
+                    : "border-ac-border text-ac-muted hover:border-ac-stone/30"
                 }`}
               >
-                {inst.exists ? <Check className="w-3 h-3 text-green-500 shrink-0" /> : <X className="w-3 h-3 text-ac-stone/30 shrink-0" />}
+                {inst.exists ? <Check className="w-3 h-3 text-green-500 shrink-0" /> : <X className="w-3 h-3 text-ac-muted/30 shrink-0" />}
                 <FolderOpen className="w-3 h-3 shrink-0" />
                 <span className="truncate">{inst.path}</span>
                 <span className="ml-auto text-[10px] opacity-50">{inst.instance}</span>
@@ -144,7 +144,7 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
       )}
 
       <div className="mb-4">
-        <label className="text-[11px] text-ac-stone mb-1 block">{t("or_specify_path")}</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">{t("or_specify_path")}</label>
         <input type="text" value={customPath} onChange={(e) => setCustomPath(e.target.value)}
           placeholder="~/steersman/venv/bin/python" className="ac-input w-full px-3 py-2 text-sm" />
       </div>
@@ -152,7 +152,7 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
       {error && (
         <div className="mb-3 px-3 py-2 bg-red-500/5 border border-red-500/20 text-ac-red text-xs flex items-center justify-between">
           <span>{error}</span>
-          <button onClick={loadInstances} className="text-ac-amber hover:underline text-[10px]">{t("retry")}</button>
+          <button onClick={loadInstances} className="text-ac-brand hover:underline text-[10px]">{t("retry")}</button>
         </div>
       )}
 
@@ -165,7 +165,7 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
         )}
       </button>
 
-      <p className="mt-4 text-[11px] text-ac-stone/50 text-center">{t("autostart_info")}</p>
+      <p className="mt-4 text-[11px] text-ac-muted/50 text-center">{t("autostart_info")}</p>
     </div>
   );
 }
@@ -216,18 +216,18 @@ function RemoteConnect({ onConnected }: { onConnected: () => void }) {
   return (
     <div className="ac-card">
       <div className="flex items-center gap-2 mb-4">
-        <Globe className="w-4 h-4 text-ac-amber" />
+        <Globe className="w-4 h-4 text-ac-brand" />
         <span className="ac-section-title">{t("conn.remote")}</span>
       </div>
 
       <div className="mb-3">
-        <label className="text-[11px] text-ac-stone mb-1 block">Server URL</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">Server URL</label>
         <input type="text" value={url} onChange={(e) => setUrl(e.target.value)}
           placeholder="https://your-server.com:8443" className="ac-input w-full px-3 py-2 text-sm" />
       </div>
 
       <div className="mb-4">
-        <label className="text-[11px] text-ac-stone mb-1 block">API Key</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">API Key</label>
         <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
           placeholder="Optional" className="ac-input w-full px-3 py-2 text-sm" />
       </div>
@@ -348,43 +348,43 @@ function SshConnect({ onConnected }: { onConnected: () => void }) {
   return (
     <div className="ac-card">
       <div className="flex items-center gap-2 mb-4">
-        <Terminal className="w-4 h-4 text-ac-amber" />
+        <Terminal className="w-4 h-4 text-ac-brand" />
         <span className="ac-section-title">{t("conn.ssh")}</span>
       </div>
 
       <div className="space-y-2 mb-3">
         <div className="flex gap-2">
           <div className="flex-1">
-            <label className="text-[11px] text-ac-stone mb-1 block">Host</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">Host</label>
             <input type="text" value={host} onChange={(e) => setHost(e.target.value)}
               placeholder="your-server.com" className="ac-input w-full px-3 py-2 text-sm" />
           </div>
           <div className="w-16">
-            <label className="text-[11px] text-ac-stone mb-1 block">Port</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">Port</label>
             <input type="text" value={port} onChange={(e) => setPort(e.target.value)}
               placeholder="22" className="ac-input w-full px-3 py-2 text-sm" />
           </div>
         </div>
         <div className="flex gap-2">
           <div className="flex-1">
-            <label className="text-[11px] text-ac-stone mb-1 block">User</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">User</label>
             <input type="text" value={username} onChange={(e) => setUsername(e.target.value)}
               className="ac-input w-full px-3 py-2 text-sm" />
           </div>
           <div className="flex-1">
-            <label className="text-[11px] text-ac-stone mb-1 block">SSH Key</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">SSH Key</label>
             <input type="text" value={keyPath} onChange={(e) => setKeyPath(e.target.value)}
               className="ac-input w-full px-3 py-2 text-sm" />
           </div>
         </div>
         <div className="flex gap-2">
           <div className="flex-1">
-            <label className="text-[11px] text-ac-stone mb-1 block">Remote port</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">Remote port</label>
             <input type="text" value={remotePort} onChange={(e) => setRemotePort(e.target.value)}
               className="ac-input w-full px-3 py-2 text-sm" />
           </div>
           <div className="flex-1">
-            <label className="text-[11px] text-ac-stone mb-1 block">Local port</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">Local port</label>
             <input type="text" value={localPort} onChange={(e) => setLocalPort(e.target.value)}
               className="ac-input w-full px-3 py-2 text-sm" />
           </div>
@@ -394,16 +394,16 @@ function SshConnect({ onConnected }: { onConnected: () => void }) {
       {/* Remote instances (after scan) */}
       {foundRemote.length > 0 && (
         <div className="mb-3">
-          <label className="text-[11px] text-ac-stone mb-2 block">Found on remote</label>
+          <label className="text-[11px] text-ac-muted mb-2 block">Found on remote</label>
           <div className="space-y-1">
             {remoteInstances.map((inst, idx) => (
               <button key={inst.path}
                 onClick={() => inst.exists && setSelectedRemoteIdx(idx)}
                 disabled={!inst.exists}
                 className={`w-full text-left px-3 py-2 text-xs border flex items-center gap-2 ${
-                  !inst.exists ? "border-ac-border/30 text-ac-stone/30 cursor-not-allowed"
-                    : selectedRemoteIdx === idx ? "border-ac-amber/30 bg-ac-amber/8 text-ac-amber"
-                    : "border-ac-border text-ac-stone"
+                  !inst.exists ? "border-ac-border/30 text-ac-muted/30 cursor-not-allowed"
+                    : selectedRemoteIdx === idx ? "border-ac-brand/30 bg-ac-brand/8 text-ac-brand"
+                    : "border-ac-border text-ac-muted"
                 }`}>
                 {inst.exists ? <Check className="w-3 h-3 text-green-500 shrink-0" /> : <X className="w-3 h-3 shrink-0" />}
                 <FolderOpen className="w-3 h-3 shrink-0" />

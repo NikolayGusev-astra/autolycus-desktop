@@ -1,5 +1,6 @@
-import { useRef, useEffect, useMemo } from "react";
+import { useRef, useEffect, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { invoke } from "@tauri-apps/api/core";
 import { MessageBubble } from "./MessageBubble";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import type { Message } from "../../lib/types";
@@ -7,6 +8,50 @@ import type { Message } from "../../lib/types";
 function groupMessages(messages: Message[]): Message[] {
   // Simple pass-through for now; grouping logic can be added later
   return messages;
+}
+
+/** Empty-state greeting derived from the agent's soul (soul.md). Falls back to
+ * a sensible default. The user can customize this via onboarding/Settings. */
+function SoulGreeting() {
+  const [title, setTitle] = useState<string>("Штурман");
+  const [subtitle, setSubtitle] = useState<string>("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const soul = await invoke<string>("read_soul_cmd").catch(() => "");
+        // Pull a name ("Your name is X") and a greeting line if present.
+        const nameMatch = soul.match(/name is\s+(.+?)[.\n]/i);
+        if (nameMatch) {
+          const name = nameMatch[1].trim().replace(/^the\s+/i, "");
+          setTitle(name.charAt(0).toUpperCase() + name.slice(1));
+        }
+        // Use the personality description as the subtitle if it's short.
+        const lines = soul
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("#") && !/^your name/i.test(l) && l.length < 160);
+        if (lines.length) setSubtitle(lines[0]);
+      } catch {
+        /* keep defaults */
+      }
+    })();
+  }, []);
+
+  return (
+    <div className="flex h-full items-center justify-center text-ac-faint">
+      <div className="text-center max-w-md">
+        <p className="text-lg mb-1 text-ac-ink">
+          {title === "Штурман" ? "Привет, я Штурман" : `Привет, я ${title}`}
+        </p>
+        {subtitle ? (
+          <p className="text-sm">{subtitle}</p>
+        ) : (
+          <p className="text-sm">Отправьте сообщение, чтобы начать</p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function MessageList() {
@@ -30,14 +75,7 @@ export function MessageList() {
   }, [grouped.length, lastContent]);
 
   if (grouped.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-ac-faint">
-        <div className="text-center">
-          <p className="text-lg mb-1">Welcome to Штурман</p>
-          <p className="text-sm">Send a message to start chatting</p>
-        </div>
-      </div>
-    );
+    return <SoulGreeting />;
   }
 
   return (

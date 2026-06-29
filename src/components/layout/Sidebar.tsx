@@ -2,17 +2,11 @@ import {
   MessageSquare,
   Clock,
   Layers,
-  Cpu,
   Brain,
   Puzzle,
-  KeyRound,
   Timer,
   Settings,
-  Bot,
-  Stethoscope,
   Compass,
-  Wrench,
-  Monitor,
 } from "lucide-react";
 import { useUIStore } from "../../stores/uiStore";
 import { useTranslation } from "../../hooks/useTranslation";
@@ -20,34 +14,35 @@ import { useTranslation } from "../../hooks/useTranslation";
 interface SidebarProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
+  /** Opens the unified settings panel (ADR-006). */
+  onOpenSettings: () => void;
 }
 
-export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
+export function Sidebar({ activeTab, onTabChange, onOpenSettings }: SidebarProps) {
   const { toggleSidebar } = useUIStore();
   const { t } = useTranslation();
 
+  // ADR-006: the sidebar holds only genuine WORK areas. Everything that is
+  // configuration or maintenance (models, providers, gateway, tools, diagnose,
+  // versions) now lives under the unified Settings panel reached via the gear.
+  // ADR (unified chat): there is now a single chat surface — "Штурман" —
+  // which is the main chat (real gateway, streaming, tools) with all the
+  // capabilities (voice, media, history) folded in. The old separate
+  // "steersman" tab is gone.
   const tabs = [
-    { id: "chat", icon: MessageSquare, label: t("nav.chat") },
-    { id: "steersman", icon: Compass, label: "Штурман" },
+    { id: "chat", icon: MessageSquare, label: "Штурман" },
     { id: "sessions", icon: Clock, label: t("nav.sessions") },
     { id: "kanban", icon: Layers, label: t("nav.kanban") },
-    { id: "models", icon: Cpu, label: t("nav.models") },
     { id: "memory", icon: Brain, label: t("nav.memory") },
     { id: "skills", icon: Puzzle, label: t("nav.skills") },
-    { id: "providers", icon: KeyRound, label: t("nav.providers") },
-    { id: "diagnose", icon: Stethoscope, label: t("nav.diagnose") },
-    { id: "gateway", icon: Bot, label: t("nav.gateway") },
-    { id: "tools", icon: Wrench, label: t("nav.tools") },
-    { id: "versions", icon: Monitor, label: t("nav.versions") },
     { id: "schedules", icon: Timer, label: t("nav.schedules") },
-    { id: "settings", icon: Settings, label: t("nav.settings") },
   ];
 
   return (
     <div className="ac-sidebar">
       {/* Logo */}
       <div className="w-7 h-7 flex items-center justify-center mb-3">
-        <Bot className="w-5 h-5 text-ac-amber" />
+        <Compass className="w-5 h-5 text-ac-brand" />
       </div>
 
       {/* Nav buttons */}
@@ -63,6 +58,15 @@ export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
       ))}
 
       <div className="flex-1" />
+
+      {/* Unified settings (gear) */}
+      <button
+        onClick={onOpenSettings}
+        className="ac-sidebar-btn"
+        title={t("nav.settings")}
+      >
+        <Settings className="w-4 h-4" />
+      </button>
 
       {/* Collapse */}
       <button
