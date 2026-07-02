@@ -467,10 +467,16 @@ pub async fn send_message(
             let api_url = gateway::get_api_url(gateway_state, None)
                 .ok_or("Gateway not available")?;
 
-            // The Hermes API server requires a Bearer token (API_SERVER_KEY) on
-            // every endpoint except /health. It lives in the instance's .env.
-            // Reading it here fixes the 401 that the old empty-key path caused.
+            // The Hermes API server requires a Bearer token (API_SERVER_KEY).
+            // The key can live in the profile .env OR the global ~/.hermes/.env
+            // (Hermes's real credential store). Check both, plus process env.
             let local_key = config::get_api_server_key(hermes_home, None)
+                .or_else(|| {
+                    dirs::home_dir().and_then(|h| {
+                        config::get_api_server_key(&h.join(".hermes"), None)
+                    })
+                })
+                .or_else(|| std::env::var("API_SERVER_KEY").ok().filter(|v| !v.is_empty()))
                 .unwrap_or_default();
 
             // Use API mode even for local (gateway exposes HTTP API)
@@ -509,10 +515,15 @@ pub async fn send_message(
             let tunnel_url = crate::ssh::get_tunnel_url(ssh_state)
                 .ok_or("SSH tunnel not available")?;
 
-            // The remote gateway still requires its API_SERVER_KEY, which lives
-            // in the local instance's .env (the tunnel points at the same
-            // Hermes install whose home we adopted).
+            // The remote gateway still requires its API_SERVER_KEY (profile env
+            // or global ~/.hermes/.env).
             let tunneled_key = config::get_api_server_key(hermes_home, None)
+                .or_else(|| {
+                    dirs::home_dir().and_then(|h| {
+                        config::get_api_server_key(&h.join(".hermes"), None)
+                    })
+                })
+                .or_else(|| std::env::var("API_SERVER_KEY").ok().filter(|v| !v.is_empty()))
                 .unwrap_or_default();
 
             send_message_via_api(

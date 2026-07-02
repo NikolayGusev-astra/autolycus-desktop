@@ -41,7 +41,28 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
 
   const start = useCallback(async () => {
     setError(null);
+
+    // Live mode: prefer the browser-native Web Speech API — it works in
+    // WebView2 WITHOUT a microphone permission prompt (uses the OS speech
+    // recognizer) and gives real-time text. Falls back to MediaRecorder+STT
+    // only if Web Speech is unavailable.
+    if (mode === "live" && onTranscribed && webSpeechAvailable()) {
+      startWebSpeech(onTranscribed);
+      return;
+    }
+
+    // Note mode (or live without Web Speech): use MediaRecorder, which requires
+    // microphone access. Explicitly request permission with a clear message on
+    // denial.
     try {
+      // First check permission state to give a precise error.
+      if (navigator.permissions) {
+        const perm = await navigator.permissions.query({ name: "microphone" as PermissionName });
+        if (perm.state === "denied") {
+          setError("Доступ к микрофону запрещён. Разрешите его в настройках Windows (Конфиденциальность → Микрофон).");
+          return;
+        }
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
@@ -76,7 +97,7 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
               const msg = String(e);
               setError(
                 msg.includes("No STT provider")
-                  ? "Не задан GROQ_API_KEY/OPENAI_API_KEY — переключите на режим голосового сообщения"
+                  ? "Не задан GROQ_API_KEY — добавьте в Настройки → Ключи API"
                   : msg
               );
             }
@@ -97,19 +118,11 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
       recorderRef.current = recorder;
       recorder.start();
       setRecording(true);
-    } catch {
-      // getUserMedia was blocked/denied (WebView2 permission, or no prompt
-      // shown). Fall back to the browser-native Web Speech API for live
-      // transcription — no MediaRecorder needed, recognition is on-device via
-      // the browser. This is the same approach the old Steersman chat used.
-      if (mode === "live" && onTranscribed && webSpeechAvailable()) {
-        startWebSpeech(onTranscribed);
-        return;
-      }
+    } catch (e) {
       setError(
-        mode === "live"
-          ? "Нет доступа к микрофону. Разрешите доступ или переключите на режим голосового сообщения."
-          : "Нет доступа к микрофону"
+        "Нет доступа к микрофону. Разрешите в Windows (Конфиденциальность → Микрофон) или используйте текстовый ввод. (" +
+          String(e) +
+          ")"
       );
     }
   }, [mode, onTranscribed, onRecorded]);

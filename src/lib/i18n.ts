@@ -98,6 +98,39 @@ const translations = {
   'selfDiag.hint': { en: 'How are you feeling? What influenced it?', ru: 'Как вы себя чувствуете? Что повлияло?' },
   'selfDiag.placeholder': { en: 'Additional notes...', ru: 'Дополнительные заметки...' },
 
+  // Tasks
+  'tasks.whatTodo': { en: 'What needs to be done?', ru: 'Что нужно сделать?' },
+  'tasks.prioHigh': { en: 'High priority', ru: 'Высокий приоритет' },
+  'tasks.prioMed': { en: 'Medium priority', ru: 'Средний приоритет' },
+  'tasks.prioLow': { en: 'Low priority', ru: 'Низкий приоритет' },
+  'tasks.createFirst': { en: 'Create your first task', ru: 'Создайте первую задачу' },
+  // Goals
+  'goals.new': { en: 'New goal', ru: 'Новая цель' },
+  'goals.namePh': { en: 'e.g. AI-buddy', ru: 'Например: ИИ-бадди' },
+  'goals.target': { en: 'Target', ru: 'Целевая дата' },
+  'goals.empty': { en: 'No goals. Add your first goal to track progress.', ru: 'Нет целей. Добавьте первую цель для отслеживания прогресса.' },
+  // Projects
+  'projects.new': { en: 'New project', ru: 'Новый проект' },
+  'projects.namePh': { en: 'Project name', ru: 'Название проекта' },
+  'projects.empty': { en: 'No projects. Create one to group tasks.', ru: 'Нет проектов. Создайте проект для группировки задач.' },
+  // Protocols
+  'protocols.new': { en: 'New protocol', ru: 'Новый протокол' },
+  'protocols.title': { en: 'Protocol title', ru: 'Название протокола' },
+  'protocols.participants': { en: 'Participants (comma-separated)', ru: 'Участники через запятую' },
+  'protocols.decisions': { en: 'Decisions', ru: 'Решения' },
+  'protocols.empty': { en: 'No protocols. Create your first meeting protocol.', ru: 'Нет протоколов. Создайте первый протокол встречи.' },
+  // Stats
+  'stats.energy': { en: 'Energy', ru: 'Энергия' },
+  'stats.joy': { en: 'Joy', ru: 'Радость' },
+  'stats.mood': { en: 'Mood', ru: 'Настроение' },
+  'stats.saveCheck': { en: 'Save check-in', ru: 'Сохранить' },
+  'stats.tasksTotal': { en: 'Total tasks', ru: 'Всего задач' },
+  'stats.tasksDone': { en: 'Completed', ru: 'Выполнено' },
+  'stats.goals': { en: 'Goals', ru: 'Цели' },
+  'stats.projects': { en: 'Projects', ru: 'Проекты' },
+  'stats.energyJoy': { en: 'Energy and joy (30 days)', ru: 'Энергия и радость (30 дней)' },
+  'stats.noData': { en: 'Not enough data. Fill self-diagnosis a few times.', ru: 'Недостаточно данных. Заполните самодиагностику несколько раз.' },
+
   // Dashboard
   'dash.newTask': { en: 'New task', ru: 'Новая задача' },
   'dash.noTasks': { en: 'No tasks yet', ru: 'Задач пока нет' },

@@ -25,13 +25,14 @@ interface DashboardViewProps {
 export function DashboardView({ onNavigate, onSelfDiagnosis }: DashboardViewProps) {
   const { t } = useTranslation();
   const [tasks, setTasks] = useState<KanbanTask[]>([]);
+  const [stats, setStats] = useState<{ tasks_total: number; tasks_done: number; tasks_today: number; goals_total: number; projects_total: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    invoke<KanbanTask[]>("list_kanban_tasks_cmd", { profile: null })
-      .then(setTasks)
-      .catch(() => setTasks([]))
-      .finally(() => setLoading(false));
+    Promise.all([
+      invoke<KanbanTask[]>("list_tasks_cmd", { profile: null }).catch(() => []),
+      invoke<{ tasks_total: number; tasks_done: number; tasks_today: number; goals_total: number; projects_total: number }>("dash_stats_cmd", { profile: null }).catch(() => null),
+    ]).then(([t, s]) => { setTasks(t); setStats(s); }).finally(() => setLoading(false));
   }, []);
 
   // Today / this-week splits by due_date.
@@ -107,8 +108,8 @@ export function DashboardView({ onNavigate, onSelfDiagnosis }: DashboardViewProp
         <DashCard
           emoji="🎯"
           title={t("dash.goals")}
-          count={0}
-          loading={false}
+          count={stats?.goals_total ?? 0}
+          loading={loading}
           items={[]}
           emptyText={t("dash.noGoals")}
           onClick={() => onNavigate("goals")}
@@ -116,8 +117,8 @@ export function DashboardView({ onNavigate, onSelfDiagnosis }: DashboardViewProp
         <DashCard
           emoji="📁"
           title={t("dash.priorityProjects")}
-          count={0}
-          loading={false}
+          count={stats?.projects_total ?? 0}
+          loading={loading}
           items={[]}
           emptyText={t("dash.noProjects")}
           onClick={() => onNavigate("projects")}

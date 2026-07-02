@@ -148,7 +148,13 @@ async fn transcribe_openai_compat(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("STT HTTP {}: {}", status.as_u16(), text));
+        // 401/403 → bad/forbidden key; 429 → rate limit. Give actionable text.
+        let hint = match status.as_u16() {
+            401 | 403 => " — проверьте правильность GROQ_API_KEY (в Настройках → Ключи API)".to_string(),
+            429 => " — превышен лимит запросов Groq, попробуйте позже".to_string(),
+            _ => String::new(),
+        };
+        return Err(format!("STT HTTP {}{}: {}", status.as_u16(), hint, text));
     }
 
     // Response shape: { "text": "..." }

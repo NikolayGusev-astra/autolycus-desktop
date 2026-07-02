@@ -17,6 +17,7 @@ mod model_discovery;
 mod models;
 mod mcp;
 mod profiles;
+mod productivity;
 mod provider_registry;
 mod registry;
 mod secrets;
@@ -785,6 +786,26 @@ async fn send_message_cmd(
 
 // ── Session Commands ──────────────────────────────────────────────────────
 
+/// Resolve hermes_home from state, falling back to config::resolve_hermes_home()
+/// if the state hasn't been set yet (e.g. commands fire before init_app
+/// completes, or auto_connect overwrote it with a dir lacking data). This
+/// makes session/memory/credential reads robust regardless of init timing.
+fn home_or_resolve(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+    // Try the state's stored home; if it holds data, use it.
+    if let Ok(h) = state.hermes_home() {
+        if h.join("state.db").exists() || h.join("config.yaml").exists() {
+            return Ok(h);
+        }
+    }
+    // Otherwise resolve the real data dir (finds AppData\Local\hermes on Windows).
+    let resolved = config::resolve_hermes_home();
+    if resolved.join("state.db").exists() || resolved.join("config.yaml").exists() {
+        Ok(resolved)
+    } else {
+        state.hermes_home()
+    }
+}
+
 /// List sessions
 #[tauri::command]
 async fn list_sessions_cmd(
@@ -793,7 +814,7 @@ async fn list_sessions_cmd(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<SessionSummary>, String> {
-    let hermes_home = state.hermes_home()?;
+    let hermes_home = home_or_resolve(&state)?;
 
     sessions::list_sessions(
         &hermes_home,
@@ -811,7 +832,7 @@ async fn get_session_messages_cmd(
     session_id: String,
     profile: Option<String>,
 ) -> Result<Vec<SessionMessage>, String> {
-    let hermes_home = state.hermes_home()?;
+    let hermes_home = home_or_resolve(&state)?;
 
     sessions::get_session_messages(&hermes_home, profile.as_deref(), &session_id)
         .map_err(|e| format!("SQLite error: {}", e))
@@ -825,7 +846,7 @@ async fn search_sessions_cmd(
     limit: Option<i64>,
     profile: Option<String>,
 ) -> Result<Vec<sessions::SearchResult>, String> {
-    let hermes_home = state.hermes_home()?;
+    let hermes_home = home_or_resolve(&state)?;
 
     sessions::search_sessions(
         &hermes_home,
@@ -843,7 +864,7 @@ async fn delete_session_cmd(
     session_id: String,
     profile: Option<String>,
 ) -> Result<(), String> {
-    let hermes_home = state.hermes_home()?;
+    let hermes_home = home_or_resolve(&state)?;
 
     sessions::delete_session(&hermes_home, profile.as_deref(), &session_id)
         .map_err(|e| format!("SQLite error: {}", e))
@@ -855,7 +876,7 @@ async fn get_session_stats_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<SessionStats, String> {
-    let hermes_home = state.hermes_home()?;
+    let hermes_home = home_or_resolve(&state)?;
 
     sessions::get_session_stats(&hermes_home, profile.as_deref())
         .map_err(|e| format!("SQLite error: {}", e))
@@ -1587,6 +1608,89 @@ async fn set_credential_pool_cmd(
     auth::set_credential_pool(&hermes_home, &provider, &entries).await
 }
 
+// ── Productivity (tasks/goals/projects/protocols/self-checks) ─────────────
+
+#[tauri::command]
+async fn list_tasks_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Task>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_tasks(&hh, profile.as_deref())
+}
+#[tauri::command]
+async fn create_task_cmd(state: State<'_, AppState>, title: String, priority: Option<i64>, due_date: Option<String>, project_id: Option<i64>, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_task(&hh, profile.as_deref(), &title, priority.unwrap_or(3), due_date.as_deref(), project_id)
+}
+#[tauri::command]
+async fn update_task_status_cmd(state: State<'_, AppState>, id: i64, status: String, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::update_task_status(&hh, profile.as_deref(), id, &status)
+}
+#[tauri::command]
+async fn delete_task_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::delete_task(&hh, profile.as_deref(), id)
+}
+#[tauri::command]
+async fn list_goals_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Goal>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_goals(&hh, profile.as_deref())
+}
+#[tauri::command]
+async fn create_goal_cmd(state: State<'_, AppState>, title: String, target_date: Option<String>, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_goal(&hh, profile.as_deref(), &title, target_date.as_deref())
+}
+#[tauri::command]
+async fn delete_goal_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::delete_goal(&hh, profile.as_deref(), id)
+}
+#[tauri::command]
+async fn list_projects_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Project>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_projects(&hh, profile.as_deref())
+}
+#[tauri::command]
+async fn create_project_cmd(state: State<'_, AppState>, name: String, color: Option<String>, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_project(&hh, profile.as_deref(), &name, color.as_deref().unwrap_or("#888"))
+}
+#[tauri::command]
+async fn delete_project_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::delete_project(&hh, profile.as_deref(), id)
+}
+#[tauri::command]
+async fn list_protocols_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Protocol>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_protocols(&hh, profile.as_deref())
+}
+#[tauri::command]
+async fn create_protocol_cmd(state: State<'_, AppState>, title: String, participants: String, meeting_date: Option<String>, decisions: String, risks: String, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_protocol(&hh, profile.as_deref(), &title, &participants, meeting_date.as_deref(), &decisions, &risks)
+}
+#[tauri::command]
+async fn delete_protocol_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::delete_protocol(&hh, profile.as_deref(), id)
+}
+#[tauri::command]
+async fn list_self_checks_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::SelfCheck>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_self_checks(&hh, profile.as_deref())
+}
+#[tauri::command]
+async fn add_self_check_cmd(state: State<'_, AppState>, energy: i64, joy: i64, mood: String, notes: String, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::add_self_check(&hh, profile.as_deref(), energy, joy, &mood, &notes)
+}
+#[tauri::command]
+async fn dash_stats_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<productivity::DashStats, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::dash_stats(&hh, profile.as_deref())
+}
+
 // ── Entry Point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1830,6 +1934,23 @@ pub fn run() {
             get_credential_pool_cmd,
             add_credential_pool_entry_cmd,
             set_credential_pool_cmd,
+            // Productivity (tasks/goals/projects/protocols/self-checks/dashboard)
+            list_tasks_cmd,
+            create_task_cmd,
+            update_task_status_cmd,
+            delete_task_cmd,
+            list_goals_cmd,
+            create_goal_cmd,
+            delete_goal_cmd,
+            list_projects_cmd,
+            create_project_cmd,
+            delete_project_cmd,
+            list_protocols_cmd,
+            create_protocol_cmd,
+            delete_protocol_cmd,
+            list_self_checks_cmd,
+            add_self_check_cmd,
+            dash_stats_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

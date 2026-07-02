@@ -13,9 +13,13 @@ import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
-import { KanbanBoard } from "./components/kanban/KanbanBoard";
 import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import { DashboardView } from "./components/views/DashboardView";
+import { TasksView } from "./components/views/TasksView";
+import { GoalsView } from "./components/views/GoalsView";
+import { ProjectsView } from "./components/views/ProjectsView";
+import { ProtocolsView } from "./components/views/ProtocolsView";
+import { StatsView } from "./components/views/StatsView";
 import { useTranslation as useTranslationHook } from "./hooks/useTranslation";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
@@ -286,9 +290,15 @@ export function App() {
               />
             </div>
           ) : activeView === "tasks" ? (
-            <div className="flex-1 overflow-y-auto">
-              <KanbanBoard />
-            </div>
+            <div className="flex-1 overflow-y-auto"><TasksView /></div>
+          ) : activeView === "goals" ? (
+            <div className="flex-1 overflow-y-auto"><GoalsView /></div>
+          ) : activeView === "projects" ? (
+            <div className="flex-1 overflow-y-auto"><ProjectsView /></div>
+          ) : activeView === "protocols" ? (
+            <div className="flex-1 overflow-y-auto"><ProtocolsView /></div>
+          ) : activeView === "stats" ? (
+            <div className="flex-1 overflow-y-auto"><StatsView /></div>
           ) : activeView === "settings" ? (
             <div className="flex-1 overflow-y-auto">
               <SettingsPanel onClose={() => setActiveView("dashboard")} />
