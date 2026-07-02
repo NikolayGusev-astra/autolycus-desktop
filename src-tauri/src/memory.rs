@@ -46,6 +46,13 @@ pub fn read_memory(hermes_home: &Path, profile: Option<&str>) -> MemoryReadResul
     let (mem_content, mem_exists, mem_modified) = read_file_info(&home.join("memory.md"));
     let (user_content, user_exists, user_modified) = read_file_info(&home.join("user.md"));
 
+    // Pull real counts from the agent's state.db (was hardcoded 0/0). Falls
+    // back to zeros if the DB is absent (e.g. fresh install).
+    let stats = crate::sessions::get_session_stats(&home, None).unwrap_or(crate::sessions::SessionStats {
+        total_sessions: 0,
+        total_messages: 0,
+    });
+
     MemoryReadResult {
         memory: MemoryInfo {
             content: mem_content,
@@ -58,8 +65,8 @@ pub fn read_memory(hermes_home: &Path, profile: Option<&str>) -> MemoryReadResul
             last_modified: user_modified,
         },
         stats: MemoryStats {
-            total_sessions: 0,
-            total_messages: 0,
+            total_sessions: stats.total_sessions,
+            total_messages: stats.total_messages,
         },
     }
 }

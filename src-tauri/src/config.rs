@@ -397,21 +397,19 @@ pub struct ModelConfig {
 }
 
 pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfig {
-    // Try config.yaml first
+    // config.yaml `model:` block is Hermes's source of truth (the same keys
+    // `hermes setup` writes). Read provider/default/base_url from there first.
     if let Ok(yaml) = read_config_yaml(hermes_home, profile) {
-        if let Some(providers) = yaml.get("providers").and_then(|p| p.as_array()) {
-            for provider in providers {
-                if let Some(provider_name) = provider.get("name").and_then(|n| n.as_str()) {
-                    if let Some(model) = provider.get("model").and_then(|m| m.as_str()) {
-                        if let Some(base_url) = provider.get("base_url").and_then(|u| u.as_str()) {
-                            return ModelConfig {
-                                provider: provider_name.to_string(),
-                                model: model.to_string(),
-                                base_url: base_url.to_string(),
-                            };
-                        }
-                    }
-                }
+        if let Some(model_block) = yaml.get("model").and_then(|m| m.as_object()) {
+            let provider = model_block.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let default = model_block.get("default").and_then(|v| v.as_str()).unwrap_or("");
+            let base_url = model_block.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+            if !provider.is_empty() || !default.is_empty() {
+                return ModelConfig {
+                    provider: provider.to_string(),
+                    model: default.to_string(),
+                    base_url: base_url.to_string(),
+                };
             }
         }
     }
@@ -432,10 +430,114 @@ pub fn set_model_config(
     model: &str,
     base_url: &str,
 ) -> Result<(), String> {
-    // Write to .env for simplicity
+    // Write to config.yaml's `model:` block — this is the source of truth that
+    // `hermes setup`/Hermes itself reads (aligning the desktop with the agent,
+    // instead of maintaining a divergent .env overlay). We also keep the .env
+    // writes for backward compatibility with any code that still reads there.
+    set_yaml_block_scalars(
+        hermes_home,
+        profile,
+        "model",
+        &[
+            ("provider", provider),
+            ("default", model),
+            ("base_url", base_url),
+        ],
+    )?;
     write_env_value(hermes_home, profile, "PROVIDER", provider)?;
     write_env_value(hermes_home, profile, "MODEL", model)?;
     write_env_value(hermes_home, profile, "BASE_URL", base_url)?;
+    Ok(())
+}
+
+/// Set one or more scalar leaves under a top-level YAML block (e.g. `model:`).
+/// Operates on lines so comments/formatting elsewhere are preserved. Creates
+/// the block if absent. Used to keep the desktop's config writes aligned with
+/// Hermes's own config.yaml (rather than only writing .env).
+pub fn set_yaml_block_scalars(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    block: &str,
+    kvs: &[(&str, &str)],
+) -> Result<(), String> {
+    let path = match profile {
+        Some(p) if p != "default" && !p.is_empty() => {
+            hermes_home.join("profiles").join(p).join("config.yaml")
+        }
+        _ => hermes_home.join("config.yaml"),
+    };
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+
+    let block_header = format!("{}:", block);
+    let mut in_block = false;
+    let mut block_indent: Option<usize> = None;
+    // Track which keys we set so we can append missing ones.
+    let mut set_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let header_prefix = format!("{}:", block_header);
+    for line in lines.iter_mut() {
+        // Compute everything we need as owned values FIRST, so the immutable
+        // borrow of `line` (via trim_start) ends before we mutate `*line`.
+        let trimmed: String = line.trim_start().to_string();
+        let indent = line.len() - line.trim_start().len();
+        let is_header = trimmed == block_header || trimmed.starts_with(&header_prefix);
+        let leaves_block = in_block && !trimmed.is_empty() && indent <= block_indent.unwrap_or(0);
+
+        if is_header {
+            in_block = true;
+            block_indent = Some(indent);
+            continue;
+        }
+        if leaves_block {
+            in_block = false;
+            continue;
+        }
+        if in_block {
+            // Find the first matching key (owned) before mutating.
+            let replacement: Option<(String, String)> = kvs
+                .iter()
+                .find(|(k, _)| trimmed.starts_with(&format!("{}:", k)))
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()));
+            if let Some((k, v)) = replacement {
+                *line = format!(
+                    "{}{}: {}",
+                    " ".repeat(block_indent.unwrap_or(0) + 2),
+                    k,
+                    v
+                );
+                set_keys.insert(k);
+            }
+        }
+    }
+
+    // Append any keys that weren't found in the existing block.
+    let missing: Vec<(&str, &str)> = kvs
+        .iter()
+        .filter(|(k, _)| !set_keys.contains(*k))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        // Ensure the block header exists.
+        if !lines.iter().any(|l| l.trim_start().starts_with(&block_header)) {
+            lines.push(block_header.clone());
+        }
+        let indent = " ".repeat(2);
+        for (k, v) in missing {
+            lines.push(format!("{}{}: {}", indent, k, v));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(block_header);
+        let indent = " ".repeat(2);
+        for (k, v) in kvs {
+            lines.push(format!("{}{}: {}", indent, k, v));
+        }
+    }
+
+    let new_content = lines.join("\n");
+    fs::write(&path, new_content).map_err(|e| format!("Write config.yaml error: {}", e))?;
     Ok(())
 }
 

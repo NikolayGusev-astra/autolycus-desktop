@@ -74,6 +74,22 @@ fn agent_bin(name: &str) -> String {
     }
 }
 
+/// Windows: set CREATE_NO_WINDOW on a Command so probing python/where/tasklist
+/// doesn't flash a console window. Without this, discovery probes dozens of
+/// interpreters (3 version calls each) → dozens of flashing windows at launch.
+fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// Resolve a plain command name to its full path via the OS lookup tool
 /// (`which` on unix, `where` on Windows). Returns the first match.
 fn lookup_on_path(cmd: &str) -> Option<PathBuf> {
@@ -83,6 +99,7 @@ fn lookup_on_path(cmd: &str) -> Option<PathBuf> {
         ("which", "")
     };
     let mut builder = Command::new(tool);
+    no_window(&mut builder);
     if !flag.is_empty() {
         builder.arg(flag);
     }
@@ -105,9 +122,9 @@ fn lookup_on_path(cmd: &str) -> Option<PathBuf> {
 /// Falls back to `{python_path} --version` if hermes_cli is not available.
 pub fn get_instance_version(python_path: &str) -> String {
     // Try hermes CLI first
-    let output = Command::new(python_path)
-        .args(["-m", "hermes_cli.main", "--version"])
-        .output();
+    let mut c1 = Command::new(python_path);
+    no_window(&mut c1);
+    let output = c1.args(["-m", "hermes_cli.main", "--version"]).output();
 
     if let Ok(out) = output {
         if out.status.success() {
@@ -119,9 +136,9 @@ pub fn get_instance_version(python_path: &str) -> String {
     }
 
     // Try simpler hermes --version
-    let output = Command::new(python_path)
-        .args(["-m", "hermes", "--version"])
-        .output();
+    let mut c2 = Command::new(python_path);
+    no_window(&mut c2);
+    let output = c2.args(["-m", "hermes", "--version"]).output();
 
     if let Ok(out) = output {
         if out.status.success() {
@@ -133,7 +150,9 @@ pub fn get_instance_version(python_path: &str) -> String {
     }
 
     // Fallback: get Python version itself
-    let output = Command::new(python_path).arg("--version").output();
+    let mut c3 = Command::new(python_path);
+    no_window(&mut c3);
+    let output = c3.arg("--version").output();
 
     if let Ok(out) = output {
         if out.status.success() {
@@ -190,7 +209,9 @@ pub fn check_gateway_status(python_path: &str) -> (bool, Option<u16>) {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         if !python_exe.is_empty() {
-            if let Ok(out) = Command::new("tasklist")
+            let mut tc = Command::new("tasklist");
+            no_window(&mut tc);
+            if let Ok(out) = tc
                 .args(["/FI", &format!("IMAGENAME eq {}", python_exe), "/FO", "CSV", "/NH"])
                 .output()
             {
@@ -522,7 +543,10 @@ fn infer_environment(interp: &Path, kind: &str) -> (Option<String>, Option<Strin
 /// so matching on it alone would wrongly treat the checkout as the home dir.
 /// Requiring a config file resolves the real home one level up.
 fn looks_like_agent_home(dir: &Path) -> bool {
-    for marker in ["config.yaml", "config.yml", ".env", "auth.json"] {
+    // config files indicate the home root; state.db is the real data dir (it's
+    // where sessions/memory live and what resolve_hermes_home keys on). Include
+    // it so discovery doesn't infer a venv/checkout dir that lacks the data.
+    for marker in ["config.yaml", "config.yml", ".env", "auth.json", "state.db"] {
         if dir.join(marker).exists() {
             return true;
         }

@@ -122,39 +122,62 @@ pub fn list_installed_skills(hermes_home: &Path, profile: Option<&str>) -> Vec<I
             }
 
             let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            // Skip hidden (dot-prefixed) and known-junk directories that are not
+            // skills: .curator_backups, .git, ._apple macOS resource-fork
+            // artifacts, node_modules, etc. Previously these were listed as
+            // skills, leading to "SKILL.md not found" on click.
+            if name.starts_with('.')
+                || matches!(
+                    name.as_str(),
+                    "node_modules" | "__pycache__" | "venv" | ".venv"
+                )
+            {
+                continue;
+            }
+
+            // Only treat a directory as a skill if it has a SKILL.md marker.
+            // This is the single fix for the "SKILL.md not found" error.
+            let skill_md = path.join("SKILL.md");
+            if !skill_md.exists() {
+                continue;
+            }
+
             let mut description = String::new();
             let mut category = String::new();
 
             // Read SKILL.md for metadata
-            let skill_md = path.join("SKILL.md");
-            if skill_md.exists() {
-                if let Ok(content) = fs::read_to_string(&skill_md) {
-                    // Parse YAML frontmatter
-                    if content.starts_with("---") {
-                        if let Some(end) = content[3..].find("---") {
-                            let frontmatter = &content[3..end + 3];
-                            for line in frontmatter.lines() {
-                                let line = line.trim();
-                                if line.starts_with("description:") {
-                                    description = line["description:".len()..].trim().trim_matches('"').trim_matches('\'').to_string();
-                                } else if line.starts_with("category:") {
-                                    category = line["category:".len()..].trim().trim_matches('"').trim_matches('\'').to_string();
-                                }
-                            }
-                        }
-                    }
-
-                    // Fallback: first non-empty, non-heading line
-                    if description.is_empty() {
-                        for line in content.lines() {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
-                                description = trimmed.chars().take(120).collect();
-                                break;
+            if let Ok(content) = fs::read_to_string(&skill_md) {
+                // Parse YAML frontmatter
+                if content.starts_with("---") {
+                    if let Some(end) = content[3..].find("---") {
+                        let frontmatter = &content[3..end + 3];
+                        for line in frontmatter.lines() {
+                            let line = line.trim();
+                            if line.starts_with("description:") {
+                                description = line["description:".len()..].trim().trim_matches('"').trim_matches('\'').to_string();
+                            } else if line.starts_with("category:") {
+                                category = line["category:".len()..].trim().trim_matches('"').trim_matches('\'').to_string();
                             }
                         }
                     }
                 }
+
+                // Fallback: first non-empty, non-heading line
+                if description.is_empty() {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
+                            description = trimmed.chars().take(120).collect();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Category fallback: use the skill name if none declared.
+            if category.is_empty() {
+                category = "uncategorized".to_string();
             }
 
             skills.push(InstalledSkill {

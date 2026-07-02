@@ -15,6 +15,24 @@ use serde::Serialize;
 
 use crate::config::profile_home;
 
+/// Apply the Windows `CREATE_NO_WINDOW` creation flag to a Command so spawning a
+/// console-subsystem child (python.exe, hermes.exe) does NOT pop up a console
+/// window. On non-Windows this is a no-op. Without it, a Tauri GUI app spawning
+/// a console binary makes a console window flash (or, for the long-lived
+/// gateway, stay open persistently).
+fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +192,10 @@ pub fn start_gateway(
     if profile_home_path != *hermes_home {
         cmd.env("HERMES_PROFILE_HOME", &profile_home_path);
     }
+
+    // Windows: suppress the console window that would otherwise pop up and
+    // stay open for the lifetime of the gateway.
+    no_window(&mut cmd);
 
     // Spawn
     let mut child = match cmd.spawn() {

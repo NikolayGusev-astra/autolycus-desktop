@@ -9,7 +9,7 @@
 // screens (GatewayScreen, ToolsScreen, DiagnoseScreen, ProvidersScreen,
 // ProfilesScreen, Versions) and an Appearance tab wired to the ThemeProvider.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   X,
@@ -29,13 +29,13 @@ import {
   Info,
   KeyRound,
   Sparkles,
+  Monitor,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";
 import { useUIStore } from "../../stores/uiStore";
 import { useTranslation } from "../../hooks/useTranslation";
 import { useTheme } from "../ThemeProvider";
-import { THEMES } from "../../constants";
 import type { Lang } from "../../lib/i18n";
 import { GatewayScreen } from "../gateway/GatewayScreen";
 import { ToolsScreen } from "../tools/ToolsScreen";
@@ -59,20 +59,18 @@ type SettingsTab =
 
 // ── General tab ────────────────────────────────────────────────────────────
 function GeneralTab() {
-  const { generalInfo, generalLoading, generalError, loadGeneralInfo, setTheme } = useSettingsStore();
-  const { darkMode, toggleDarkMode, language, setLanguage } = useUIStore();
+  const { generalInfo, generalLoading, generalError, loadGeneralInfo } = useSettingsStore();
+  const { language, setLanguage } = useUIStore();
+  // Theme MUST come from the ThemeProvider (which sets data-theme on <html>);
+  // the old code used uiStore.darkMode + settingsStore.setTheme (which only
+  // wrote .env) → switching themes did nothing visually.
+  const { theme, setTheme } = useTheme();
+  const isDark = theme === "dark";
   const { t } = useTranslation();
 
   useEffect(() => {
     if (!generalInfo) loadGeneralInfo();
   }, [generalInfo, loadGeneralInfo]);
-
-  const handleToggleTheme = useCallback(() => {
-    const newDark = !darkMode;
-    toggleDarkMode();
-    setTheme(newDark);
-  }, [darkMode, toggleDarkMode, setTheme]);
-  void handleToggleTheme;
 
   return (
     <div className="space-y-4">
@@ -101,19 +99,15 @@ function GeneralTab() {
         <label className="ac-section-title mb-1.5 block">{t("theme_label")}</label>
         <div className="flex gap-2">
           <button
-            onClick={() => {
-              if (!darkMode) { toggleDarkMode(); setTheme(true); }
-            }}
-            className={`ac-pill flex items-center gap-1.5 ${darkMode ? "active" : ""}`}
+            onClick={() => setTheme("dark")}
+            className={`ac-pill flex items-center gap-1.5 ${isDark ? "active" : ""}`}
           >
             <Moon className="w-3 h-3" />
             {t("theme_dark")}
           </button>
           <button
-            onClick={() => {
-              if (darkMode) { toggleDarkMode(); setTheme(false); }
-            }}
-            className={`ac-pill flex items-center gap-1.5 ${!darkMode ? "active" : ""}`}
+            onClick={() => setTheme("light")}
+            className={`ac-pill flex items-center gap-1.5 ${!isDark ? "active" : ""}`}
           >
             <Sun className="w-3 h-3" />
             {t("theme_light")}
@@ -150,56 +144,38 @@ function AppearanceTab() {
   const { theme, setTheme, rounded, setRounded } = useTheme();
   const { t } = useTranslation();
 
+  // Only System / Light / Dark, matching shturman.ai (no multi-theme palette).
+  const options = [
+    { id: "system", label: t("settings.systemTheme"), icon: Monitor },
+    { id: "light", label: t("settings.light"), icon: Sun },
+    { id: "dark", label: t("settings.dark"), icon: Moon },
+  ];
+
   return (
     <div className="space-y-5">
       <div>
         <label className="ac-section-title mb-2 block">{t("settings.theme")}</label>
         <div className="space-y-1.5">
-          {/* System option as a radio row */}
-          <label
-            className={`flex items-center gap-3 px-3 py-2 rounded-md border cursor-pointer transition-colors ${
-              theme === "system"
-                ? "border-ac-brand bg-ac-brand/5"
-                : "border-ac-border hover:border-ac-muted"
-            }`}
-          >
-            <input
-              type="radio"
-              name="theme"
-              className="accent-ac-brand"
-              checked={theme === "system"}
-              onChange={() => setTheme("system")}
-            />
-            <span className="text-sm text-ac-ink">{t("settings.systemTheme")}</span>
-          </label>
-
-          {/* Named themes as a radio grid */}
-          <div className="grid grid-cols-2 gap-1.5 mt-1">
-            {THEMES.map((th) => (
-              <label
-                key={th.id}
-                className={`flex items-center gap-2.5 px-3 py-2 rounded-md border cursor-pointer transition-colors ${
-                  theme === th.id
-                    ? "border-ac-brand bg-ac-brand/5"
-                    : "border-ac-border hover:border-ac-muted"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="theme"
-                  className="accent-ac-brand"
-                  checked={theme === th.id}
-                  onChange={() => setTheme(th.id)}
-                />
-                <span className="flex-1 min-w-0">
-                  <span className="block text-sm text-ac-ink truncate">{th.name}</span>
-                  <span className="block text-[10px] text-ac-muted uppercase tracking-wide">
-                    {th.appearance}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </div>
+          {options.map((opt) => (
+            <label
+              key={opt.id}
+              className={`flex items-center gap-3 px-3 py-2 rounded-md border cursor-pointer transition-colors ${
+                theme === opt.id
+                  ? "border-ac-brand bg-ac-brand/5"
+                  : "border-ac-border hover:border-ac-muted"
+              }`}
+            >
+              <input
+                type="radio"
+                name="theme"
+                className="accent-ac-brand"
+                checked={theme === opt.id}
+                onChange={() => setTheme(opt.id)}
+              />
+              <opt.icon className="w-4 h-4 text-ac-muted" />
+              <span className="text-sm text-ac-ink">{opt.label}</span>
+            </label>
+          ))}
         </div>
       </div>
 

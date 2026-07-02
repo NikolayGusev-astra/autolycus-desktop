@@ -17,23 +17,37 @@ use crate::config;
 ///   1. Groq (`GROQ_API_KEY`) — fast, free; whisper-large-v3
 ///   2. OpenAI (`OPENAI_API_KEY`) — whisper-1
 ///
-/// `audio_path` points at a file the desktop saved (webm/wav/mp3…). Groq/OpenAI
-/// accept most common formats.
+/// Keys are looked up first in the agent `.env`, then in the OS keyring
+/// (account = the env-key name, service = "hermes"). `audio_path` points at a
+/// file the desktop saved (webm/wav/mp3…). Groq/OpenAI accept most formats.
 pub async fn transcribe_audio(
     hermes_home: &Path,
     audio_path: &str,
 ) -> Result<String, String> {
     let env = config::read_env(hermes_home, None);
 
-    // Prefer Groq if a key is present.
-    if let Some(key) = env.get("GROQ_API_KEY").filter(|k| !k.is_empty()) {
-        return transcribe_via_groq(audio_path, key).await;
+    // Synchronous keyring lookup (the auth::get_credential is async, but a
+    // bare keyring read is sync — keeps this path simple).
+    let key_for = |name: &str| -> Option<String> {
+        // .env first
+        if let Some(k) = env.get(name).filter(|k| !k.is_empty()) {
+            return Some(k.clone());
+        }
+        // then OS keyring (best-effort)
+        keyring::Entry::new("hermes", name)
+            .ok()
+            .and_then(|e| e.get_password().ok())
+            .filter(|k| !k.is_empty())
+    };
+
+    if let Some(key) = key_for("GROQ_API_KEY") {
+        return transcribe_via_groq(audio_path, &key).await;
     }
-    if let Some(key) = env.get("OPENAI_API_KEY").filter(|k| !k.is_empty()) {
-        return transcribe_via_openai(audio_path, key).await;
+    if let Some(key) = key_for("OPENAI_API_KEY") {
+        return transcribe_via_openai(audio_path, &key).await;
     }
     Err(
-        "No STT provider configured. Set GROQ_API_KEY (recommended, free) or OPENAI_API_KEY in the agent .env."
+        "No STT provider configured. Set GROQ_API_KEY (recommended, free) or OPENAI_API_KEY — in the agent .env or in Settings."
             .to_string(),
     )
 }

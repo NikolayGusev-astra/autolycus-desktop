@@ -6,35 +6,31 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Sidebar } from "./components/layout/Sidebar";
+import { Sidebar, type ViewId } from "./components/layout/Sidebar";
 import { Header } from "./components/layout/Header";
 import { ChatView } from "./components/chat/ChatView";
-import { SessionList } from "./components/sessions/SessionList";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { KanbanBoard } from "./components/kanban/KanbanBoard";
-import { MemoryScreen } from "./components/memory/MemoryScreen";
-import { SkillsScreen } from "./components/skills/SkillsScreen";
-import { SchedulesScreen } from "./components/schedules/SchedulesScreen";
 import { HistoryPanel } from "./components/sessions/HistoryPanel";
-import ConfigHealthBanner from "./components/config/ConfigHealthBanner";
+import { DashboardView } from "./components/views/DashboardView";
 import { useTranslation as useTranslationHook } from "./hooks/useTranslation";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
-import { useUIStore } from "./stores/uiStore";
 
 
 type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
 
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
-  const [activeTab, setActiveTab] = useState("chat");
+  const [activeView, setActiveView] = useState<ViewId>("dashboard");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(true);
+  const [selfDiagOpen, setSelfDiagOpen] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
@@ -48,7 +44,6 @@ export function App() {
       label?: string;
     }>
   >([]);
-  const { sidebarOpen, toggleSidebar } = useUIStore();
   const { t } = useTranslationHook();
   const {
     connected,
@@ -252,75 +247,83 @@ export function App() {
   }
 
   // Main UI (or auto-transitioned from connection → main).
-  // ThemeProvider now wraps the whole app from main.tsx (ADR-004), so every
-  // screen — including splash/welcome/connection — shares one theme.
+  // shturman.ai-style SPA shell: Sidebar (8 sections) + frosted Header + main
+  // content (one active view). The chat view additionally gets the right-hand
+  // history rail.
   return (
-    <div className="flex h-full">
-      {sidebarOpen ? (
-        <Sidebar
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
-      ) : (
-        // Collapsed rail: a thin strip with a button to re-open the sidebar.
-        // Without this the sidebar was unreachable once collapsed.
-        <button
-          onClick={toggleSidebar}
-          className="w-6 shrink-0 border-r border-ac-border bg-ac-bg flex items-center justify-center text-ac-muted hover:text-ac-brand"
-          title={t("sidebar_expand")}
-          aria-label={t("sidebar_expand")}
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M6 4L10 8L6 12" />
-          </svg>
-        </button>
-      )}
+    <div className="flex h-full bg-ac-bg overflow-hidden">
+      <Sidebar
+        activeView={activeView}
+        onViewChange={setActiveView}
+        onSelfDiagnosis={() => setSelfDiagOpen(true)}
+      />
 
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <Header
-          onSettingsClick={() => setSettingsOpen(true)}
-          onToggleHistory={() => setHistoryOpen((v) => !v)}
-          historyOpen={historyOpen}
-        />
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <Header />
 
-        <div className="flex-1 overflow-hidden">
-          <ConfigHealthBanner profile={undefined} />
-          {/* Real components */}
-          {activeTab === "chat" && (
-            <>
-              <ChatView />
-              {pendingApproval && (
-                <ApprovalCard
-                  request={pendingApproval}
-                  onApprove={() => handleApprovalDecision("approved")}
-                  onDeny={() => handleApprovalDecision("denied")}
-                  onApproveAlways={() =>
-                    handleApprovalDecision("approved_always")
-                  }
-                />
-              )}
-            </>
+        <main className="flex-1 flex min-h-0 overflow-hidden">
+          {/* Chat keeps its own two-pane layout (messages + history rail). */}
+          {activeView === "chat" ? (
+            <div className="flex flex-1 min-w-0">
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <ChatView />
+                {pendingApproval && (
+                  <ApprovalCard
+                    request={pendingApproval}
+                    onApprove={() => handleApprovalDecision("approved")}
+                    onDeny={() => handleApprovalDecision("denied")}
+                    onApproveAlways={() => handleApprovalDecision("approved_always")}
+                  />
+                )}
+              </div>
+              {historyOpen && <HistoryPanel onClose={() => setHistoryOpen(false)} />}
+            </div>
+          ) : activeView === "dashboard" ? (
+            <div className="flex-1 overflow-y-auto">
+              <DashboardView
+                onNavigate={(v) => setActiveView(v)}
+                onSelfDiagnosis={() => setSelfDiagOpen(true)}
+              />
+            </div>
+          ) : activeView === "tasks" ? (
+            <div className="flex-1 overflow-y-auto">
+              <KanbanBoard />
+            </div>
+          ) : activeView === "settings" ? (
+            <div className="flex-1 overflow-y-auto">
+              <SettingsPanel onClose={() => setActiveView("dashboard")} />
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="max-w-2xl mx-auto text-center py-20 text-ac-muted">
+                <p className="text-sm">{t("comingSoon")}</p>
+              </div>
+            </div>
           )}
-          {activeTab === "sessions" && <SessionList />}
-          {activeTab === "kanban" && <KanbanBoard />}
-          {activeTab === "memory" && <MemoryScreen />}
-          {activeTab === "skills" && <SkillsScreen />}
-          {activeTab === "schedules" && <SchedulesScreen />}
-        </div>
+        </main>
 
         <StatusBar />
       </div>
 
-      {/* Right-hand conversation history (only relevant alongside the chat). */}
-      {historyOpen && activeTab === "chat" && (
-        <HistoryPanel onClose={() => setHistoryOpen(false)} />
-      )}
-
-      {/* Unified settings panel — a modal over whatever tab is active (ADR-006).
-          Reached from the sidebar gear or the header gear. */}
+      {/* Settings modal (also reachable when not on the settings view). */}
       {settingsOpen && (
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
+      )}
+
+      {/* Self-diagnosis modal placeholder */}
+      {selfDiagOpen && (
+        <div className="ac-modal-overlay" onClick={() => setSelfDiagOpen(false)}>
+          <div className="ac-modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+            <p className="text-sm text-ac-ink mb-3">{t("nav.selfDiagnosis")}</p>
+            <p className="text-xs text-ac-muted mb-4">{t("selfDiag.hint")}</p>
+            <textarea className="ac-input w-full px-3 py-2 text-sm" rows={3} placeholder={t("selfDiag.placeholder")} />
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setSelfDiagOpen(false)} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md">
+                {t("btn.close")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -103,8 +103,13 @@ pub const DEFAULT_COLUMNS: &[&str] = &["backlog", "todo", "in_progress", "review
 // ── Database path ─────────────────────────────────────────────────────────
 
 fn kanban_db_path(hermes_home: &Path, profile: Option<&str>) -> std::path::PathBuf {
+    // IMPORTANT: a SEPARATE desktop-owned DB, never the agent's kanban.db.
+    // The real Hermes agent maintains its own kanban.db with a richer/different
+    // schema; sharing it caused CREATE TABLE IF NOT EXISTS to no-op against the
+    // real schema, then INSERT/SELECT hit unknown columns → boards never loaded
+    // or created. Using kanban-desktop.db isolates our tables entirely.
     let profile_home = crate::config::profile_home(hermes_home, profile);
-    profile_home.join("kanban.db")
+    profile_home.join("kanban-desktop.db")
 }
 
 // ── Board CRUD ────────────────────────────────────────────────────────────

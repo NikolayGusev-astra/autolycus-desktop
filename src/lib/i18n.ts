@@ -10,6 +10,13 @@ const translations = {
 
   // Navigation
   'nav.chat': { en: 'Chat', ru: 'Чат' },
+  'nav.dashboard': { en: 'Dashboard', ru: 'Дашборд' },
+  'nav.tasks': { en: 'Tasks', ru: 'Задачи' },
+  'nav.goals': { en: 'Goals', ru: 'Цели' },
+  'nav.projects': { en: 'Projects', ru: 'Проекты' },
+  'nav.stats': { en: 'Statistics', ru: 'Статистика' },
+  'nav.protocols': { en: 'Protocols', ru: 'Протоколы' },
+  'nav.selfDiagnosis': { en: 'Self-diagnosis', ru: 'Самодиагностика' },
   'nav.sessions': { en: 'Sessions', ru: 'Сессии' },
   'nav.kanban': { en: 'Kanban', ru: 'Канбан' },
   'nav.models': { en: 'Models', ru: 'Модели' },
@@ -84,6 +91,26 @@ const translations = {
   // Status
   'status.connected': { en: 'Connection', ru: 'Подключено' },
   'status.disconnected': { en: 'Disconnected', ru: 'Отключено' },
+  'header.search': { en: 'Search...', ru: 'Поиск...' },
+
+  // Misc
+  'comingSoon': { en: 'Coming soon', ru: 'Скоро будет доступно' },
+  'selfDiag.hint': { en: 'How are you feeling? What influenced it?', ru: 'Как вы себя чувствуете? Что повлияло?' },
+  'selfDiag.placeholder': { en: 'Additional notes...', ru: 'Дополнительные заметки...' },
+
+  // Dashboard
+  'dash.newTask': { en: 'New task', ru: 'Новая задача' },
+  'dash.noTasks': { en: 'No tasks yet', ru: 'Задач пока нет' },
+  'dash.allDone': { en: 'All tasks for today are done', ru: 'Все задачи на сегодня выполнены' },
+  'dash.activeToday': { en: '{n} active tasks for today', ru: '{n} активных задач на сегодня' },
+  'dash.tasksToday': { en: 'Tasks for today', ru: 'Задачи на день' },
+  'dash.tasksWeek': { en: 'Tasks for the week', ru: 'Задачи на неделю' },
+  'dash.goals': { en: 'Goals', ru: 'Цели' },
+  'dash.priorityProjects': { en: 'Priority projects', ru: 'Приоритетные проекты' },
+  'dash.noToday': { en: 'No tasks for today', ru: 'Нет задач на сегодня' },
+  'dash.noWeek': { en: 'No tasks for the week', ru: 'Нет задач на неделю' },
+  'dash.noGoals': { en: 'No goals', ru: 'Нет целей' },
+  'dash.noProjects': { en: 'No projects', ru: 'Нет проектов' },
 
   // Settings
   'settings.general': { en: 'General', ru: 'Основные' },

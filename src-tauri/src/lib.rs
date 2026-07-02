@@ -217,9 +217,18 @@ async fn connect_to_instance(
     instance: discovery::DetectedInstance,
 ) -> Result<String, String> {
     // Prefer the instance's reported home dir; otherwise resolve the default.
-    let home = match instance.home_dir {
-        Some(h) if !h.is_empty() => PathBuf::from(h),
-        _ => config::resolve_hermes_home(),
+    // But if the inferred home lacks state.db (the real data dir), fall back to
+    // resolve_hermes_home() which reliably finds %LOCALAPPDATA%\hermes on
+    // Windows. This keeps sessions/memory readable.
+    let resolved_default = config::resolve_hermes_home();
+    let home = match &instance.home_dir {
+        Some(h) if !h.is_empty()
+            && PathBuf::from(h).is_dir()
+            && PathBuf::from(h).join("state.db").exists() =>
+        {
+            PathBuf::from(h)
+        }
+        _ => resolved_default,
     };
 
     // Sanity-check: a real agent home should be a directory that exists.
@@ -259,15 +268,31 @@ async fn auto_connect_local_cmd(
         }
     };
 
-    // Adopt the instance's home dir (if known), else fall back to the default.
+    // Adopt the instance's home dir, but ONLY if it actually holds state.db
+    // (the real data dir with sessions/memory). Otherwise fall back to
+    // resolve_hermes_home(), which on Windows finds %LOCALAPPDATA%\hermes. This
+    // avoids clobbering the correct home with a discovery-inferred venv/checkout
+    // dir that has no data — which previously left sessions/memory empty.
+    let resolved_default = config::resolve_hermes_home();
     let home = match &instance.home_dir {
-        Some(h) if !h.is_empty() && PathBuf::from(h).is_dir() => PathBuf::from(h),
+        Some(h) if !h.is_empty()
+            && PathBuf::from(h).is_dir()
+            && PathBuf::from(h).join("state.db").exists() =>
+        {
+            PathBuf::from(h)
+        }
+        Some(h) if !h.is_empty() && PathBuf::from(h).is_dir() => {
+            // home_dir exists but lacks state.db — prefer the resolved default
+            // if it has state.db, else use the inferred home as a last resort.
+            if resolved_default.join("state.db").exists() {
+                resolved_default
+            } else {
+                PathBuf::from(h)
+            }
+        }
         _ => {
-            // No explicit home dir; rely on the resolved default, but only if it
-            // looks like an agent home so we don't adopt a phantom dir.
-            let resolved = config::resolve_hermes_home();
-            if resolved.is_dir() {
-                resolved
+            if resolved_default.is_dir() {
+                resolved_default
             } else {
                 return Ok(AutoConnectResult {
                     found: true,
