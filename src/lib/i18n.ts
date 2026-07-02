@@ -104,6 +104,7 @@ const translations = {
   'tasks.prioMed': { en: 'Medium priority', ru: 'Средний приоритет' },
   'tasks.prioLow': { en: 'Low priority', ru: 'Низкий приоритет' },
   'tasks.createFirst': { en: 'Create your first task', ru: 'Создайте первую задачу' },
+  'tasks.extract': { en: 'Extract tasks', ru: 'Извлечь задачи' },
   // Goals
   'goals.new': { en: 'New goal', ru: 'Новая цель' },
   'goals.namePh': { en: 'e.g. AI-buddy', ru: 'Например: ИИ-бадди' },
@@ -161,6 +162,7 @@ const translations = {
   'settings.soul': { en: 'Persona', ru: 'Личность' },
   'settings.soulHint': { en: 'The agent persona (soul.md). Also sets name/greeting shown in chat.', ru: 'Личность агента (soul.md). Также задаёт имя/приветствие в чате.' },
   'settings.credentials': { en: 'API Keys', ru: 'Ключи API' },
+  'settings.agent': { en: 'Agent', ru: 'Агент' },
   'settings.credentialsHint': { en: 'Keys are synced with the Hermes agent (auth.json). Add once — usable everywhere.', ru: 'Ключи синхронизируются с Hermes (auth.json). Добавьте один раз — доступны везде.' },
   'settings.credentialsList': { en: 'Configured keys', ru: 'Настроенные ключи' },
   'settings.credentialsEmpty': { en: 'No keys yet. Add one below.', ru: 'Ключей пока нет. Добавьте ниже.' },

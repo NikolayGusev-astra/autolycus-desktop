@@ -51,10 +51,13 @@ type SettingsTab =
   | "models"
   | "providers"
   | "credentials"
+  | "agent"
+  | "terminal"
+  | "tts"
   | "gateway"
   | "tools"
   | "telegram"
-  | "terminal"
+  | "terminal_old"
   | "diagnose"
   | "about";
 
@@ -857,6 +860,62 @@ function CredentialsTab() {
   );
 }
 
+// ── Hermes section tab — generic editor for a config.yaml section ──────────
+// Reads a top-level block (agent/terminal/tts/...) via get_config_section_cmd
+// and writes scalar values back via set_config_yaml_value_cmd. This gives
+// two-way sync: changes in Settings write to Hermes's config.yaml.
+function HermesSectionTab({ section, fields }: { section: string; fields: { key: string; label: string; type?: "text" | "number" | "bool" }[] }) {
+  const { t } = useTranslation();
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    invoke<Record<string, unknown>>("get_config_section_cmd", { section })
+      .then((data) => {
+        const v: Record<string, string> = {};
+        for (const f of fields) {
+          const raw = data[f.key];
+          v[f.key] = raw == null ? "" : String(raw);
+        }
+        setVals(v);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section]);
+
+  const save = async (key: string, value: string) => {
+    try {
+      await invoke("set_config_yaml_value_cmd", { block: section, key, value });
+      setStatus("✓ " + t("saved"));
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      {fields.map((f) => (
+        <div key={f.key}>
+          <label className="text-[11px] text-ac-muted block mb-1">{f.label}</label>
+          <div className="flex gap-2">
+            <input
+              className="ac-input flex-1 px-3 py-2 text-sm font-mono"
+              type={f.type === "number" ? "number" : "text"}
+              value={vals[f.key] ?? ""}
+              onChange={(e) => setVals((p) => ({ ...p, [f.key]: e.target.value }))}
+            />
+            <button onClick={() => void save(f.key, vals[f.key] ?? "")} className="ac-btn px-3 py-2 text-xs">
+              {t("btn.save")}
+            </button>
+          </div>
+        </div>
+      ))}
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+    </div>
+  );
+}
+
 // ── Main Settings Panel ───────────────────────────────────────────────────
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
@@ -870,6 +929,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     { id: "models", label: t("settings_models"), icon: Cpu },
     { id: "providers", label: t("settings.providers"), icon: KeyRound },
     { id: "credentials", label: t("settings.credentials"), icon: KeyRound },
+    { id: "agent", label: t("settings.agent"), icon: Cpu },
+    { id: "tts", label: "TTS", icon: Send },
     { id: "gateway", label: t("settings.gateway"), icon: Bot },
     { id: "tools", label: t("settings.tools"), icon: Wrench },
     { id: "telegram", label: t("settings_telegram"), icon: Send },
@@ -923,6 +984,18 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               <div className="-m-4"><ProvidersScreen /></div>
             )}
             {activeTab === "credentials" && <CredentialsTab />}
+            {activeTab === "agent" && (
+              <HermesSectionTab section="agent" fields={[
+                { key: "max_turns", label: "Max turns", type: "number" },
+                { key: "reasoning_effort", label: "Reasoning effort" },
+                { key: "verbose", label: "Verbose" },
+              ]} />
+            )}
+            {activeTab === "tts" && (
+              <HermesSectionTab section="tts" fields={[
+                { key: "provider", label: "TTS Provider" },
+              ]} />
+            )}
             {activeTab === "gateway" && (
               <div className="-m-4"><GatewayScreen /></div>
             )}

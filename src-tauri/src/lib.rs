@@ -429,6 +429,31 @@ fn set_personality_cmd(state: State<'_, AppState>, personality: String) -> Resul
     set_config_scalar(&hermes_home, None, "personality", &personality)
 }
 
+/// Set a scalar value under a top-level block in config.yaml (e.g.
+/// block="agent", key="max_turns", value="150"). Generic writer so the
+/// Settings tabs can edit any hermes-setup section without bespoke commands.
+#[tauri::command]
+fn set_config_yaml_value_cmd(
+    state: State<'_, AppState>,
+    block: String,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    config::set_yaml_block_scalars(&hermes_home, None, &block, &[(&key, &value)])
+}
+
+/// Read a section of config.yaml as JSON (for Settings display).
+#[tauri::command]
+fn get_config_section_cmd(
+    state: State<'_, AppState>,
+    section: String,
+) -> Result<serde_json::Value, String> {
+    let hermes_home = state.hermes_home()?;
+    let yaml = config::read_config_yaml(&hermes_home, None).unwrap_or_default();
+    Ok(yaml.get(&section).cloned().unwrap_or(serde_json::json!({})))
+}
+
 /// Generic helper: set a scalar leaf under a one-level parent in config.yaml
 /// (e.g. `display.personality`). Used because we don't want to rewrite the
 /// whole YAML (which would lose comments/ordering).
@@ -1824,6 +1849,8 @@ pub fn run() {
             get_personalities_cmd,
             get_personality_cmd,
             set_personality_cmd,
+            set_config_yaml_value_cmd,
+            get_config_section_cmd,
             save_provider_key_cmd,
             // Local Hermes install (onboarding wizard)
             install::install_hermes_cmd,

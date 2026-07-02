@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Copy, RefreshCw, Check, User, Mic, FileText, Link as LinkIcon } from "lucide-react";
+import { Copy, RefreshCw, Check, User, Mic, FileText, Link as LinkIcon, ListChecks } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentMarkdown } from "../AgentMarkdown";
 import { useTranslation } from "../../hooks/useTranslation";
@@ -139,6 +139,36 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
             >
               {copied ? <Check className="w-3 h-3 text-ac-green" /> : <Copy className="w-3 h-3" />}
             </button>
+            {!isUser && (
+              <button
+                onClick={async () => {
+                  try {
+                    // Ask the agent to structure tasks from this reply as
+                    // JSON, then create each in the desktop's task store.
+                    const result = await invoke<string>("send_message_cmd", {
+                      request: {
+                        text: `Извлеки задачи из следующего текста и верни ТОЛЬКО JSON-массив: [{"title":"..."}]. Текст:\n\n${message.content}`,
+                        session_id: null,
+                        history: null,
+                      },
+                    });
+                    const match = result.match(/\[[\s\S]*\]/);
+                    if (match) {
+                      const tasks = JSON.parse(match[0]) as { title: string }[];
+                      for (const tk of tasks.slice(0, 10)) {
+                        if (tk.title) await invoke("create_task_cmd", { title: tk.title, profile: null });
+                      }
+                    }
+                  } catch (e) {
+                    console.error("extract tasks failed", e);
+                  }
+                }}
+                title={t("tasks.extract") || "Извлечь задачи"}
+                className="p-1 rounded hover:bg-ac-surface text-ac-stone hover:text-ac-ivory transition-colors"
+              >
+                <ListChecks className="w-3 h-3" />
+              </button>
+            )}
             {!isUser && canRegenerate && onRegenerate && (
               <button
                 onClick={onRegenerate}
