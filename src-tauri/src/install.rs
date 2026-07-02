@@ -10,6 +10,21 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// Windows: set CREATE_NO_WINDOW so spawning powershell.exe for the installer
+/// doesn't pop a console window (same fix as the gateway/probe spawns).
+fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Default)]
@@ -86,6 +101,7 @@ pub async fn install_hermes_cmd(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("PYTHONUNBUFFERED", "1");
+    no_window(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

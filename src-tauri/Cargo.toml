@@ -1,6 +1,6 @@
 [package]
 name = "steersman-desktop"
-version = "0.9.11"
+version = "0.9.12"
 description = "Штурман Desktop — native desktop AI assistant"
 authors = ["Штурман Team"]
 license = "MIT"
@@ -35,6 +35,7 @@ base64 = "0.22"
 keyring = "2"
 regex = "1"
 arc-swap = "1"
+sha2 = "0.10"
 
 # macOS universal binary cross-compile: OpenSSL not found via pkg-config.
 # Vendored build compiles OpenSSL from source (adds ~2 min to build time).

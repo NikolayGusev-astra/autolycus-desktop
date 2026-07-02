@@ -17,23 +17,47 @@ use crate::config;
 ///   1. Groq (`GROQ_API_KEY`) — fast, free; whisper-large-v3
 ///   2. OpenAI (`OPENAI_API_KEY`) — whisper-1
 ///
-/// Keys are looked up first in the agent `.env`, then in the OS keyring
-/// (account = the env-key name, service = "hermes"). `audio_path` points at a
-/// file the desktop saved (webm/wav/mp3…). Groq/OpenAI accept most formats.
+/// Keys are resolved the same way Hermes does: first the agent's `.env`
+/// (profile + global ~/.hermes/.env), then the credential pool in auth.json
+/// (manual entries hold the raw key; env entries point at .env). This makes a
+/// key added in Settings → Credentials immediately usable for STT.
 pub async fn transcribe_audio(
     hermes_home: &Path,
     audio_path: &str,
 ) -> Result<String, String> {
-    let env = config::read_env(hermes_home, None);
+    // Pre-load the credential pool from auth.json once (async), so the
+    // synchronous key resolver below can consult it without awaiting.
+    let pool = crate::auth::get_credential_pool(&hermes_home.to_path_buf())
+        .await
+        .unwrap_or_default();
+    let global_env = dirs::home_dir()
+        .map(|h| config::read_env(&h.join(".hermes"), None))
+        .unwrap_or_default();
 
-    // Synchronous keyring lookup (the auth::get_credential is async, but a
-    // bare keyring read is sync — keeps this path simple).
+    // Resolve a secret by env var name: profile .env → global ~/.hermes/.env →
+    // credential pool (auth.json) → process env → OS keyring.
     let key_for = |name: &str| -> Option<String> {
-        // .env first
+        let env = config::read_env(hermes_home, None);
         if let Some(k) = env.get(name).filter(|k| !k.is_empty()) {
             return Some(k.clone());
         }
-        // then OS keyring (best-effort)
+        if let Some(k) = global_env.get(name).filter(|k| !k.is_empty()) {
+            return Some(k.clone());
+        }
+        for (_provider, entries) in &pool {
+            for e in entries {
+                if e.label.as_deref() == Some(name) {
+                    if let Some(k) = e.resolve_secret(&hermes_home.to_path_buf()) {
+                        return Some(k);
+                    }
+                }
+            }
+        }
+        if let Ok(v) = std::env::var(name) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
         keyring::Entry::new("hermes", name)
             .ok()
             .and_then(|e| e.get_password().ok())
@@ -47,7 +71,7 @@ pub async fn transcribe_audio(
         return transcribe_via_openai(audio_path, &key).await;
     }
     Err(
-        "No STT provider configured. Set GROQ_API_KEY (recommended, free) or OPENAI_API_KEY — in the agent .env or in Settings."
+        "No STT provider configured. Add a Groq key (recommended, free) in Settings → Credentials."
             .to_string(),
     )
 }

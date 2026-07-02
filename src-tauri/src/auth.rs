@@ -265,10 +265,20 @@ pub async fn delete_credential(
     Ok(())
 }
 
-// ── Credential Pool ───────────────────────────────────────────────────────
+// ── Credential Pool (synced with Hermes auth.json) ───────────────────────
+//
+// Hermes stores its credential pool inside `auth.json` under the
+// `credential_pool` key (provider → [entry]). Each entry carries either:
+//   • source "manual"  → the raw secret is in `access_token` (persisted)
+//   • source "env:KEY" → the secret lives in ~/.hermes/.env; auth.json holds
+//     only a `secret_fingerprint` = sha256:<first 16 hex of the full secret>.
+// We read/write auth.json directly so changes made in the desktop (e.g. adding
+// a Groq key) are immediately visible to the agent, and vice-versa.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialPoolEntry {
@@ -283,27 +293,116 @@ pub struct CredentialPoolEntry {
     pub base_url: Option<String>,
     pub request_count: Option<i32>,
     pub key: Option<String>,
+    /// sha256:<16 hex> — set by Hermes for borrowed (env) sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
 }
 
-fn pool_path(hermes_home: &PathBuf) -> PathBuf {
-    hermes_home.join("credential_pool.json")
+impl CredentialPoolEntry {
+    /// Resolve the real secret value for this entry, given the hermes home
+    /// (to read .env for env-sourced credentials). manual → access_token;
+    /// env:KEY → look the var up in .env.
+    pub fn resolve_secret(&self, hermes_home: &PathBuf) -> Option<String> {
+        // manual source: the secret is stored inline.
+        if self.access_token.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+            return self.access_token.clone();
+        }
+        // env:KEY — read the variable from the agent's .env.
+        if let Some(src) = self.source.as_deref() {
+            if let Some(var) = src.strip_prefix("env:") {
+                if !var.is_empty() {
+                    let env = crate::config::read_env(hermes_home, None);
+                    if let Some(v) = env.get(var).filter(|v| !v.is_empty()) {
+                        return Some(v.clone());
+                    }
+                    // Also check the global ~/.hermes/.env (Hermes's real
+                    // credential store, which may differ from a profile home).
+                    if let Some(home) = dirs::home_dir() {
+                        let global_env = crate::config::read_env(&home.join(".hermes"), None);
+                        if let Some(v) = global_env.get(var).filter(|v| !v.is_empty()) {
+                            return Some(v.clone());
+                        }
+                    }
+                    // Fallback: process environment.
+                    if let Ok(v) = std::env::var(var) {
+                        if !v.is_empty() {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Path to the Hermes auth store (NOT a separate credential_pool.json — the
+/// old code invented that file and never synced with the agent).
+fn auth_store_path(hermes_home: &PathBuf) -> PathBuf {
+    hermes_home.join("auth.json")
+}
+
+/// Read the whole auth.json as a JSON Value (preserving all fields we don't
+/// touch, like `providers` / `active_provider`).
+fn read_auth_store(hermes_home: &PathBuf) -> serde_json::Value {
+    let path = auth_store_path(hermes_home);
+    if !path.exists() {
+        return serde_json::json!({});
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return serde_json::json!({}),
+    };
+    serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+}
+
+/// Atomically write auth.json back, preserving every top-level field except
+/// `credential_pool` (which we replace) and `updated_at` (refreshed).
+fn write_auth_store(hermes_home: &PathBuf, mut store: serde_json::Value) -> Result<(), String> {
+    let path = auth_store_path(hermes_home);
+    store["updated_at"] = serde_json::Value::String(now_iso8601());
+    let content = serde_json::to_string_pretty(&store)
+        .map_err(|e| format!("Failed to serialize auth.json: {}", e))?;
+    write_secret_file(&path, &content)
+        .map_err(|e| format!("Failed to write auth.json: {}", e))?;
+    Ok(())
+}
+
+fn now_iso8601() -> String {
+    // Best-effort RFC3339 timestamp without pulling chrono into auth.rs.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}", secs)
+}
+
+/// Compute the Hermes-style fingerprint: sha256 of the full secret, first 16
+/// hex chars, prefixed with "sha256:".
+pub fn fingerprint(secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    format!("sha256:{}", &hex[..16])
 }
 
 pub async fn get_credential_pool(
     hermes_home: &PathBuf,
 ) -> Result<HashMap<String, Vec<CredentialPoolEntry>>, String> {
-    let path = pool_path(hermes_home);
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("Failed to read pool: {}", e))?;
-    let pool: HashMap<String, Vec<CredentialPoolEntry>> = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse pool: {}", e))?;
+    let store = read_auth_store(hermes_home);
+    let pool_val = store.get("credential_pool").cloned().unwrap_or(serde_json::json!({}));
+    let pool: HashMap<String, Vec<CredentialPoolEntry>> =
+        serde_json::from_value(pool_val).unwrap_or_default();
     Ok(pool)
 }
 
+/// Add a credential for a provider. Writes into auth.json (manual source keeps
+/// the raw secret in `access_token`; env source writes the key to .env and
+/// stores only a fingerprint). Returns the provider's resulting entry list.
 pub async fn add_credential_pool_entry(
     hermes_home: &PathBuf,
     provider: &str,
@@ -312,18 +411,37 @@ pub async fn add_credential_pool_entry(
 ) -> Result<Vec<CredentialPoolEntry>, String> {
     let mut pool = get_credential_pool(hermes_home).await?;
     let entries = pool.entry(provider.to_string()).or_default();
+    let next_priority = entries.iter().map(|e| e.priority.unwrap_or(0)).max().unwrap_or(-1) + 1;
+    let id = uuid::Uuid::new_v4().simple().to_string()[..6].to_string();
+
+    // Decide source: if the label looks like an ENV var, treat as env-sourced
+    // (write the value to .env, fingerprint in auth.json); else manual.
+    let is_env_label = label
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c == '_')
+        && label.contains('_');
+    let (source, access_token, secret_fingerprint) = if is_env_label {
+        // Write to the agent .env so Hermes resolves it at runtime.
+        crate::config::write_env_value(hermes_home, None, label, key)?;
+        (format!("env:{}", label), None, Some(fingerprint(key)))
+    } else {
+        (String::from("manual"), Some(key.to_string()), None)
+    };
+
     entries.push(CredentialPoolEntry {
-        id: Some(format!("{}-{}", provider, entries.len())),
+        id: Some(id),
         label: if label.is_empty() { None } else { Some(label.to_string()) },
         auth_type: Some("api_key".to_string()),
-        priority: Some(entries.len() as i32),
-        source: Some("manual".to_string()),
-        access_token: Some(key.to_string()),
+        priority: Some(next_priority),
+        source: Some(source),
+        access_token,
         refresh_token: None,
         api_key: None,
         base_url: None,
         request_count: Some(0),
         key: None,
+        secret_fingerprint,
+        last_status: None,
     });
     let result = entries.clone();
     set_credential_pool(hermes_home, provider, &entries).await?;
@@ -335,25 +453,23 @@ pub async fn set_credential_pool(
     provider: &str,
     entries: &[CredentialPoolEntry],
 ) -> Result<(), String> {
-    let mut pool = get_credential_pool(hermes_home).await?;
-    pool.insert(provider.to_string(), entries.to_vec());
-    let content = serde_json::to_string_pretty(&pool)
-        .map_err(|e| format!("Failed to serialize pool: {}", e))?;
-    // credential_pool.json stores live access/refresh tokens and API keys in
-    // plaintext; restrict it to the owner to limit local exposure.
-    write_secret_file(&pool_path(hermes_home), &content)
-        .await
-        .map_err(|e| format!("Failed to write pool: {}", e))?;
-    Ok(())
+    let mut store = read_auth_store(hermes_home);
+    // Ensure credential_pool object exists.
+    if store.get("credential_pool").is_none() {
+        store["credential_pool"] = serde_json::json!({});
+    }
+    let entries_val = serde_json::to_value(entries)
+        .map_err(|e| format!("Failed to serialize entries: {}", e))?;
+    store["credential_pool"][provider] = entries_val;
+    write_auth_store(hermes_home, store)
 }
 
 /// Write a file containing secrets with mode 0600 (owner-only) on unix.
-async fn write_secret_file(path: &PathBuf, content: &str) -> Result<(), std::io::Error> {
-    tokio::fs::write(path, content).await?;
+fn write_secret_file(path: &PathBuf, content: &str) -> Result<(), std::io::Error> {
+    std::fs::write(path, content)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // set_permissions is a cheap syscall; run it inline.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())

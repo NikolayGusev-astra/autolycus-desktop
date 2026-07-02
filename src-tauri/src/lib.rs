@@ -1834,3 +1834,55 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Verify credential pool sync: add a Groq key (as the UI would) → it lands
+    /// in auth.json credential_pool → STT can resolve it.
+    ///   cargo test --lib credential_sync_groq -- --nocapture --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn credential_sync_groq() {
+        let hh: PathBuf = r"C:\Users\n.gusev\AppData\Local\hermes".into();
+        let key = "gsk_test_credential_sync_placeholder";
+
+        println!("=== before ===");
+        let pool = auth::get_credential_pool(&hh).await.unwrap();
+        println!("groq entries: {:?}", pool.get("groq").map(|v| v.len()));
+
+        auth::add_credential_pool_entry(&hh, "groq", key, "GROQ_API_KEY")
+            .await
+            .unwrap();
+
+        println!("=== after add ===");
+        let pool = auth::get_credential_pool(&hh).await.unwrap();
+        let groq = pool.get("groq").unwrap();
+        println!("groq entries now: {}", groq.len());
+        for e in groq {
+            println!(
+                "  label={:?} source={:?} fingerprint={:?} resolved={:?}",
+                e.label,
+                e.source,
+                e.secret_fingerprint,
+                e.resolve_secret(&hh).is_some()
+            );
+        }
+
+        // Cleanup: remove the test entry so we don't leave junk in auth.json.
+        let remaining: Vec<auth::CredentialPoolEntry> = groq
+            .iter()
+            .filter(|e| e.label.as_deref() != Some("GROQ_API_KEY") || e.source.as_deref() == Some("manual"))
+            .cloned()
+            .collect();
+        // Keep only non-test entries.
+        let real: Vec<_> = remaining
+            .into_iter()
+            .filter(|e| e.access_token.as_deref() != Some(key))
+            .collect();
+        auth::set_credential_pool(&hh, "groq", &real).await.unwrap();
+        println!("cleaned up test entry");
+    }
+}

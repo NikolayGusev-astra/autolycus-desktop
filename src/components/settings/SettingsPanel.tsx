@@ -9,7 +9,7 @@
 // screens (GatewayScreen, ToolsScreen, DiagnoseScreen, ProvidersScreen,
 // ProfilesScreen, Versions) and an Appearance tab wired to the ThemeProvider.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   X,
@@ -50,6 +50,7 @@ type SettingsTab =
   | "soul"
   | "models"
   | "providers"
+  | "credentials"
   | "gateway"
   | "tools"
   | "telegram"
@@ -753,6 +754,109 @@ function TerminalTab() {
   );
 }
 
+// ── Credentials tab — credential pool synced with Hermes auth.json ─────────
+function CredentialsTab() {
+  const { t } = useTranslation();
+  const [pool, setPool] = useState<Record<string, Array<{ id?: string; label?: string; source?: string; base_url?: string; last_status?: string }>>>({});
+  const [provider, setProvider] = useState("groq");
+  const [label, setLabel] = useState("GROQ_API_KEY");
+  const [apiKey, setApiKey] = useState("");
+  const [status, setStatus] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await invoke<Record<string, Array<{ id?: string; label?: string; source?: string; base_url?: string; last_status?: string }>>>("get_credential_pool_cmd");
+      setPool(r ?? {});
+    } catch (e) {
+      console.error("credential pool load failed", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const add = async () => {
+    if (!apiKey.trim() || !provider.trim()) return;
+    try {
+      await invoke("add_credential_pool_entry_cmd", {
+        provider: provider.trim(),
+        key: apiKey.trim(),
+        label: label.trim() || `${provider.toUpperCase()}_API_KEY`,
+      });
+      setStatus("✓ " + t("saved"));
+      setApiKey("");
+      void load();
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-[11px] text-ac-muted">{t("settings.credentialsHint")}</p>
+
+      {/* Existing credentials */}
+      <div>
+        <label className="ac-section-title mb-2 block">{t("settings.credentialsList")}</label>
+        {Object.keys(pool).length === 0 ? (
+          <p className="text-xs text-ac-muted">{t("settings.credentialsEmpty")}</p>
+        ) : (
+          <div className="space-y-3">
+            {Object.entries(pool).map(([prov, entries]) => (
+              <div key={prov}>
+                <p className="text-[11px] font-semibold text-ac-ink mb-1">{prov}</p>
+                <div className="space-y-1">
+                  {entries.map((e, i) => (
+                    <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-ac-bg border border-ac-border text-xs">
+                      <KeyRound className="w-3 h-3 text-ac-muted shrink-0" />
+                      <span className="text-ac-ink-2 truncate">{e.label || e.id || prov}</span>
+                      <span className="text-ac-faint">{e.source || "manual"}</span>
+                      {e.last_status && (
+                        <span className={`ml-auto ${e.last_status === "exhausted" ? "text-ac-yellow" : "text-ac-muted"}`}>
+                          {e.last_status}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add new credential */}
+      <div className="border-t border-ac-border pt-4">
+        <label className="ac-section-title mb-2 block">{t("settings.credentialsAdd")}</label>
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <div>
+            <label className="text-[11px] text-ac-muted block mb-1">{t("settings.provider")}</label>
+            <input className="ac-input w-full px-2.5 py-1.5 text-sm" value={provider}
+              onChange={(e) => { setProvider(e.target.value); setLabel(`${e.target.value.toUpperCase()}_API_KEY`); }}
+              placeholder="groq" />
+          </div>
+          <div>
+            <label className="text-[11px] text-ac-muted block mb-1">{t("settings.envVar")}</label>
+            <input className="ac-input w-full px-2.5 py-1.5 text-sm font-mono" value={label}
+              onChange={(e) => setLabel(e.target.value)} placeholder="GROQ_API_KEY" />
+          </div>
+        </div>
+        <label className="text-[11px] text-ac-muted block mb-1">{t("settings.apiKey")}</label>
+        <input type="password" className="ac-input w-full px-2.5 py-1.5 text-sm font-mono mb-2"
+          value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." />
+        <button onClick={() => void add()} disabled={!apiKey.trim()}
+          className="ac-btn px-4 py-2 text-sm disabled:opacity-40">
+          {t("settings.credentialsSave")}
+        </button>
+        {status && (
+          <p className={`text-xs mt-2 ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Settings Panel ───────────────────────────────────────────────────
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
@@ -765,6 +869,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     { id: "connection", label: t("settings_connection"), icon: Globe },
     { id: "models", label: t("settings_models"), icon: Cpu },
     { id: "providers", label: t("settings.providers"), icon: KeyRound },
+    { id: "credentials", label: t("settings.credentials"), icon: KeyRound },
     { id: "gateway", label: t("settings.gateway"), icon: Bot },
     { id: "tools", label: t("settings.tools"), icon: Wrench },
     { id: "telegram", label: t("settings_telegram"), icon: Send },
@@ -817,6 +922,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             {activeTab === "providers" && (
               <div className="-m-4"><ProvidersScreen /></div>
             )}
+            {activeTab === "credentials" && <CredentialsTab />}
             {activeTab === "gateway" && (
               <div className="-m-4"><GatewayScreen /></div>
             )}
