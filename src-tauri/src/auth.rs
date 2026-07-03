@@ -464,6 +464,35 @@ pub async fn set_credential_pool(
     write_auth_store(hermes_home, store)
 }
 
+/// Remove a credential entry by provider + id. Also clears the env var if the
+/// entry was env-sourced, so the deletion fully takes effect.
+pub async fn remove_credential_pool_entry(
+    hermes_home: &PathBuf,
+    provider: &str,
+    entry_id: &str,
+) -> Result<(), String> {
+    let mut pool = get_credential_pool(hermes_home).await?;
+    if let Some(entries) = pool.get_mut(provider) {
+        // Find the entry to also clean up its env var if needed.
+        if let Some(e) = entries.iter().find(|e| e.id.as_deref() == Some(entry_id)) {
+            if let Some(src) = e.source.as_deref() {
+                if let Some(var) = src.strip_prefix("env:") {
+                    let _ = crate::config::write_env_value(hermes_home, None, var, "");
+                }
+            }
+        }
+        entries.retain(|e| e.id.as_deref() != Some(entry_id));
+        if entries.is_empty() {
+            pool.remove(provider);
+        }
+    }
+    // Write the whole pool back.
+    let mut store = read_auth_store(hermes_home);
+    let pool_val = serde_json::to_value(&pool).unwrap_or(serde_json::json!({}));
+    store["credential_pool"] = pool_val;
+    write_auth_store(hermes_home, store)
+}
+
 /// Write a file containing secrets with mode 0600 (owner-only) on unix.
 fn write_secret_file(path: &PathBuf, content: &str) -> Result<(), std::io::Error> {
     std::fs::write(path, content)?;

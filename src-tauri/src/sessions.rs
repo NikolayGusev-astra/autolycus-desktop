@@ -15,8 +15,8 @@ use crate::config::profile_home;
 pub struct SessionSummary {
     pub id: String,
     pub source: String,
-    pub started_at: i64,
-    pub ended_at: Option<i64>,
+    pub started_at: f64,
+    pub ended_at: Option<f64>,
     pub message_count: i64,
     pub model: String,
     pub title: Option<String>,
@@ -28,14 +28,14 @@ pub struct SessionMessage {
     pub id: i64,
     pub role: String,
     pub content: String,
-    pub timestamp: i64,
+    pub timestamp: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     pub session_id: String,
     pub title: Option<String>,
-    pub started_at: i64,
+    pub started_at: f64,
     pub source: String,
     pub message_count: i64,
     pub model: String,

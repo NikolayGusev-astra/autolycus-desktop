@@ -1622,6 +1622,17 @@ async fn add_credential_pool_entry_cmd(
     auth::add_credential_pool_entry(&hermes_home, &provider, &key, &label).await
 }
 
+/// Remove a credential entry
+#[tauri::command]
+async fn remove_credential_pool_entry_cmd(
+    state: State<'_, AppState>,
+    provider: String,
+    entry_id: String,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    auth::remove_credential_pool_entry(&hermes_home, &provider, &entry_id).await
+}
+
 /// Set credential pool for a provider
 #[tauri::command]
 async fn set_credential_pool_cmd(
@@ -1676,9 +1687,9 @@ async fn list_projects_cmd(state: State<'_, AppState>, profile: Option<String>) 
     productivity::list_projects(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_project_cmd(state: State<'_, AppState>, name: String, color: Option<String>, profile: Option<String>) -> Result<i64, String> {
+async fn create_project_cmd(state: State<'_, AppState>, name: String, color: Option<String>, goal_id: Option<i64>, profile: Option<String>) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_project(&hh, profile.as_deref(), &name, color.as_deref().unwrap_or("#888"))
+    productivity::create_project(&hh, profile.as_deref(), &name, color.as_deref().unwrap_or("#888"), goal_id)
 }
 #[tauri::command]
 async fn delete_project_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
@@ -1960,6 +1971,7 @@ pub fn run() {
             // Credential Pool
             get_credential_pool_cmd,
             add_credential_pool_entry_cmd,
+            remove_credential_pool_entry_cmd,
             set_credential_pool_cmd,
             // Productivity (tasks/goals/projects/protocols/self-checks/dashboard)
             list_tasks_cmd,

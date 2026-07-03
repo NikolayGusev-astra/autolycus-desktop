@@ -75,6 +75,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );",
     )
     .map_err(|e| format!("migrate: {}", e))?;
+    // Additive migrations: link projects → goals (epic hierarchy: Goal →
+    // Projects → Tasks). ALTER TABLE ... ADD COLUMN is idempotent via try/catch.
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL", []);
     Ok(())
 }
 
@@ -229,13 +232,15 @@ pub struct Project {
     pub color: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub goal_id: Option<i64>,
     pub created_at: Option<i64>,
 }
 
 pub fn list_projects(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Project>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
-        .prepare("SELECT id, name, color, description, created_at FROM projects ORDER BY name")
+        .prepare("SELECT id, name, color, description, goal_id, created_at FROM projects ORDER BY name")
         .map_err(|e| format!("prepare: {}", e))?;
     let rows = stmt
         .query_map([], |r| {
@@ -244,7 +249,8 @@ pub fn list_projects(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Pr
                 name: r.get(1)?,
                 color: r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "#888".into()),
                 description: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                created_at: r.get(4)?,
+                goal_id: r.get(4).ok().flatten(),
+                created_at: r.get(5)?,
             })
         })
         .map_err(|e| format!("query: {}", e))?;
@@ -256,11 +262,12 @@ pub fn create_project(
     profile: Option<&str>,
     name: &str,
     color: &str,
+    goal_id: Option<i64>,
 ) -> Result<i64, String> {
     let conn = open(hermes_home, profile)?;
     conn.execute(
-        "INSERT INTO projects (name, color) VALUES (?1, ?2)",
-        params![name, color],
+        "INSERT INTO projects (name, color, goal_id) VALUES (?1, ?2, ?3)",
+        params![name, color, goal_id],
     )
     .map_err(|e| format!("insert: {}", e))?;
     Ok(conn.last_insert_rowid())

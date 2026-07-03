@@ -114,6 +114,7 @@ const translations = {
   'projects.new': { en: 'New project', ru: 'Новый проект' },
   'projects.namePh': { en: 'Project name', ru: 'Название проекта' },
   'projects.empty': { en: 'No projects. Create one to group tasks.', ru: 'Нет проектов. Создайте проект для группировки задач.' },
+  'projects.noGoal': { en: 'No goal (standalone)', ru: 'Без цели (отдельный)' },
   // Protocols
   'protocols.new': { en: 'New protocol', ru: 'Новый протокол' },
   'protocols.title': { en: 'Protocol title', ru: 'Название протокола' },

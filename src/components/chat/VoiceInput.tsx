@@ -35,21 +35,14 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const speechRef = useRef<any>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
 
   const start = useCallback(async () => {
     setError(null);
-
-    // Live mode: prefer the browser-native Web Speech API — it works in
-    // WebView2 WITHOUT a microphone permission prompt (uses the OS speech
-    // recognizer) and gives real-time text. Falls back to MediaRecorder+STT
-    // only if Web Speech is unavailable.
-    if (mode === "live" && onTranscribed && webSpeechAvailable()) {
-      startWebSpeech(onTranscribed);
-      return;
-    }
+    // Ensure the window is focused so the WebView2 permission dialog (if any)
+    // is visible and not behind another window.
+    try { window.focus(); } catch {}
 
     // Note mode (or live without Web Speech): use MediaRecorder, which requires
     // microphone access. Explicitly request permission with a clear message on
@@ -127,50 +120,7 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
     }
   }, [mode, onTranscribed, onRecorded]);
 
-  /** Whether the browser/WebView2 exposes the Web Speech API. */
-  function webSpeechAvailable(): boolean {
-    return (
-      typeof window !== "undefined" &&
-      ("SpeechRecognition" in window || "webkitSpeechRecognition" in window)
-    );
-  }
-
-  /** Recognize speech via the Web Speech API and feed text to onTranscribed. */
-  function startWebSpeech(onText: (text: string) => void) {
-    type SR = typeof window & {
-      SpeechRecognition?: any;
-      webkitSpeechRecognition?: any;
-    };
-    const w = window as SR;
-    const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition;
-    if (!Ctor) return;
-    const rec = new Ctor();
-    rec.lang = "ru-RU";
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    setRecording(true);
-    setProcessing(true);
-    rec.onresult = (e: any) => {
-      const text = e.results?.[0]?.[0]?.transcript ?? "";
-      if (text) onText(text);
-    };
-    rec.onerror = () => setError("Распознавание не удалось");
-    rec.onend = () => {
-      setRecording(false);
-      setProcessing(false);
-    };
-    speechRef.current = rec;
-    rec.start();
-  }
-
   const stop = useCallback(() => {
-    if (speechRef.current) {
-      speechRef.current.stop();
-      speechRef.current = null;
-      setRecording(false);
-      setProcessing(false);
-      return;
-    }
     recorderRef.current?.stop();
     setRecording(false);
   }, []);

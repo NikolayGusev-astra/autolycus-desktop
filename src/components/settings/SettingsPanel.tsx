@@ -36,6 +36,7 @@ import { useConnectionStore, type ConnectionMode } from "../../stores/connection
 import { useUIStore } from "../../stores/uiStore";
 import { useTranslation } from "../../hooks/useTranslation";
 import { useTheme } from "../ThemeProvider";
+import { PROVIDERS } from "../../constants";
 import type { Lang } from "../../lib/i18n";
 import { GatewayScreen } from "../gateway/GatewayScreen";
 import { ToolsScreen } from "../tools/ToolsScreen";
@@ -614,11 +615,9 @@ function ModelsTab() {
                 onChange={(e) => setNewProvider(e.target.value)}
                 className="ac-input w-full px-3 py-2 text-sm"
               >
-                <option value="openrouter">OpenRouter</option>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="ollama">Ollama</option>
-                <option value="ollama-cloud">Ollama Cloud</option>
+                {PROVIDERS.options.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
               </select>
             </div>
             <div>
@@ -795,6 +794,16 @@ function CredentialsTab() {
     }
   };
 
+  const removeCred = async (prov: string, entryId?: string) => {
+    if (!entryId) return;
+    try {
+      await invoke("remove_credential_pool_entry_cmd", { provider: prov, entryId });
+      void load();
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
   return (
     <div className="space-y-4">
       <p className="text-[11px] text-ac-muted">{t("settings.credentialsHint")}</p>
@@ -811,7 +820,7 @@ function CredentialsTab() {
                 <p className="text-[11px] font-semibold text-ac-ink mb-1">{prov}</p>
                 <div className="space-y-1">
                   {entries.map((e, i) => (
-                    <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-ac-bg border border-ac-border text-xs">
+                    <div key={e.id || i} className="group flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-ac-bg border border-ac-border text-xs">
                       <KeyRound className="w-3 h-3 text-ac-muted shrink-0" />
                       <span className="text-ac-ink-2 truncate">{e.label || e.id || prov}</span>
                       <span className="text-ac-faint">{e.source || "manual"}</span>
@@ -820,6 +829,13 @@ function CredentialsTab() {
                           {e.last_status}
                         </span>
                       )}
+                      <button
+                        onClick={() => void removeCred(prov, e.id)}
+                        className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-red"
+                        title={t("btn.delete")}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -835,9 +851,12 @@ function CredentialsTab() {
         <div className="grid grid-cols-2 gap-2 mb-2">
           <div>
             <label className="text-[11px] text-ac-muted block mb-1">{t("settings.provider")}</label>
-            <input className="ac-input w-full px-2.5 py-1.5 text-sm" value={provider}
-              onChange={(e) => { setProvider(e.target.value); setLabel(`${e.target.value.toUpperCase()}_API_KEY`); }}
-              placeholder="groq" />
+            <select className="ac-input w-full px-2.5 py-1.5 text-sm" value={provider}
+              onChange={(e) => { setProvider(e.target.value); setLabel(`${e.target.value.toUpperCase()}_API_KEY`); }}>
+              {PROVIDERS.options.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="text-[11px] text-ac-muted block mb-1">{t("settings.envVar")}</label>

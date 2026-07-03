@@ -305,13 +305,19 @@ export function ChatView() {
         .map((m) => ({ role: m.role, content: m.content }));
 
       try {
-        // Use send_message_cmd Tauri command
-        await invoke<string>("send_message_cmd", {
+        // Fire the message and DON'T await the full response — streaming
+        // arrives via chat_event events, which populate messages incrementally.
+        // Awaiting here blocked the input clear (and the UI) until the agent
+        // fully finished responding.
+        invoke<string>("send_message_cmd", {
           request: {
             text: messageText,
             session_id: currentSessionId,
             history,
           },
+        }).catch((err) => {
+          console.error("Failed to send message:", err);
+          setAgentStatus("error");
         });
       } catch (err) {
         console.error("Failed to send message:", err);

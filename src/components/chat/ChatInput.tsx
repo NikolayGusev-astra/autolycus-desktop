@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, type KeyboardEvent } from "react";
+import { useState, useRef, useCallback, useMemo, type KeyboardEvent } from "react";
 import { Send, Paperclip, X, Mic } from "lucide-react";
 import type { AgentStatus } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
@@ -41,14 +41,35 @@ function kindOf(file: File): Attachment["kind"] {
 
 const URL_RE = /https?:\/\/[^\s]+/;
 
+// Slash commands — like Hermes CLI/Telegram. Each has a trigger, label, and
+// optional handler that returns the text to send (or undefined to skip send).
+const SLASH_COMMANDS: { cmd: string; label: string; desc: string }[] = [
+  { cmd: "/model", label: "/model", desc: "Сменить модель" },
+  { cmd: "/clear", label: "/clear", desc: "Очистить контекст" },
+  { cmd: "/compact", label: "/compact", desc: "Сжать диалог" },
+  { cmd: "/profile", label: "/profile", desc: "Сменить профиль" },
+  { cmd: "/help", label: "/help", desc: "Помощь" },
+  { cmd: "/tasks", label: "/tasks", desc: "Извлечь задачи" },
+  { cmd: "/skills", label: "/skills", desc: "Список навыков" },
+  { cmd: "/cost", label: "/cost", desc: "Стоимость сессии" },
+];
+
 export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputProps) {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [slashIdx, setSlashIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useTranslation();
+
+  // Slash menu: show when the input starts with "/".
+  const slashOpen = text.startsWith("/") && !text.includes(" ");
+  const slashMatches = useMemo(
+    () => (slashOpen ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith(text)) : []),
+    [slashOpen, text]
+  );
 
   const isBlocked =
     disabled ||
@@ -60,11 +81,17 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
 
   const handleSend = useCallback(async () => {
     if ((text.trim() || attachments.length > 0) && !isBlocked) {
+      // Snapshot what we're sending, then clear the input IMMEDIATELY — before
+      // awaiting onSend. The previous code awaited onSend (which blocks until
+      // the agent fully responds), leaving the typed text stuck in the field
+      // for the whole turn.
+      const msg = text.trim();
+      const atts = attachments.length > 0 ? attachments : undefined;
+      setText("");
+      setAttachments([]);
       setIsSending(true);
       try {
-        await onSend(text.trim(), attachments.length > 0 ? attachments : undefined);
-        setText("");
-        setAttachments([]);
+        await onSend(msg, atts);
       } finally {
         setIsSending(false);
       }
@@ -72,6 +99,18 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
   }, [text, isBlocked, onSend, attachments]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    // Slash-menu navigation: ArrowUp/Down to move, Enter/Tab to select, Esc to close.
+    if (slashMatches.length > 0) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx((i) => (i + 1) % slashMatches.length); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx((i) => (i - 1 + slashMatches.length) % slashMatches.length); return; }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const chosen = slashMatches[slashIdx];
+        if (chosen) { setText(chosen.cmd + " "); inputRef.current?.focus(); }
+        return;
+      }
+      if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -191,17 +230,35 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
           }
         />
 
-        <input
-          ref={inputRef}
-          type="text"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder={placeholder}
-          disabled={isBlocked}
-          className="ac-input flex-1 px-3.5 py-2 text-sm"
-        />
+        <div className="flex-1 relative">
+          {slashMatches.length > 0 && (
+            <div className="absolute bottom-full left-0 mb-1 w-64 rounded-lg border border-ac-border bg-ac-surface shadow-lg overflow-hidden z-20">
+              {slashMatches.map((c, i) => (
+                <button
+                  key={c.cmd}
+                  type="button"
+                  onMouseEnter={() => setSlashIdx(i)}
+                  onClick={() => { setText(c.cmd + " "); inputRef.current?.focus(); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs ${i === slashIdx ? "bg-ac-brand-soft" : ""}`}
+                >
+                  <span className="font-mono text-ac-brand">{c.cmd}</span>
+                  <span className="text-ac-muted">{c.desc}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <input
+            ref={inputRef}
+            type="text"
+            value={text}
+            onChange={(e) => { setText(e.target.value); setSlashIdx(0); }}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={placeholder}
+            disabled={isBlocked}
+            className="ac-input w-full px-3.5 py-2 text-sm"
+          />
+        </div>
 
         <button
           onClick={handleSend}
