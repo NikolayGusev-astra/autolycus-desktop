@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { SquarePen } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { useGatewayStore } from "../../stores/gatewayStore";
@@ -14,6 +15,8 @@ export function ChatView() {
   const {
     currentSessionId,
     addMessage,
+    updateMessage,
+    appendToken,
     agentStatus,
     setAgentStatus,
     setPipelineStatus,
@@ -24,6 +27,9 @@ export function ChatView() {
 
   // Track currently running tool for UI
   const runningToolRef = useRef<{ name: string; msgId: string } | null>(null);
+  // Stable streaming-message ID: all token chunks append to THIS message,
+  // eliminating the "last message" race that lost/corrupted tokens.
+  const streamingMsgIdRef = useRef<string | null>(null);
 
   // Fetch gateway status on mount (when connected)
   useEffect(() => {
@@ -92,45 +98,61 @@ export function ChatView() {
       const eventType = payload.type;
 
       switch (eventType) {
-        case "token":
+        case "token": {
           if (payload.content) {
-            const messages = useGatewayStore.getState().messages;
-            const lastIdx = messages.length - 1;
-            const lastMsg = messages[lastIdx];
-            if (lastMsg && lastMsg.isStreaming && lastMsg.role === "assistant") {
-              const updated = [...messages];
-              updated[lastIdx] = { ...lastMsg, content: lastMsg.content + payload.content };
-              useGatewayStore.setState({ messages: updated });
-            } else {
+            // Use a stable streaming-message ID (kept in a ref) so all token
+            // chunks append to ONE message, regardless of what other events
+            // (reasoning/tool) insert in between. Previously "last message" was
+            // used, which broke when reasoning/tool messages displaced it.
+            let sid = streamingMsgIdRef.current;
+            if (!sid) {
+              sid = crypto.randomUUID();
+              streamingMsgIdRef.current = sid;
               addMessage({
-                id: `msg-${Date.now()}`,
+                id: sid,
                 role: "assistant",
                 content: payload.content,
                 timestamp: Date.now(),
                 isStreaming: true,
               });
+            } else {
+              appendToken(sid, payload.content);
             }
           }
           break;
+        }
 
-        case "reasoning":
+        case "reasoning": {
+          // Reasoning is stored as a separate field on the streaming message,
+          // NOT a separate assistant message (which used to shadow the token
+          // target). If there's no streaming message yet, create one.
           if (payload.content) {
             setAgentStatus("thinking");
-            addMessage({
-              id: `thinking-${Date.now()}`,
-              role: "assistant",
-              content: payload.content,
-              timestamp: Date.now(),
-              isStreaming: true,
-            });
+            let sid = streamingMsgIdRef.current;
+            if (!sid) {
+              sid = crypto.randomUUID();
+              streamingMsgIdRef.current = sid;
+              addMessage({
+                id: sid,
+                role: "assistant",
+                content: "",
+                timestamp: Date.now(),
+                isStreaming: true,
+                thinking: payload.content,
+              });
+            } else {
+              updateMessage(sid, {
+                thinking: (useGatewayStore.getState().messages.find((m) => m.id === sid)?.thinking || "") + payload.content,
+              });
+            }
           }
           break;
+        }
 
         case "tool_start": {
           setAgentStatus("tool_calling");
           const toolName = payload.name || payload.tool_name || "tool";
-          // Show inline "🔧 **Running:** <tool>..." as a streaming assistant message
-          const msgId = `tool-start-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const msgId = crypto.randomUUID();
           addMessage({
             id: msgId,
             role: "assistant",
@@ -148,45 +170,38 @@ export function ChatView() {
           const output = payload.output || payload.content || "";
           const durationMs = payload.duration_ms;
 
-          // Update the running tool message
           if (runningToolRef.current) {
-            const messages = useGatewayStore.getState().messages;
-            const idx = messages.findIndex((m) => m.id === runningToolRef.current!.msgId);
-            if (idx >= 0) {
-              const updated = [...messages];
-              const durationText =
-                durationMs !== undefined
-                  ? ` (${durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`})`
-                  : "";
-              let resultContent = `✅ **\`${toolName}\` ${t("chat.tool_completed")}**${durationText}`;
-              if (output) {
-                // Truncate long output for inline display
-                const truncated =
-                  output.length > 500 ? output.slice(0, 500) + "\n\n" + t("chat.output_truncated") : output;
-                resultContent += `\n\`\`\`\n${truncated}\n\`\`\``;
-              }
-              updated[idx] = {
-                ...updated[idx],
-                content: resultContent,
-                isStreaming: false,
-              };
-              useGatewayStore.setState({ messages: updated });
+            const durationText =
+              durationMs !== undefined
+                ? ` (${durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`})`
+                : "";
+            let resultContent = `✅ **\`${toolName}\` ${t("chat.tool_completed")}**${durationText}`;
+            if (output) {
+              const truncated =
+                output.length > 500 ? output.slice(0, 500) + "\n\n" + t("chat.output_truncated") : output;
+              resultContent += `\n\`\`\`\n${truncated}\n\`\`\``;
             }
+            updateMessage(runningToolRef.current.msgId, {
+              content: resultContent,
+              isStreaming: false,
+            });
           }
           runningToolRef.current = null;
+          // Reset streaming target so the next token creates a fresh message
+          // (the assistant's actual reply after tool execution).
+          streamingMsgIdRef.current = null;
           break;
         }
 
         case "done": {
+          // Finalize ALL streaming messages (not just "last") — tool messages
+          // or reasoning may still be flagged isStreaming.
           const msgs = useGatewayStore.getState().messages;
-          const lastIdx = msgs.length - 1;
-          const lastMsg = msgs[lastIdx];
-          if (lastMsg && lastMsg.isStreaming) {
-            const updated = [...msgs];
-            updated[lastIdx] = { ...lastMsg, isStreaming: false };
-            useGatewayStore.setState({ messages: updated });
-          }
+          useGatewayStore.setState({
+            messages: msgs.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)),
+          });
           setAgentStatus("idle");
+          streamingMsgIdRef.current = null;
           runningToolRef.current = null;
           break;
         }
@@ -276,9 +291,12 @@ export function ChatView() {
           : `[вложения: ${savedPaths.join(", ")}]`;
       }
 
+      // Reset the streaming target for the new turn.
+      streamingMsgIdRef.current = null;
+
       // Add user message to UI immediately (with attachment previews).
       const userMsg = {
-        id: `user-${Date.now()}`,
+        id: crypto.randomUUID(),
         role: "user" as const,
         content: messageText,
         timestamp: Date.now(),
@@ -327,8 +345,27 @@ export function ChatView() {
     [currentSessionId, addMessage, setAgentStatus]
   );
 
+  const handleNewSession = useCallback(() => {
+    useGatewayStore.setState({ messages: [], currentSessionId: null });
+    setAgentStatus("idle");
+    streamingMsgIdRef.current = null;
+    runningToolRef.current = null;
+  }, [setAgentStatus]);
+
   return (
     <div className="flex h-full flex-col bg-ac-bg">
+      {/* Chat toolbar: new-session button */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-ac-border">
+        <span className="text-xs text-ac-muted">{t("nav.chat")}</span>
+        <button
+          onClick={handleNewSession}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-ac-muted hover:text-ac-brand rounded-md hover:bg-ac-surface transition-colors"
+          title={t("chat.newSession")}
+        >
+          <SquarePen className="w-3.5 h-3.5" />
+          {t("chat.newSession")}
+        </button>
+      </div>
       <div className="flex-1 overflow-hidden">
         <MessageList />
       </div>

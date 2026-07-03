@@ -296,3 +296,63 @@ pub fn get_session_stats(
         total_messages,
     })
 }
+
+// ── Unified Activity Feed ─────────────────────────────────────────────────
+
+/// A single item in the unified activity feed — the last user message from a
+/// session, enriched with source/icon info. This is what the "Command Center"
+/// main screen renders as cards.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedItem {
+    pub session_id: String,
+    pub source: String,
+    pub started_at: f64,
+    pub title: Option<String>,
+    pub preview: String,
+    pub message_count: i64,
+    pub model: String,
+}
+
+/// Build a unified feed from state.db: the most recent session per source,
+/// plus recent sessions across all sources, sorted by time DESC. Each item
+/// shows the first user message as a preview.
+pub fn list_feed(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    limit: i64,
+) -> SqliteResult<Vec<FeedItem>> {
+    let db_path = state_db_path(hermes_home, profile);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&db_path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.source, s.started_at, s.title, s.message_count, s.model,
+                COALESCE(
+                    (SELECT SUBSTR(m.content, 1, 200) FROM messages m
+                     WHERE m.session_id = s.id AND m.role = 'user'
+                     ORDER BY m.timestamp ASC LIMIT 1), ''
+                ) as preview
+         FROM sessions s
+         WHERE s.source NOT IN ('subagent')  -- skip internal subagent sessions
+         ORDER BY s.started_at DESC
+         LIMIT ?1",
+    )?;
+
+    let items = stmt
+        .query_map(params![limit], |r| {
+            Ok(FeedItem {
+                session_id: r.get(0)?,
+                source: r.get(1)?,
+                started_at: r.get(2)?,
+                title: r.get(3)?,
+                message_count: r.get(4)?,
+                model: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                preview: r.get(6)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<_>>>()?;
+
+    Ok(items)
+}

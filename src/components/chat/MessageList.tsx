@@ -64,6 +64,13 @@ export function MessageList() {
     getScrollElement: () => parentRef.current,
     estimateSize: () => 80,
     overscan: 5,
+    // Dynamic measurement: real bubbles are 100-400px (markdown, code). Without
+    // this the virtualizer assumed 80px each → messages overlapped and
+    // disappeared on scroll.
+    measureElement:
+      typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
+        ? (el) => el?.getBoundingClientRect().height ?? 80
+        : undefined,
   });
 
   // Auto-scroll on new message OR content update
@@ -83,7 +90,9 @@ export function MessageList() {
       <div style={{ height: virtualizer.getTotalSize() }} className="relative">
         {virtualizer.getVirtualItems().map((item) => (
           <div
-            key={item.key}
+            key={grouped[item.index]?.id ?? item.key}
+            ref={virtualizer.measureElement}
+            data-index={item.index}
             className="absolute top-0 left-0 w-full"
             style={{ transform: `translateY(${item.start}px)` }}
           >

@@ -168,6 +168,33 @@ pub fn delete_task(hermes_home: &Path, profile: Option<&str>, id: i64) -> Result
     Ok(())
 }
 
+/// Generic task update — any of the fields can be None (unchanged).
+pub fn update_task(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    id: i64,
+    title: Option<&str>,
+    priority: Option<i64>,
+    due_date: Option<&str>,
+    project_id: Option<Option<i64>>,
+) -> Result<(), String> {
+    let conn = open(hermes_home, profile)?;
+    let mut sets: Vec<String> = Vec::new();
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(t) = title { sets.push("title = ?".into()); binds.push(Box::new(t.to_string())); }
+    if let Some(p) = priority { sets.push("priority = ?".into()); binds.push(Box::new(p)); }
+    if let Some(d) = due_date { sets.push("due_date = ?".into()); binds.push(Box::new(d.to_string())); }
+    if let Some(pi) = project_id { sets.push("project_id = ?".into()); binds.push(Box::new(pi)); }
+    if sets.is_empty() { return Ok(()); }
+    sets.push("id = id".into()); // no-op to ensure non-empty
+    let sql = format!("UPDATE tasks SET {} WHERE id = ?", sets.join(", "));
+    binds.push(Box::new(id));
+    let bind_refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    conn.execute(&sql, bind_refs.as_slice())
+        .map_err(|e| format!("update_task: {}", e))?;
+    Ok(())
+}
+
 // ── Goals ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +247,31 @@ pub fn delete_goal(hermes_home: &Path, profile: Option<&str>, id: i64) -> Result
     let conn = open(hermes_home, profile)?;
     conn.execute("DELETE FROM goals WHERE id = ?1", params![id])
         .map_err(|e| format!("delete: {}", e))?;
+    Ok(())
+}
+
+/// Generic goal update.
+pub fn update_goal(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    id: i64,
+    title: Option<&str>,
+    target_date: Option<&str>,
+    progress: Option<i64>,
+) -> Result<(), String> {
+    let conn = open(hermes_home, profile)?;
+    let mut sets: Vec<String> = Vec::new();
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(v) = title { sets.push("title = ?".into()); binds.push(Box::new(v.to_string())); }
+    if let Some(v) = target_date { sets.push("target_date = ?".into()); binds.push(Box::new(v.to_string())); }
+    if let Some(v) = progress { sets.push("progress = ?".into()); binds.push(Box::new(v)); }
+    if sets.is_empty() { return Ok(()); }
+    sets.push("id = id".into());
+    let sql = format!("UPDATE goals SET {} WHERE id = ?", sets.join(", "));
+    binds.push(Box::new(id));
+    let bind_refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    conn.execute(&sql, bind_refs.as_slice())
+        .map_err(|e| format!("update_goal: {}", e))?;
     Ok(())
 }
 
@@ -277,6 +329,31 @@ pub fn delete_project(hermes_home: &Path, profile: Option<&str>, id: i64) -> Res
     let conn = open(hermes_home, profile)?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| format!("delete: {}", e))?;
+    Ok(())
+}
+
+/// Generic project update.
+pub fn update_project(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    id: i64,
+    name: Option<&str>,
+    color: Option<&str>,
+    goal_id: Option<Option<i64>>,
+) -> Result<(), String> {
+    let conn = open(hermes_home, profile)?;
+    let mut sets: Vec<String> = Vec::new();
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(v) = name { sets.push("name = ?".into()); binds.push(Box::new(v.to_string())); }
+    if let Some(v) = color { sets.push("color = ?".into()); binds.push(Box::new(v.to_string())); }
+    if let Some(v) = goal_id { sets.push("goal_id = ?".into()); binds.push(Box::new(v)); }
+    if sets.is_empty() { return Ok(()); }
+    sets.push("id = id".into());
+    let sql = format!("UPDATE projects SET {} WHERE id = ?", sets.join(", "));
+    binds.push(Box::new(id));
+    let bind_refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    conn.execute(&sql, bind_refs.as_slice())
+        .map_err(|e| format!("update_project: {}", e))?;
     Ok(())
 }
 

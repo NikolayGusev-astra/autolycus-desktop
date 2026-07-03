@@ -41,8 +41,8 @@ export function Sidebar({ activeView, onViewChange, onSelfDiagnosis }: SidebarPr
   const { t } = useTranslation();
 
   const items: { id: ViewId; icon: typeof LayoutDashboard; label: string }[] = [
-    { id: "dashboard", icon: LayoutDashboard, label: t("nav.dashboard") },
-    { id: "chat", icon: MessageSquare, label: t("nav.chat") },
+    { id: "dashboard", icon: LayoutDashboard, label: t("feed.title") },
+    { id: "chat", icon: MessageSquare, label: t("nav.assistant") },
     { id: "tasks", icon: SquareCheckBig, label: t("nav.tasks") },
     { id: "goals", icon: Target, label: t("nav.goals") },
     { id: "projects", icon: FolderOpen, label: t("nav.projects") },

@@ -43,6 +43,7 @@ pub use gateway::{GatewayStartResult, GatewayState};
 pub use models::SavedModel;
 pub use profiles::ProfileInfo;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
+pub use sessions::FeedItem;
 pub use ssh::SshState;
 
 // ── App State ─────────────────────────────────────────────────────────────
@@ -907,6 +908,19 @@ async fn get_session_stats_cmd(
         .map_err(|e| format!("SQLite error: {}", e))
 }
 
+/// Unified activity feed — last messages from all sources (email/TG/Jira/etc.)
+/// in state.db, rendered as cards on the main screen.
+#[tauri::command]
+async fn list_feed_cmd(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    profile: Option<String>,
+) -> Result<Vec<FeedItem>, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    sessions::list_feed(&hermes_home, profile.as_deref(), limit.unwrap_or(50))
+        .map_err(|e| format!("SQLite error: {}", e))
+}
+
 // ── Profile Commands ──────────────────────────────────────────────────────
 
 /// List profiles
@@ -1667,6 +1681,11 @@ async fn delete_task_cmd(state: State<'_, AppState>, id: i64, profile: Option<St
     productivity::delete_task(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
+async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id)
+}
+#[tauri::command]
 async fn list_goals_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Goal>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_goals(&hh, profile.as_deref())
@@ -1682,6 +1701,11 @@ async fn delete_goal_cmd(state: State<'_, AppState>, id: i64, profile: Option<St
     productivity::delete_goal(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
+async fn update_goal_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, target_date: Option<String>, progress: Option<i64>, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::update_goal(&hh, profile.as_deref(), id, title.as_deref(), target_date.as_deref(), progress)
+}
+#[tauri::command]
 async fn list_projects_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Project>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_projects(&hh, profile.as_deref())
@@ -1695,6 +1719,11 @@ async fn create_project_cmd(state: State<'_, AppState>, name: String, color: Opt
 async fn delete_project_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_project(&hh, profile.as_deref(), id)
+}
+#[tauri::command]
+async fn update_project_cmd(state: State<'_, AppState>, id: i64, name: Option<String>, color: Option<String>, goal_id: Option<Option<i64>>, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::update_project(&hh, profile.as_deref(), id, name.as_deref(), color.as_deref(), goal_id)
 }
 #[tauri::command]
 async fn list_protocols_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Protocol>, String> {
@@ -1887,6 +1916,7 @@ pub fn run() {
             search_sessions_cmd,
             delete_session_cmd,
             get_session_stats_cmd,
+            list_feed_cmd,
             // Profiles
             list_profiles_cmd,
             create_profile_cmd,
@@ -1978,12 +2008,15 @@ pub fn run() {
             create_task_cmd,
             update_task_status_cmd,
             delete_task_cmd,
+            update_task_cmd,
             list_goals_cmd,
             create_goal_cmd,
             delete_goal_cmd,
+            update_goal_cmd,
             list_projects_cmd,
             create_project_cmd,
             delete_project_cmd,
+            update_project_cmd,
             list_protocols_cmd,
             create_protocol_cmd,
             delete_protocol_cmd,

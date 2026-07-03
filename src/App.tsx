@@ -14,7 +14,7 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { HistoryPanel } from "./components/sessions/HistoryPanel";
-import { DashboardView } from "./components/views/DashboardView";
+import { FeedView } from "./components/views/FeedView";
 import { TasksView } from "./components/views/TasksView";
 import { GoalsView } from "./components/views/GoalsView";
 import { ProjectsView } from "./components/views/ProjectsView";
@@ -35,6 +35,12 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [selfDiagOpen, setSelfDiagOpen] = useState(false);
+  // Drill-down navigation: Goal → Projects → Tasks
+  const [drillGoalId, setDrillGoalId] = useState<number | null>(null);
+  const [drillGoalName, setDrillGoalName] = useState<string | undefined>(undefined);
+  void setDrillGoalName;
+  const [drillProjectId, setDrillProjectId] = useState<number | null>(null);
+  const [drillProjectName, setDrillProjectName] = useState<string | undefined>(undefined);
   const [appVersion, setAppVersion] = useState<string>("");
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
@@ -284,17 +290,34 @@ export function App() {
             </div>
           ) : activeView === "dashboard" ? (
             <div className="flex-1 overflow-y-auto">
-              <DashboardView
-                onNavigate={(v) => setActiveView(v)}
-                onSelfDiagnosis={() => setSelfDiagOpen(true)}
+              <FeedView
+                onOpenChat={() => setActiveView("chat")}
+                onNewTask={() => setActiveView("tasks")}
               />
             </div>
           ) : activeView === "tasks" ? (
-            <div className="flex-1 overflow-y-auto"><TasksView /></div>
+            <div className="flex-1 overflow-y-auto">
+              <TasksView
+                projectId={drillProjectId}
+                projectName={drillProjectName}
+                onBack={() => { setDrillProjectId(null); setActiveView("projects"); }}
+              />
+            </div>
           ) : activeView === "goals" ? (
-            <div className="flex-1 overflow-y-auto"><GoalsView /></div>
+            <div className="flex-1 overflow-y-auto">
+              <GoalsView
+                onOpenProject={(pid, pname) => { setDrillProjectId(pid); setDrillProjectName(pname); setActiveView("tasks"); }}
+              />
+            </div>
           ) : activeView === "projects" ? (
-            <div className="flex-1 overflow-y-auto"><ProjectsView /></div>
+            <div className="flex-1 overflow-y-auto">
+              <ProjectsView
+                goalId={drillGoalId}
+                goalTitle={drillGoalName}
+                onBack={() => { setDrillGoalId(null); setActiveView("goals"); }}
+                onOpenTasks={(pid, pname) => { setDrillProjectId(pid); setDrillProjectName(pname); setActiveView("tasks"); }}
+              />
+            </div>
           ) : activeView === "protocols" ? (
             <div className="flex-1 overflow-y-auto"><ProtocolsView /></div>
           ) : activeView === "stats" ? (

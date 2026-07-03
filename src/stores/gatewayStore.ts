@@ -30,6 +30,10 @@ interface GatewayState {
   setError: (error: string | null) => void;
   setAgentStatus: (status: AgentStatus) => void;
   addMessage: (message: Message) => void;
+  /** Atomically update a message by id (used for streaming). */
+  updateMessage: (id: string, patch: Partial<Message>) => void;
+  /** Append a text delta to a message's content by id (streaming tokens). */
+  appendToken: (id: string, delta: string) => void;
   addEvent: (event: AgentEvent) => void;
   setCurrentSession: (id: string | null) => void;
   setSessions: (sessions: Session[]) => void;
@@ -70,6 +74,18 @@ export const useGatewayStore = create<GatewayState>()((set) => ({
 
   addMessage: (message: Message) =>
     set((s) => ({ messages: [...s.messages, message] })),
+
+  updateMessage: (id, patch) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+    })),
+
+  appendToken: (id, delta) =>
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id ? { ...m, content: m.content + delta } : m
+      ),
+    })),
 
   addEvent: (event: AgentEvent) =>
     set((s) => {
