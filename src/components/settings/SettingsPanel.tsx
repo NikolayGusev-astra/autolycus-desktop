@@ -30,6 +30,8 @@ import {
   KeyRound,
   Sparkles,
   Monitor,
+  Mail,
+  CheckSquare,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";
@@ -48,6 +50,7 @@ type SettingsTab =
   | "general"
   | "appearance"
   | "connection"
+  | "sources"
   | "soul"
   | "models"
   | "providers"
@@ -935,6 +938,122 @@ function HermesSectionTab({ section, fields }: { section: string; fields: { key:
   );
 }
 
+// ── Sources tab — configure Telegram + Email connectors (write to Hermes .env)
+// Each connector is a Hermes platform plugin. The desktop writes the env vars
+// the plugin expects; Hermes picks them up on next gateway restart.
+function SourcesTab() {
+  const { t } = useTranslation();
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState("");
+  const [showTg, setShowTg] = useState(false);
+  const [showEmail, setShowEmail] = useState(false);
+
+  // Load current values from Hermes .env via get_env_cmd.
+  useEffect(() => {
+    const keys = [
+      "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_HOME_CHANNEL",
+      "EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_SMTP_HOST", "EMAIL_SMTP_PORT", "EMAIL_IMAP_HOST",
+    ];
+    Promise.all(keys.map((k) => invoke<string | null>("get_env_cmd", { key: k, profile: null }).catch(() => null)))
+      .then((results) => {
+        const v: Record<string, string> = {};
+        keys.forEach((k, i) => { v[k] = results[i] || ""; });
+        setVals(v);
+      });
+  }, []);
+
+  const save = async (key: string) => {
+    try {
+      await invoke("set_env_cmd", { key, value: vals[key] || "", profile: null });
+      setStatus("✓ " + t("saved"));
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const field = (key: string, label: string, ph: string, isPassword = false) => (
+    <div key={key}>
+      <label className="text-[11px] text-ac-muted block mb-1">{label}</label>
+      <div className="flex gap-2">
+        <input
+          type={isPassword ? "password" : "text"}
+          className="ac-input flex-1 px-3 py-2 text-sm font-mono"
+          placeholder={ph}
+          value={vals[key] ?? ""}
+          onChange={(e) => setVals((p) => ({ ...p, [key]: e.target.value }))}
+        />
+        <button onClick={() => void save(key)} className="ac-btn px-3 py-2 text-xs">{t("btn.save")}</button>
+      </div>
+    </div>
+  );
+
+  const tgConfigured = vals["TELEGRAM_BOT_TOKEN"];
+  const emailConfigured = vals["EMAIL_ADDRESS"] && vals["EMAIL_PASSWORD"];
+
+  return (
+    <div className="space-y-4">
+      <p className="text-[11px] text-ac-muted">{t("sources.hint")}</p>
+
+      {/* Telegram */}
+      <div className="border border-ac-border rounded-lg overflow-hidden">
+        <button
+          onClick={() => setShowTg(!showTg)}
+          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-ac-surface transition-colors"
+        >
+          <Send className="w-4 h-4 text-[#0088cc]" />
+          <span className="flex-1 text-left text-sm font-medium text-ac-ink">Telegram</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full ${tgConfigured ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
+            {tgConfigured ? "✓ " + t("sources.configured") : t("sources.notConfigured")}
+          </span>
+        </button>
+        {showTg && (
+          <div className="p-4 border-t border-ac-border space-y-3">
+            {field("TELEGRAM_BOT_TOKEN", "Bot Token (@BotFather)", "123456:ABC-DEF...", true)}
+            {field("TELEGRAM_ALLOWED_USERS", t("sources.allowedUsers"), "user_id1, user_id2")}
+            {field("TELEGRAM_HOME_CHANNEL", t("sources.homeChannel"), "-1001234567890")}
+          </div>
+        )}
+      </div>
+
+      {/* Email (IMAP + SMTP) */}
+      <div className="border border-ac-border rounded-lg overflow-hidden">
+        <button
+          onClick={() => setShowEmail(!showEmail)}
+          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-ac-surface transition-colors"
+        >
+          <Mail className="w-4 h-4 text-[#ea4335]" />
+          <span className="flex-1 text-left text-sm font-medium text-ac-ink">Email (IMAP/SMTP)</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full ${emailConfigured ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
+            {emailConfigured ? "✓ " + t("sources.configured") : t("sources.notConfigured")}
+          </span>
+        </button>
+        {showEmail && (
+          <div className="p-4 border-t border-ac-border space-y-3">
+            {field("EMAIL_ADDRESS", t("sources.emailAddress"), "you@example.com")}
+            {field("EMAIL_PASSWORD", t("sources.emailPassword"), "app password", true)}
+            {field("EMAIL_SMTP_HOST", "SMTP host", "smtp.gmail.com")}
+            {field("EMAIL_SMTP_PORT", "SMTP port", "587")}
+            {field("EMAIL_IMAP_HOST", "IMAP host", "imap.gmail.com")}
+          </div>
+        )}
+      </div>
+
+      {/* Jira / MCP note */}
+      <div className="border border-ac-border rounded-lg p-4 bg-ac-surface">
+        <div className="flex items-center gap-3 mb-1">
+          <CheckSquare className="w-4 h-4 text-[#0052cc]" />
+          <span className="text-sm font-medium text-ac-ink">Jira / MCP / REST API</span>
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-ac-surface-2 text-ac-muted">Hermes tools</span>
+        </div>
+        <p className="text-[11px] text-ac-muted ml-7">{t("sources.toolsHint")}</p>
+      </div>
+
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+    </div>
+  );
+}
+
 // ── Main Settings Panel ───────────────────────────────────────────────────
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
@@ -944,6 +1063,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     { id: "general", label: t("settings_general"), icon: Sun },
     { id: "appearance", label: t("settings.appearance"), icon: Palette },
     { id: "soul", label: t("settings.soul"), icon: Sparkles },
+    { id: "sources", label: t("sources.title"), icon: Send },
     { id: "connection", label: t("settings_connection"), icon: Globe },
     { id: "models", label: t("settings_models"), icon: Cpu },
     { id: "providers", label: t("settings.providers"), icon: KeyRound },
@@ -997,6 +1117,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             {activeTab === "general" && <GeneralTab />}
             {activeTab === "appearance" && <AppearanceTab />}
             {activeTab === "connection" && <ConnectionTab />}
+            {activeTab === "sources" && <SourcesTab />}
             {activeTab === "soul" && <SoulTab />}
             {activeTab === "models" && <ModelsTab />}
             {activeTab === "providers" && (
