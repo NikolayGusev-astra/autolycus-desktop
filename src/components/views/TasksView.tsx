@@ -101,9 +101,9 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
               {[1,2,3,4,5].map((p) => <option key={p} value={p}>{PRIO_LABEL[p]} {t(`tasks.prio${p <= 1 ? "High" : p <= 3 ? "Med" : "Low"}`)}</option>)}
             </select>
             <input type="date" className="ac-input px-3 py-2 text-sm" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
-            {!projectId && (
+            {(!projectId || editingId !== null) && (
               <select className="ac-input px-3 py-2 text-sm" value={projId ?? ""} onChange={(e) => setProjId(e.target.value ? Number(e.target.value) : null)}>
-                <option value="">{t("projects.noGoal")}</option>
+                <option value="">{t("tasks.noProject")}</option>
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
@@ -133,8 +133,8 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
                   {projName(task.project_id)}
                 </span>
               )}
-              <button onClick={() => startEdit(task)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-brand"><Pencil className="w-3.5 h-3.5" /></button>
-              <button onClick={() => void remove(task.id)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-red"><Trash2 className="w-3.5 h-3.5" /></button>
+              <button onClick={() => startEdit(task)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg"><Pencil className="w-3.5 h-3.5" /></button>
+              <button onClick={() => void remove(task.id)} className="p-1 rounded text-ac-faint hover:text-ac-red hover:bg-ac-bg"><Trash2 className="w-3.5 h-3.5" /></button>
             </div>
           ))}
         </div>

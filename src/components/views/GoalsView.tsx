@@ -76,7 +76,7 @@ export function GoalsView({ onOpenProject }: { onOpenProject?: (pid: number, pna
         : goals.length === 0 ? (<p className="text-sm text-ac-muted text-center py-12">{t("goals.empty")}</p>)
         : (<div className="space-y-3">
           {goals.map((g) => (
-            <div key={g.id} className="p-4 rounded-lg border border-ac-border bg-ac-surface">
+            <div key={g.id} className="group p-4 rounded-lg border border-ac-border bg-ac-surface">
               <div className="flex items-start gap-2">
                 <Target className="w-4 h-4 text-ac-brand mt-0.5 shrink-0" />
                 <div className="flex-1 min-w-0">
@@ -88,8 +88,8 @@ export function GoalsView({ onOpenProject }: { onOpenProject?: (pid: number, pna
                     </div>
                   )}
                 </div>
-                <button onClick={() => startEdit(g)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-brand"><Pencil className="w-3.5 h-3.5" /></button>
-                <button onClick={() => void remove(g.id)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-red"><Trash2 className="w-3.5 h-3.5" /></button>
+                <button onClick={() => startEdit(g)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg"><Pencil className="w-3.5 h-3.5" /></button>
+                <button onClick={() => void remove(g.id)} className="p-1 rounded text-ac-faint hover:text-ac-red hover:bg-ac-bg"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
               {/* Drill-down: projects under this goal */}
               {goalProjects(g.id).length > 0 && (

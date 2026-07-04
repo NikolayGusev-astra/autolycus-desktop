@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Mail, Send, CheckSquare, Terminal, Bot, FileText, Loader, RefreshCw,
-  Plus, ChevronRight, ListChecks, Sparkles, Columns,
+  ChevronRight, ListChecks, Sparkles, Columns, ListPlus,
 } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 
@@ -152,7 +152,7 @@ export function FeedView({ onNewTask, onOpenSession }: {
             </button>
             {onNewTask && (
               <button onClick={onNewTask} className="ac-btn px-3 py-2 text-sm flex items-center gap-1.5">
-                <Plus className="w-4 h-4" /> {t("dash.newTask")}
+                <ListPlus className="w-4 h-4" /> {t("nav.tasks")}
               </button>
             )}
           </div>

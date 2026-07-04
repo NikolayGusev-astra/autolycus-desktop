@@ -124,6 +124,7 @@ const translations = {
   'tasks.prioLow': { en: 'Low priority', ru: 'Низкий приоритет' },
   'tasks.createFirst': { en: 'Create your first task', ru: 'Создайте первую задачу' },
   'tasks.extract': { en: 'Extract tasks', ru: 'Извлечь задачи' },
+  'tasks.noProject': { en: 'No project', ru: 'Без проекта' },
   // Goals
   'goals.new': { en: 'New goal', ru: 'Новая цель' },
   'goals.namePh': { en: 'e.g. AI-buddy', ru: 'Например: ИИ-бадди' },

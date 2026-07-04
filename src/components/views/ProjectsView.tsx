@@ -94,8 +94,8 @@ export function ProjectsView({ goalId, goalTitle, onBack, onOpenTasks }: {
               <div className="flex items-center gap-3">
                 <FolderOpen className="w-5 h-5 shrink-0" style={{ color: p.color }} />
                 <span className="flex-1 text-sm font-medium text-ac-ink truncate">{p.name}</span>
-                <button onClick={() => startEdit(p)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-brand"><Pencil className="w-3.5 h-3.5" /></button>
-                <button onClick={() => void remove(p.id)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-red"><Trash2 className="w-3.5 h-3.5" /></button>
+                <button onClick={() => startEdit(p)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg"><Pencil className="w-3.5 h-3.5" /></button>
+                <button onClick={() => void remove(p.id)} className="p-1 rounded text-ac-faint hover:text-ac-red hover:bg-ac-bg"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
               {goalTitleOf(p.goal_id) && (
                 <p className="text-[11px] text-ac-muted mt-1.5 flex items-center gap-1"><Target className="w-3 h-3" /> {goalTitleOf(p.goal_id)}</p>

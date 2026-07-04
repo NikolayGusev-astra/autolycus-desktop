@@ -218,7 +218,7 @@ export function ProtocolsView() {
                   {p.meeting_date && <p className="text-xs text-ac-faint mt-0.5">📅 {p.meeting_date}</p>}
                   {p.decisions && <p className="text-xs text-ac-muted mt-1 whitespace-pre-wrap">{p.decisions.slice(0, 300)}{p.decisions.length > 300 ? "…" : ""}</p>}
                 </div>
-                <button onClick={() => void remove(p.id)} className="opacity-0 group-hover:opacity-100 text-ac-faint hover:text-ac-red"><Trash2 className="w-3.5 h-3.5" /></button>
+                <button onClick={() => void remove(p.id)} className="p-1 rounded text-ac-faint hover:text-ac-red hover:bg-ac-bg"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
             </div>
           ))}
