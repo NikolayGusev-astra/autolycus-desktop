@@ -79,6 +79,30 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // Projects → Tasks). ALTER TABLE ... ADD COLUMN is idempotent via try/catch.
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL", []);
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN labels TEXT DEFAULT ''", []);
+    // Sections within projects (like Todoist).
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            position INTEGER DEFAULT 0
+        );",
+    );
+    // Connection profiles (multiple Hermes servers).
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS connection_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            mode TEXT DEFAULT 'local',
+            host TEXT DEFAULT '',
+            port INTEGER DEFAULT 22,
+            username TEXT DEFAULT '',
+            key_path TEXT DEFAULT '',
+            api_url TEXT DEFAULT '',
+            api_key TEXT DEFAULT ''
+        );",
+    );
     Ok(())
 }
 
@@ -96,6 +120,8 @@ pub struct Task {
     pub project_id: Option<i64>,
     #[serde(default)]
     pub assignee: String,
+    #[serde(default)]
+    pub labels: String,
     pub created_at: Option<i64>,
     pub completed_at: Option<i64>,
 }
@@ -103,7 +129,7 @@ pub struct Task {
 pub fn list_tasks(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Task>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
-        .prepare("SELECT id, title, description, status, priority, due_date, project_id, assignee, created_at, completed_at FROM tasks ORDER BY created_at DESC")
+        .prepare("SELECT id, title, description, status, priority, due_date, project_id, assignee, labels, created_at, completed_at FROM tasks ORDER BY created_at DESC")
         .map_err(|e| format!("prepare: {}", e))?;
     let rows = stmt
         .query_map([], |r| {
@@ -116,8 +142,9 @@ pub fn list_tasks(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Task>
                 due_date: r.get(5)?,
                 project_id: r.get(6)?,
                 assignee: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                created_at: r.get(8)?,
-                completed_at: r.get(9)?,
+                labels: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                created_at: r.get(9)?,
+                completed_at: r.get(10)?,
             })
         })
         .map_err(|e| format!("query: {}", e))?;
@@ -182,6 +209,7 @@ pub fn update_task(
     due_date: Option<&str>,
     project_id: Option<Option<i64>>,
     assignee: Option<&str>,
+    labels: Option<&str>,
 ) -> Result<(), String> {
     let conn = open(hermes_home, profile)?;
     let mut sets: Vec<String> = Vec::new();
@@ -191,6 +219,7 @@ pub fn update_task(
     if let Some(d) = due_date { sets.push("due_date = ?".into()); binds.push(Box::new(d.to_string())); }
     if let Some(pi) = project_id { sets.push("project_id = ?".into()); binds.push(Box::new(pi)); }
     if let Some(a) = assignee { sets.push("assignee = ?".into()); binds.push(Box::new(a.to_string())); }
+    if let Some(l) = labels { sets.push("labels = ?".into()); binds.push(Box::new(l.to_string())); }
     if sets.is_empty() { return Ok(()); }
     sets.push("id = id".into()); // no-op to ensure non-empty
     let sql = format!("UPDATE tasks SET {} WHERE id = ?", sets.join(", "));
@@ -335,6 +364,86 @@ pub fn delete_project(hermes_home: &Path, profile: Option<&str>, id: i64) -> Res
     let conn = open(hermes_home, profile)?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| format!("delete: {}", e))?;
+    Ok(())
+}
+
+// ── Sections (sub-groups within projects, like Todoist) ────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Section {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    pub position: i64,
+}
+
+pub fn list_sections(hermes_home: &Path, profile: Option<&str>, project_id: i64) -> Result<Vec<Section>, String> {
+    let conn = open(hermes_home, profile)?;
+    let mut stmt = conn
+        .prepare("SELECT id, project_id, name, position FROM sections WHERE project_id = ?1 ORDER BY position")
+        .map_err(|e| format!("prepare: {}", e))?;
+    let rows = stmt.query_map(params![project_id], |r| {
+        Ok(Section { id: r.get(0)?, project_id: r.get(1)?, name: r.get(2)?, position: r.get(3)? })
+    }).map_err(|e| format!("query: {}", e))?;
+    Ok(rows.flatten().collect())
+}
+
+pub fn create_section(hermes_home: &Path, profile: Option<&str>, project_id: i64, name: &str) -> Result<i64, String> {
+    let conn = open(hermes_home, profile)?;
+    conn.execute("INSERT INTO sections (project_id, name) VALUES (?1, ?2)", params![project_id, name])
+        .map_err(|e| format!("insert: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_section(hermes_home: &Path, profile: Option<&str>, id: i64) -> Result<(), String> {
+    let conn = open(hermes_home, profile)?;
+    conn.execute("DELETE FROM sections WHERE id = ?1", params![id]).map_err(|e| format!("delete: {}", e))?;
+    Ok(())
+}
+
+// ── Connection Profiles (multiple Hermes servers) ──────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionProfile {
+    pub id: i64,
+    pub name: String,
+    pub mode: String,
+    pub host: String,
+    pub port: i64,
+    pub username: String,
+    pub key_path: String,
+    pub api_url: String,
+    #[serde(skip_serializing)]
+    pub api_key: String,
+}
+
+pub fn list_profiles(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<ConnectionProfile>, String> {
+    let conn = open(hermes_home, profile)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, mode, host, port, username, key_path, api_url, api_key FROM connection_profiles ORDER BY name")
+        .map_err(|e| format!("prepare: {}", e))?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ConnectionProfile {
+            id: r.get(0)?, name: r.get(1)?, mode: r.get(2)?, host: r.get(3)?,
+            port: r.get(4)?, username: r.get(5)?, key_path: r.get(6)?,
+            api_url: r.get(7)?, api_key: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+        })
+    }).map_err(|e| format!("query: {}", e))?;
+    Ok(rows.flatten().collect())
+}
+
+pub fn create_profile(hermes_home: &Path, profile: Option<&str>, name: &str, mode: &str, host: &str, port: i64, username: &str, key_path: &str, api_url: &str, api_key: &str) -> Result<i64, String> {
+    let conn = open(hermes_home, profile)?;
+    conn.execute(
+        "INSERT INTO connection_profiles (name, mode, host, port, username, key_path, api_url, api_key) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![name, mode, host, port, username, key_path, api_url, api_key],
+    ).map_err(|e| format!("insert: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_profile(hermes_home: &Path, profile: Option<&str>, id: i64) -> Result<(), String> {
+    let conn = open(hermes_home, profile)?;
+    conn.execute("DELETE FROM connection_profiles WHERE id = ?1", params![id]).map_err(|e| format!("delete: {}", e))?;
     Ok(())
 }
 

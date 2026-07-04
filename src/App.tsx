@@ -16,6 +16,7 @@ import { ApprovalCard } from "./components/chat/ApprovalCard";
 import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import { FeedView } from "./components/views/FeedView";
 import { TasksView } from "./components/views/TasksView";
+import { KanbanView } from "./components/views/KanbanView";
 import { GoalsView } from "./components/views/GoalsView";
 import { ProjectsView } from "./components/views/ProjectsView";
 import { ProtocolsView } from "./components/views/ProtocolsView";
@@ -310,6 +311,12 @@ export function App() {
                 onBack={() => { setDrillProjectId(null); setActiveView("projects"); }}
               />
             </div>
+          ) : activeView === "kanban" ? (
+            <KanbanView
+              projectId={drillProjectId}
+              projectName={drillProjectName}
+              onBack={() => { setDrillProjectId(null); setActiveView("projects"); }}
+            />
           ) : activeView === "goals" ? (
             <div className="flex-1 overflow-y-auto">
               <GoalsView

@@ -30,6 +30,7 @@ const translations = {
   'feed.emptyHint': { en: 'Connect sources in Settings → Sources, or send a message to the assistant.', ru: 'Подключите источники в Настройки → Источники, или напишите ассистенту.' },
   'nav.dashboard': { en: 'Dashboard', ru: 'Дашборд' },
   'nav.tasks': { en: 'Tasks', ru: 'Задачи' },
+  'kanban.title': { en: 'Board', ru: 'Доска' },
   'nav.goals': { en: 'Goals', ru: 'Цели' },
   'nav.projects': { en: 'Projects', ru: 'Проекты' },
   'nav.stats': { en: 'Statistics', ru: 'Статистика' },
@@ -126,6 +127,7 @@ const translations = {
   'tasks.extract': { en: 'Extract tasks', ru: 'Извлечь задачи' },
   'tasks.noProject': { en: 'No project', ru: 'Без проекта' },
   'tasks.assignee': { en: 'Assignee', ru: 'Исполнитель' },
+  'tasks.labelsPh': { en: 'Tags (comma-separated)', ru: 'Теги (через запятую)' },
   // Goals
   'goals.new': { en: 'New goal', ru: 'Новая цель' },
   'goals.namePh': { en: 'e.g. AI-buddy', ru: 'Например: ИИ-бадди' },

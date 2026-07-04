@@ -23,6 +23,7 @@ export type ViewId =
   | "dashboard"
   | "chat"
   | "tasks"
+  | "kanban"
   | "goals"
   | "projects"
   | "stats"
@@ -44,6 +45,7 @@ export function Sidebar({ activeView, onViewChange, onSelfDiagnosis }: SidebarPr
     { id: "dashboard", icon: LayoutDashboard, label: t("feed.title") },
     { id: "chat", icon: MessageSquare, label: t("nav.assistant") },
     { id: "tasks", icon: SquareCheckBig, label: t("nav.tasks") },
+    { id: "kanban", icon: LayoutDashboard, label: t("kanban.title") },
     { id: "goals", icon: Target, label: t("nav.goals") },
     { id: "projects", icon: FolderOpen, label: t("nav.projects") },
     { id: "stats", icon: ChartColumn, label: t("nav.stats") },

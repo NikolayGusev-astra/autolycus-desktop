@@ -1716,9 +1716,9 @@ async fn delete_task_cmd(state: State<'_, AppState>, id: i64, profile: Option<St
     productivity::delete_task(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, assignee: Option<String>, profile: Option<String>) -> Result<(), String> {
+async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, assignee: Option<String>, labels: Option<String>, profile: Option<String>) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
-    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id, assignee.as_deref())
+    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id, assignee.as_deref(), labels.as_deref())
 }
 #[tauri::command]
 async fn list_goals_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Goal>, String> {
@@ -1789,6 +1789,40 @@ async fn add_self_check_cmd(state: State<'_, AppState>, energy: i64, joy: i64, m
 async fn dash_stats_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<productivity::DashStats, String> {
     let hh = home_or_resolve(&state)?;
     productivity::dash_stats(&hh, profile.as_deref())
+}
+
+// ── Sections ──
+#[tauri::command]
+async fn list_sections_cmd(state: State<'_, AppState>, project_id: i64, profile: Option<String>) -> Result<Vec<productivity::Section>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_sections(&hh, profile.as_deref(), project_id)
+}
+#[tauri::command]
+async fn create_section_cmd(state: State<'_, AppState>, project_id: i64, name: String, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_section(&hh, profile.as_deref(), project_id, &name)
+}
+#[tauri::command]
+async fn delete_section_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::delete_section(&hh, profile.as_deref(), id)
+}
+
+// ── Connection Profiles ──
+#[tauri::command]
+async fn list_conn_profiles_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::ConnectionProfile>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::list_profiles(&hh, profile.as_deref())
+}
+#[tauri::command]
+async fn create_conn_profile_cmd(state: State<'_, AppState>, name: String, mode: String, host: String, port: Option<i64>, username: String, key_path: String, api_url: String, api_key: String, profile: Option<String>) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_profile(&hh, profile.as_deref(), &name, &mode, &host, port.unwrap_or(22), &username, &key_path, &api_url, &api_key)
+}
+#[tauri::command]
+async fn delete_conn_profile_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::delete_profile(&hh, profile.as_deref(), id)
 }
 
 // ── Entry Point ───────────────────────────────────────────────────────────
@@ -2059,6 +2093,12 @@ pub fn run() {
             list_self_checks_cmd,
             add_self_check_cmd,
             dash_stats_cmd,
+            list_sections_cmd,
+            create_section_cmd,
+            delete_section_cmd,
+            list_conn_profiles_cmd,
+            create_conn_profile_cmd,
+            delete_conn_profile_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

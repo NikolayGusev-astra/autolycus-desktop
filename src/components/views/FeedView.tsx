@@ -127,6 +127,21 @@ export function FeedView({ onNewTask, onOpenSession }: {
     }
   };
 
+  // ── Delegate from a feed card (task + assignee) ──────────────────────────
+  const delegateFromCard = async (item: FeedItem, assignee: string) => {
+    const title = item.title || item.preview?.slice(0, 80) || `Из ${item.source}`;
+    try {
+      const id = await invoke<number>("create_task_cmd", { title, profile: null });
+      if (assignee) {
+        await invoke("update_task_cmd", { id, assignee, profile: null });
+      }
+      setActionStatus(`✓ Делегировано: ${assignee || "без исполнителя"}`);
+      setTimeout(() => setActionStatus(""), 3000);
+    } catch (e) {
+      setActionStatus("✗ " + String(e));
+    }
+  };
+
   // ── Render ───────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -243,6 +258,7 @@ export function FeedView({ onNewTask, onOpenSession }: {
                         meta={meta}
                         onOpen={() => onOpenSession?.(item.session_id)}
                         onCreateTask={() => void createTaskFromCard(item)}
+                        onDelegate={(a) => void delegateFromCard(item, a)}
                       />
                     ))}
                   </div>
@@ -262,6 +278,7 @@ export function FeedView({ onNewTask, onOpenSession }: {
                   meta={meta}
                   onOpen={() => onOpenSession?.(item.session_id)}
                   onCreateTask={() => void createTaskFromCard(item)}
+                  onDelegate={(a) => void delegateFromCard(item, a)}
                 />
               );
             })}
@@ -274,15 +291,18 @@ export function FeedView({ onNewTask, onOpenSession }: {
 
 // ── Feed Card ──────────────────────────────────────────────────────────────
 function FeedCard({
-  item, meta, onOpen, onCreateTask, onSummarize,
+  item, meta, onOpen, onCreateTask, onSummarize, onDelegate,
 }: {
   item: FeedItem;
   meta: { icon: typeof Mail; color: string; label: string };
   onOpen: () => void;
   onCreateTask: () => void;
   onSummarize?: () => void;
+  onDelegate?: (assignee: string) => void;
 }) {
   const Icon = meta.icon;
+  const [showDelegate, setShowDelegate] = useState(false);
+  const [assignee, setAssignee] = useState("");
   return (
     <div
       className="group p-3 rounded-lg border border-ac-border bg-ac-surface hover:border-ac-brand-border transition-colors cursor-pointer"
@@ -326,7 +346,31 @@ function FeedCard({
         >
           <ChevronRight className="w-2.5 h-2.5 inline" /> Открыть
         </button>
+        {onDelegate && (
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowDelegate(!showDelegate); }}
+            className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
+          >
+            👤 Делегировать
+          </button>
+        )}
       </div>
+      {/* Delegate inline form */}
+      {showDelegate && onDelegate && (
+        <div className="flex gap-1 mt-1.5 ml-10" onClick={(e) => e.stopPropagation()}>
+          <input
+            className="ac-input flex-1 px-2 py-1 text-xs"
+            placeholder="Имя исполнителя"
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { onDelegate(assignee); setShowDelegate(false); setAssignee(""); } }}
+          />
+          <button
+            onClick={() => { onDelegate(assignee); setShowDelegate(false); setAssignee(""); }}
+            className="ac-btn px-2 py-1 text-xs"
+          >OK</button>
+        </div>
+      )}
     </div>
   );
 }

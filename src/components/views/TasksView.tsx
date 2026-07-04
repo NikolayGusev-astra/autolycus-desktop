@@ -15,6 +15,7 @@ interface Task {
   due_date: string | null;
   project_id: number | null;
   assignee: string;
+  labels: string;
 }
 interface Project { id: number; name: string; color: string; }
 
@@ -34,6 +35,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const [dueDate, setDueDate] = useState("");
   const [projId, setProjId] = useState<number | null>(projectId ?? null);
   const [assignee, setAssignee] = useState("");
+  const [labels, setLabels] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -64,7 +66,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const remove = async (id: number) => { await invoke("delete_task_cmd", { id, profile: null }); void load(); };
 
   const saveEdit = async (task: Task) => {
-    await invoke("update_task_cmd", { id: task.id, title: title.trim() || undefined, priority, dueDate: dueDate || undefined, projectId: projId, assignee: assignee.trim() || undefined, profile: null });
+    await invoke("update_task_cmd", { id: task.id, title: title.trim() || undefined, priority, dueDate: dueDate || undefined, projectId: projId, assignee: assignee.trim() || undefined, labels: labels.trim() || undefined, profile: null });
     setEditingId(null); void load();
   };
 
@@ -75,6 +77,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
     setDueDate(task.due_date || "");
     setProjId(task.project_id ?? null);
     setAssignee(task.assignee || "");
+    setLabels(task.labels || "");
   };
 
   const projName = (pid: number | null) => projects.find((p) => p.id === pid)?.name;
@@ -111,6 +114,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
               </select>
             )}
             <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.assignee")} value={assignee} onChange={(e) => setAssignee(e.target.value)} />
+            <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.labelsPh")} value={labels} onChange={(e) => setLabels(e.target.value)} />
             <button onClick={() => editingId !== null ? saveEdit(tasks.find((x) => x.id === editingId)!) : create()} className="ac-btn px-4 py-2 text-sm">
               {editingId !== null ? t("btn.save") : t("btn.add")}
             </button>
@@ -142,6 +146,11 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
                   👤 {task.assignee}
                 </span>
               )}
+              {task.labels && task.labels.split(",").map((lb, i) => (
+                <span key={i} className="text-[10px] px-1.5 py-0.5 rounded-full bg-ac-brand-soft text-ac-brand">
+                  #{lb.trim()}
+                </span>
+              ))}
               <button onClick={() => startEdit(task)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg"><Pencil className="w-3.5 h-3.5" /></button>
               <button onClick={() => void remove(task.id)} className="p-1 rounded text-ac-faint hover:text-ac-red hover:bg-ac-bg"><Trash2 className="w-3.5 h-3.5" /></button>
             </div>
