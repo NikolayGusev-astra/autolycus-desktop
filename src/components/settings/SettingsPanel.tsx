@@ -68,7 +68,7 @@ type SettingsTab =
 // ── General tab ────────────────────────────────────────────────────────────
 function GeneralTab() {
   const { generalInfo, generalLoading, generalError, loadGeneralInfo } = useSettingsStore();
-  const { language, setLanguage } = useUIStore();
+  const { language, setLanguage, showTokenCounter, setShowTokenCounter } = useUIStore();
   // Theme MUST come from the ThemeProvider (which sets data-theme on <html>);
   // the old code used uiStore.darkMode + settingsStore.setTheme (which only
   // wrote .env) → switching themes did nothing visually.
@@ -141,6 +141,15 @@ function GeneralTab() {
         ) : generalInfo ? (
           <p className="text-sm font-mono text-ac-ink break-all">{generalInfo.hermes_home}</p>
         ) : null}
+      </div>
+
+      {/* Token counter toggle */}
+      <div className="flex items-center justify-between border-t border-ac-border pt-4">
+        <div>
+          <label className="ac-section-title block">{t("settings.tokenCounter")}</label>
+          <p className="text-[11px] text-ac-muted">{t("settings.tokenCounterHint")}</p>
+        </div>
+        <Switch checked={showTokenCounter} onChange={setShowTokenCounter} />
       </div>
     </div>
   );
@@ -547,11 +556,16 @@ function ModelsTab() {
   const [newModel, setNewModel] = useState("");
   const [newBaseUrl, setNewBaseUrl] = useState("https://openrouter.ai/api/v1");
   const [addStatus, setAddStatus] = useState("");
+  // Available models from gateway /v1/models
+  const [apiModels, setApiModels] = useState<string[]>([]);
+  const [apiModelsLoading, setApiModelsLoading] = useState(false);
 
-  // Load models on mount
+  // Load models on mount + fetch available models from gateway
   useEffect(() => {
     loadModels();
     loadModelConfig();
+    setApiModelsLoading(true);
+    invoke<string[]>("list_models_api_cmd").then(setApiModels).catch(() => setApiModels([])).finally(() => setApiModelsLoading(false));
   }, [loadModels, loadModelConfig]);
 
   const handleAddModel = async () => {
@@ -625,6 +639,16 @@ function ModelsTab() {
             </div>
             <div>
               <label className="text-[11px] text-ac-muted mb-1 block">{t("model_field_label")}</label>
+              {apiModels.length > 0 && (
+                <select
+                  className="ac-input w-full px-3 py-2 text-sm mb-1.5 font-mono"
+                  value=""
+                  onChange={(e) => e.target.value && setNewModel(e.target.value)}
+                >
+                  <option value="">{apiModelsLoading ? "..." : t("settings.pickModel")}</option>
+                  {apiModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              )}
               <input
                 type="text"
                 value={newModel}

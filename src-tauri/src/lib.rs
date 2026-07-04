@@ -716,6 +716,41 @@ async fn gateway_status_cmd(
     Ok(gateway::is_gateway_running(&state.gateway, profile.as_deref()))
 }
 
+/// Fetch available models from the gateway's /v1/models endpoint.
+#[tauri::command]
+async fn list_models_api_cmd(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let port = gateway::get_gateway_port(&state.gateway, None);
+    if port.is_none() {
+        return Ok(Vec::new());
+    }
+    let port = port.unwrap();
+    let hermes_home = state.hermes_home().unwrap_or_else(|_| config::resolve_hermes_home());
+    let key = config::get_api_server_key(&hermes_home, None)
+        .or_else(|| {
+            dirs::home_dir().and_then(|h| config::get_api_server_key(&h.join(".hermes"), None))
+        })
+        .unwrap_or_default();
+    let url = format!("http://127.0.0.1:{}/v1/models", port);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP client: {}", e))?;
+    let mut req = client.get(&url);
+    if !key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", key));
+    }
+    let resp = req.send().await.map_err(|e| format!("models request: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+    let models: Vec<String> = v.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    Ok(models)
+}
+
 /// Get gateway port
 #[tauri::command]
 async fn get_gateway_port_cmd(
@@ -1907,6 +1942,7 @@ pub fn run() {
             start_gateway_cmd,
             stop_gateway_cmd,
             gateway_status_cmd,
+            list_models_api_cmd,
             get_gateway_port_cmd,
             // Chat
             send_message_cmd,

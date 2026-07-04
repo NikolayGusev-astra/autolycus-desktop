@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useUIStore } from "../../stores/uiStore";
 import { Search, Wifi, WifiOff } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 
@@ -12,7 +13,8 @@ interface HeaderProps {
 }
 
 export function Header({ onSearch }: HeaderProps) {
-  const { connected } = useGatewayStore();
+  const { connected, pipelineStatus } = useGatewayStore();
+  const { showTokenCounter } = useUIStore();
   const [query, setQuery] = useState("");
   const { t } = useTranslation();
 
@@ -43,6 +45,24 @@ export function Header({ onSearch }: HeaderProps) {
       <div className="ml-auto flex items-center gap-4">
         {/* Current date */}
         <span className="text-sm text-ac-muted hidden md:inline capitalize">{today}</span>
+
+        {/* Token counter (optional) */}
+        {showTokenCounter && pipelineStatus.tokensUsed !== undefined && (
+          <span className="text-[11px] text-ac-muted font-mono">
+            {pipelineStatus.tokensUsed >= 1000
+              ? `${(pipelineStatus.tokensUsed / 1000).toFixed(1)}K`
+              : pipelineStatus.tokensUsed}
+            {pipelineStatus.tokensLimit ? `/${(pipelineStatus.tokensLimit / 1000).toFixed(0)}K` : ""}
+            {pipelineStatus.costUsd !== undefined ? ` · $${pipelineStatus.costUsd.toFixed(3)}` : ""}
+          </span>
+        )}
+
+        {/* Model badge (optional) */}
+        {showTokenCounter && pipelineStatus.model && (
+          <span className="text-[10px] text-ac-faint font-mono hidden lg:inline truncate max-w-32">
+            {pipelineStatus.model}
+          </span>
+        )}
 
         {/* Connection badge */}
         <div

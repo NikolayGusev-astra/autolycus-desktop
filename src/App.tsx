@@ -288,7 +288,6 @@ export function App() {
           ) : activeView === "dashboard" ? (
             <div className="flex-1 overflow-y-auto">
               <FeedView
-                onOpenChat={() => setActiveView("chat")}
                 onNewTask={() => setActiveView("tasks")}
                 onOpenSession={async (sid) => {
                   try {
