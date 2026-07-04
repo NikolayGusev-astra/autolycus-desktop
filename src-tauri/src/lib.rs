@@ -1716,9 +1716,9 @@ async fn delete_task_cmd(state: State<'_, AppState>, id: i64, profile: Option<St
     productivity::delete_task(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, profile: Option<String>) -> Result<(), String> {
+async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, assignee: Option<String>, profile: Option<String>) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
-    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id)
+    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id, assignee.as_deref())
 }
 #[tauri::command]
 async fn list_goals_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Goal>, String> {

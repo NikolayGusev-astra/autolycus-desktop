@@ -106,6 +106,15 @@ export function FeedView({ onNewTask, onOpenSession }: {
     }
   }, []);
 
+  // Auto-generate unified briefing once on mount (after items load).
+  const autoBriefRef = useRef(false);
+  useEffect(() => {
+    if (!autoBriefRef.current && items.length > 0 && !briefings["unified"] && briefingLoading === null) {
+      autoBriefRef.current = true;
+      void generateBriefing(null);
+    }
+  }, [items, briefings, briefingLoading, generateBriefing]);
+
   // ── Create task from a feed card ─────────────────────────────────────────
   const createTaskFromCard = async (item: FeedItem) => {
     const title = item.title || item.preview?.slice(0, 80) || `Из ${item.source}`;
@@ -265,12 +274,13 @@ export function FeedView({ onNewTask, onOpenSession }: {
 
 // ── Feed Card ──────────────────────────────────────────────────────────────
 function FeedCard({
-  item, meta, onOpen, onCreateTask,
+  item, meta, onOpen, onCreateTask, onSummarize,
 }: {
   item: FeedItem;
   meta: { icon: typeof Mail; color: string; label: string };
   onOpen: () => void;
   onCreateTask: () => void;
+  onSummarize?: () => void;
 }) {
   const Icon = meta.icon;
   return (
@@ -293,17 +303,29 @@ function FeedCard({
             <p className="text-[11px] text-ac-muted truncate mt-0.5">{item.preview}</p>
           )}
         </div>
-        {/* Quick actions */}
-        <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      </div>
+      {/* Generative-UI quick actions */}
+      <div className="flex gap-1 mt-2 ml-10">
+        <button
+          onClick={(e) => { e.stopPropagation(); onCreateTask(); }}
+          className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
+        >
+          <ListChecks className="w-2.5 h-2.5 inline" /> {t_global("feed.toTask")}
+        </button>
+        {onSummarize && (
           <button
-            onClick={(e) => { e.stopPropagation(); onCreateTask(); }}
-            className="p-1 rounded text-ac-faint hover:text-ac-brand"
-            title={t_global("feed.toTask")}
+            onClick={(e) => { e.stopPropagation(); onSummarize(); }}
+            className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
           >
-            <ListChecks className="w-3 h-3" />
+            <Sparkles className="w-2.5 h-2.5 inline" /> Резюме
           </button>
-          <ChevronRight className="w-3 h-3 text-ac-faint mt-1" />
-        </div>
+        )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onOpen(); }}
+          className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
+        >
+          <ChevronRight className="w-2.5 h-2.5 inline" /> Открыть
+        </button>
       </div>
     </div>
   );

@@ -20,6 +20,7 @@ import { GoalsView } from "./components/views/GoalsView";
 import { ProjectsView } from "./components/views/ProjectsView";
 import { ProtocolsView } from "./components/views/ProtocolsView";
 import { StatsView } from "./components/views/StatsView";
+import { SelfDiagModal } from "./components/SelfDiagModal";
 import { useTranslation as useTranslationHook } from "./hooks/useTranslation";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
@@ -343,20 +344,9 @@ export function App() {
         <StatusBar />
       </div>
 
-      {/* Self-diagnosis modal placeholder */}
+      {/* Self-diagnosis modal — mood/energy check-in */}
       {selfDiagOpen && (
-        <div className="ac-modal-overlay" onClick={() => setSelfDiagOpen(false)}>
-          <div className="ac-modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
-            <p className="text-sm text-ac-ink mb-3">{t("nav.selfDiagnosis")}</p>
-            <p className="text-xs text-ac-muted mb-4">{t("selfDiag.hint")}</p>
-            <textarea className="ac-input w-full px-3 py-2 text-sm" rows={3} placeholder={t("selfDiag.placeholder")} />
-            <div className="flex justify-end gap-2 mt-4">
-              <button onClick={() => setSelfDiagOpen(false)} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md">
-                {t("btn.close")}
-              </button>
-            </div>
-          </div>
-        </div>
+        <SelfDiagModal onClose={() => setSelfDiagOpen(false)} />
       )}
     </div>
   );

@@ -14,6 +14,7 @@ interface Task {
   priority: number;
   due_date: string | null;
   project_id: number | null;
+  assignee: string;
 }
 interface Project { id: number; name: string; color: string; }
 
@@ -32,6 +33,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const [priority, setPriority] = useState(3);
   const [dueDate, setDueDate] = useState("");
   const [projId, setProjId] = useState<number | null>(projectId ?? null);
+  const [assignee, setAssignee] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,7 +64,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const remove = async (id: number) => { await invoke("delete_task_cmd", { id, profile: null }); void load(); };
 
   const saveEdit = async (task: Task) => {
-    await invoke("update_task_cmd", { id: task.id, title: title.trim() || undefined, priority, dueDate: dueDate || undefined, projectId: projId, profile: null });
+    await invoke("update_task_cmd", { id: task.id, title: title.trim() || undefined, priority, dueDate: dueDate || undefined, projectId: projId, assignee: assignee.trim() || undefined, profile: null });
     setEditingId(null); void load();
   };
 
@@ -72,6 +74,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
     setPriority(task.priority);
     setDueDate(task.due_date || "");
     setProjId(task.project_id ?? null);
+    setAssignee(task.assignee || "");
   };
 
   const projName = (pid: number | null) => projects.find((p) => p.id === pid)?.name;
@@ -107,6 +110,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
+            <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.assignee")} value={assignee} onChange={(e) => setAssignee(e.target.value)} />
             <button onClick={() => editingId !== null ? saveEdit(tasks.find((x) => x.id === editingId)!) : create()} className="ac-btn px-4 py-2 text-sm">
               {editingId !== null ? t("btn.save") : t("btn.add")}
             </button>
@@ -131,6 +135,11 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
               {task.project_id && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: projColor(task.project_id) + "22", color: projColor(task.project_id) }}>
                   {projName(task.project_id)}
+                </span>
+              )}
+              {task.assignee && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-ac-surface-2 text-ac-muted flex items-center gap-0.5">
+                  👤 {task.assignee}
                 </span>
               )}
               <button onClick={() => startEdit(task)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg"><Pencil className="w-3.5 h-3.5" /></button>
