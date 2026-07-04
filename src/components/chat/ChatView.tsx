@@ -4,16 +4,17 @@
 import { useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { SquarePen } from "lucide-react";
+import { SquarePen, PanelRight } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import type { PipelineStatus, ApprovalRequest } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 
-export function ChatView() {
+export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boolean; onToggleHistory?: () => void }) {
   const {
     currentSessionId,
+    setCurrentSession,
     addMessage,
     updateMessage,
     appendToken,
@@ -31,24 +32,15 @@ export function ChatView() {
   // eliminating the "last message" race that lost/corrupted tokens.
   const streamingMsgIdRef = useRef<string | null>(null);
 
-  // Fetch gateway status on mount (when connected)
+  // Fetch gateway status on mount (when connected).
+  // gateway_status_cmd returns a bool (running?), not a struct. Pipeline
+  // metrics (model/tokens/cost) arrive via the "pipeline_status" event instead.
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const status = await invoke<{
-          model?: string;
-          tokens_used?: number;
-          tokens_limit?: number;
-          cost_usd?: number;
-        }>("gateway_status_cmd");
-        if (status) {
-          setPipelineStatus({
-            backend: "connected",
-            model: status.model,
-            tokensUsed: status.tokens_used,
-            tokensLimit: status.tokens_limit,
-            costUsd: status.cost_usd,
-          });
+        const running = await invoke<boolean>("gateway_status_cmd");
+        if (running) {
+          setPipelineStatus({ backend: "connected" });
         }
       } catch {
         // gateway_status_cmd may not exist yet — silently ignore
@@ -203,6 +195,12 @@ export function ChatView() {
           setAgentStatus("idle");
           streamingMsgIdRef.current = null;
           runningToolRef.current = null;
+          // Capture the session id the backend assigned to this turn, so
+          // subsequent sends continue in the same session and HistoryPanel
+          // reflects the real conversation.
+          if (payload.session_id) {
+            setCurrentSession(payload.session_id);
+          }
           break;
         }
 
@@ -309,18 +307,16 @@ export function ChatView() {
           mime: a.mime,
         })),
       };
-      addMessage(userMsg);
-
-      // Build conversation history from prior messages so the agent has
-      // context (the previous implementation sent history:null, so every turn
-      // was amnesic). Keep the last few real turns (skip transient streaming
-      // / tool-status markers that carry no user content).
+      // Snapshot history BEFORE adding the user message, so the agent doesn't
+      // see the current turn duplicated (text + history entry).
       const prior = useGatewayStore.getState().messages;
       const HISTORY_TURNS = 10;
       const history = prior
         .filter((m) => !m.isStreaming && (m.role === "user" || m.role === "assistant"))
         .slice(-HISTORY_TURNS)
         .map((m) => ({ role: m.role, content: m.content }));
+
+      addMessage(userMsg);
 
       try {
         // Fire the message and DON'T await the full response — streaming
@@ -365,6 +361,15 @@ export function ChatView() {
           <SquarePen className="w-3.5 h-3.5" />
           {t("chat.newSession")}
         </button>
+        {onToggleHistory && (
+          <button
+            onClick={onToggleHistory}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md transition-colors ${historyOpen ? "text-ac-brand bg-ac-brand-soft" : "text-ac-muted hover:bg-ac-surface"}`}
+            title={t("nav.sessions")}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
       <div className="flex-1 overflow-hidden">
         <MessageList />

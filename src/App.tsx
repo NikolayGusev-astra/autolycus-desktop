@@ -32,13 +32,10 @@ type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [selfDiagOpen, setSelfDiagOpen] = useState(false);
   // Drill-down navigation: Goal → Projects → Tasks
   const [drillGoalId, setDrillGoalId] = useState<number | null>(null);
-  const [drillGoalName, setDrillGoalName] = useState<string | undefined>(undefined);
-  void setDrillGoalName;
   const [drillProjectId, setDrillProjectId] = useState<number | null>(null);
   const [drillProjectName, setDrillProjectName] = useState<string | undefined>(undefined);
   const [appVersion, setAppVersion] = useState<string>("");
@@ -276,7 +273,7 @@ export function App() {
           {activeView === "chat" ? (
             <div className="flex flex-1 min-w-0">
               <div className="flex-1 flex flex-col overflow-hidden">
-                <ChatView />
+                <ChatView historyOpen={historyOpen} onToggleHistory={() => setHistoryOpen((v) => !v)} />
                 {pendingApproval && (
                   <ApprovalCard
                     request={pendingApproval}
@@ -293,6 +290,16 @@ export function App() {
               <FeedView
                 onOpenChat={() => setActiveView("chat")}
                 onNewTask={() => setActiveView("tasks")}
+                onOpenSession={async (sid) => {
+                  try {
+                    const msgs = await invoke<Array<{ id: number; role: string; content: string; timestamp: number }>>("get_session_messages_cmd", { sessionId: sid, profile: null });
+                    const mapped = msgs.filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({
+                      id: `hist-${m.id}`, role: m.role as "user" | "assistant", content: m.content, timestamp: m.timestamp,
+                    }));
+                    useGatewayStore.setState({ messages: mapped, currentSessionId: sid });
+                  } catch (e) { console.error("feed session load", e); }
+                  setActiveView("chat");
+                }}
               />
             </div>
           ) : activeView === "tasks" ? (
@@ -313,7 +320,6 @@ export function App() {
             <div className="flex-1 overflow-y-auto">
               <ProjectsView
                 goalId={drillGoalId}
-                goalTitle={drillGoalName}
                 onBack={() => { setDrillGoalId(null); setActiveView("goals"); }}
                 onOpenTasks={(pid, pname) => { setDrillProjectId(pid); setDrillProjectName(pname); setActiveView("tasks"); }}
               />
@@ -337,11 +343,6 @@ export function App() {
 
         <StatusBar />
       </div>
-
-      {/* Settings modal (also reachable when not on the settings view). */}
-      {settingsOpen && (
-        <SettingsPanel onClose={() => setSettingsOpen(false)} />
-      )}
 
       {/* Self-diagnosis modal placeholder */}
       {selfDiagOpen && (

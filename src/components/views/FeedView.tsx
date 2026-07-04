@@ -42,7 +42,7 @@ function timeAgo(ts: number): string {
   return `${Math.floor(diff / 86400)} дн назад`;
 }
 
-export function FeedView({ onOpenChat, onNewTask }: { onOpenChat?: () => void; onNewTask?: () => void }) {
+export function FeedView({ onOpenChat, onNewTask, onOpenSession }: { onOpenChat?: () => void; onNewTask?: () => void; onOpenSession?: (sessionId: string) => void }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -175,7 +175,7 @@ export function FeedView({ onOpenChat, onNewTask }: { onOpenChat?: () => void; o
               <div
                 key={item.session_id}
                 className="group p-3.5 rounded-lg border border-ac-border bg-ac-surface hover:border-ac-brand-border transition-colors cursor-pointer"
-                onClick={() => onOpenChat?.()}
+                onClick={() => onOpenSession ? onOpenSession(item.session_id) : onOpenChat?.()}
               >
                 <div className="flex items-start gap-3">
                   {/* Source icon */}
