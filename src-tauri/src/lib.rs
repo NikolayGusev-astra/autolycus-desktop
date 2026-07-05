@@ -45,6 +45,7 @@ pub use profiles::ProfileInfo;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use sessions::FeedItem;
 pub use ssh::SshState;
+pub use mcp::{McpServer, McpServerInput, McpCatalogEntry};
 
 // ── App State ─────────────────────────────────────────────────────────────
 
@@ -1429,6 +1430,85 @@ async fn apply_sources_to_env_cmd(
     Ok(())
 }
 
+// ── MCP Servers Commands ────────────────────────────────────────────────────
+
+/// List MCP servers
+#[tauri::command]
+async fn list_mcp_servers_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<mcp::McpServer>, String> {
+    let hermes_home = state.hermes_home()?;
+    Ok(mcp::list_mcp_servers(&hermes_home, profile.as_deref()))
+}
+
+/// Add MCP server
+#[tauri::command]
+async fn add_mcp_server_cmd(
+    state: State<'_, AppState>,
+    input: mcp::McpServerInput,
+    profile: Option<String>,
+) -> Result<mcp::McpServer, String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::add_mcp_server(&hermes_home, profile.as_deref(), &input)
+}
+
+/// Remove MCP server
+#[tauri::command]
+async fn remove_mcp_server_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::remove_mcp_server(&hermes_home, profile.as_deref(), &name)
+}
+
+/// Set MCP server enabled/disabled
+#[tauri::command]
+async fn set_mcp_server_enabled_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    enabled: bool,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::set_mcp_server_enabled(&hermes_home, profile.as_deref(), &name, enabled)
+}
+
+/// Test MCP server
+#[tauri::command]
+async fn test_mcp_server_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    profile: Option<String>,
+) -> Result<(bool, Option<String>, Option<Vec<mcp::McpToolInfo>>), String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::test_mcp_server(&hermes_home, profile.as_deref(), &name)
+}
+
+/// List MCP catalog
+#[tauri::command]
+async fn list_mcp_catalog_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<mcp::McpCatalogEntry>, String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::list_mcp_catalog(&hermes_home, profile.as_deref())
+}
+
+/// Install MCP catalog entry
+#[tauri::command]
+async fn install_mcp_catalog_entry_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    env: Option<std::collections::HashMap<String, String>>,
+    profile: Option<String>,
+) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::install_mcp_catalog_entry(&hermes_home, profile.as_deref(), &name, env)
+}
+
 // ── Media Commands ────────────────────────────────────────────────────────
 
 /// Get media info for a file
@@ -2264,6 +2344,14 @@ pub fn run() {
             update_jira_source_cmd,
             remove_jira_source_cmd,
             apply_sources_to_env_cmd,
+            // MCP servers
+            list_mcp_servers_cmd,
+            add_mcp_server_cmd,
+            remove_mcp_server_cmd,
+            set_mcp_server_enabled_cmd,
+            test_mcp_server_cmd,
+            list_mcp_catalog_cmd,
+            install_mcp_catalog_entry_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

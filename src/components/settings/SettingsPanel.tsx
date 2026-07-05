@@ -1683,6 +1683,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     { id: "tools", label: t("settings.tools"), icon: Wrench },
     { id: "skills", label: t("settings.skills"), icon: BookOpen },
     { id: "cron", label: t("settings.cron"), icon: Clock },
+    { id: "mcp", label: t("settings.mcp"), icon: Server },
     { id: "telegram", label: t("settings_telegram"), icon: Send },
     { id: "terminal", label: t("settings_terminal"), icon: TermIcon },
     { id: "diagnose", label: t("settings.diagnose"), icon: Stethoscope },
@@ -1760,6 +1761,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             )}
             {activeTab === "skills" && <SkillsTab />}
             {activeTab === "cron" && <CronTab />}
+            {activeTab === "mcp" && <McpTab />}
             {activeTab === "about" && (
               <div className="-m-4"><Versions /></div>
             )}
