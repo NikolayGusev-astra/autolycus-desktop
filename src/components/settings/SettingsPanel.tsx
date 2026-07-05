@@ -37,6 +37,8 @@ import {
   Edit3,
   Loader,
   Zap,
+  Clock,
+  BookOpen,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";
@@ -68,7 +70,9 @@ type SettingsTab =
   | "telegram"
   | "terminal_old"
   | "diagnose"
-  | "about";
+  | "about"
+  | "skills"
+  | "cron";
 
 // ── General tab ────────────────────────────────────────────────────────────
 function GeneralTab() {
@@ -1355,6 +1359,310 @@ function SourcesTab() {
   );
 }
 
+// ── Skills Tab ──────────────────────────────────────────────────────────────
+function SkillsTab() {
+  const { t } = useTranslation();
+  const [skills, setSkills] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await invoke<any[]>("list_installed_skills_cmd", { profile: null });
+        setSkills(result);
+      } catch (e) {
+        console.error("Failed to load skills:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const handleInstall = async () => {
+    const name = prompt(t("settings.skillInstallPrompt"));
+    if (!name) return;
+    try {
+      await invoke("install_skill_cmd", { identifier: name, profile: null });
+      setStatus("✓ " + t("settings.skillInstalled"));
+      setTimeout(() => setStatus(""), 2000);
+      // Reload
+      const result = await invoke<any[]>("list_installed_skills_cmd", { profile: null });
+      setSkills(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleUninstall = async (name: string) => {
+    if (!confirm(t("settings.skillUninstallConfirm", { name }))) return;
+    try {
+      await invoke("uninstall_skill_cmd", { name, profile: null });
+      setStatus("✓ " + t("settings.skillUninstalled"));
+      setTimeout(() => setStatus(""), 2000);
+      const result = await invoke<any[]>("list_installed_skills_cmd", { profile: null });
+      setSkills(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleView = async (name: string) => {
+    try {
+      const content = await invoke<string>("get_skill_content_cmd", { skill_name: name, profile: null });
+      // Show in a modal or alert for now
+      alert(`${name}:\n\n${content.slice(0, 2000)}`);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader className="w-6 h-6 animate-spin text-ac-muted" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-ac-ink">{t("settings.skills")}</h3>
+        <button onClick={handleInstall} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+          <Plus className="w-3.5 h-3.5" /> {t("settings.skillInstall")}
+        </button>
+      </div>
+
+      {skills.length === 0 ? (
+        <p className="text-sm text-ac-muted text-center py-8">{t("settings.skillsEmpty")}</p>
+      ) : (
+        <div className="space-y-2 max-h-96 overflow-y-auto">
+          {skills.map((skill) => (
+            <div key={skill.name} className="flex items-center justify-between p-3 border border-ac-border bg-ac-surface rounded-lg">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-ac-ink truncate">{skill.name}</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-ac-brand-soft text-ac-brand">{skill.category}</span>
+                </div>
+                <p className="text-xs text-ac-muted mt-1 truncate">{skill.description}</p>
+              </div>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => handleView(skill.name)}
+                  className="px-2.5 py-1 text-xs border border-ac-border text-ac-muted rounded hover:bg-ac-surface hover:text-ac-brand"
+                  title={t("settings.skillView")}
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => handleUninstall(skill.name)}
+                  className="px-2.5 py-1 text-xs border border-ac-border text-ac-red/70 rounded hover:bg-ac-red/5"
+                  title={t("settings.skillUninstall")}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+    </div>
+  );
+}
+
+// ── Cron Tab ────────────────────────────────────────────────────────────────
+function CronTab() {
+  const { t } = useTranslation();
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [formData, setFormData] = useState({
+    name: "",
+    schedule: "",
+    prompt: "",
+    deliver: "",
+  });
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await invoke<any[]>("list_cron_jobs_cmd", { include_disabled: true, profile: null });
+        setJobs(result);
+      } catch (e) {
+        console.error("Failed to load cron jobs:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const handleCreate = async () => {
+    if (!formData.name.trim() || !formData.schedule.trim()) {
+      setStatus("✗ Name and schedule are required");
+      return;
+    }
+    try {
+      await invoke("create_cron_job_cmd", {
+        schedule: formData.schedule,
+        prompt: formData.prompt || null,
+        name: formData.name,
+        deliver: formData.deliver || null,
+        profile: null,
+      });
+      setStatus("✓ " + t("settings.cronCreated"));
+      setTimeout(() => setStatus(""), 2000);
+      setShowForm(false);
+      setFormData({ name: "", schedule: "", prompt: "", deliver: "" });
+      const result = await invoke<any[]>("list_cron_jobs_cmd", { include_disabled: true, profile: null });
+      setJobs(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleToggle = async (job: any) => {
+    try {
+      await invoke(job.enabled ? "pause_cron_job_cmd" : "resume_cron_job_cmd", { job_id: job.id, profile: null });
+      setStatus("✓ " + t("settings.cronToggled"));
+      setTimeout(() => setStatus(""), 2000);
+      const result = await invoke<any[]>("list_cron_jobs_cmd", { include_disabled: true, profile: null });
+      setJobs(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleTrigger = async (job: any) => {
+    try {
+      await invoke("trigger_cron_job_cmd", { job_id: job.id, profile: null });
+      setStatus("✓ " + t("settings.cronTriggered"));
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm(t("settings.cronDeleteConfirm"))) return;
+    try {
+      await invoke("remove_cron_job_cmd", { job_id: id, profile: null });
+      setStatus("✓ " + t("settings.cronDeleted"));
+      setTimeout(() => setStatus(""), 2000);
+      const result = await invoke<any[]>("list_cron_jobs_cmd", { include_disabled: true, profile: null });
+      setJobs(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader className="w-6 h-6 animate-spin text-ac-muted" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-ac-ink">{t("settings.cron")}</h3>
+        <button onClick={() => setShowForm(!showForm)} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+          <Plus className="w-3.5 h-3.5" /> {t("settings.cronAdd")}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="p-4 border border-ac-border bg-ac-surface rounded-lg space-y-3">
+          <input
+            className="ac-input w-full px-3 py-2 text-sm"
+            placeholder={t("settings.cronName")}
+            value={formData.name}
+            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+          />
+          <input
+            className="ac-input w-full px-3 py-2 text-sm font-mono"
+            placeholder="*/5 * * * * (every 5 min)"
+            value={formData.schedule}
+            onChange={(e) => setFormData({ ...formData, schedule: e.target.value })}
+          />
+          <textarea
+            className="ac-input w-full px-3 py-2 text-sm"
+            rows={3}
+            placeholder={t("settings.cronPrompt")}
+            value={formData.prompt}
+            onChange={(e) => setFormData({ ...formData, prompt: e.target.value })}
+          />
+          <input
+            className="ac-input w-full px-3 py-2 text-sm"
+            placeholder="email, telegram, webhook"
+            value={formData.deliver}
+            onChange={(e) => setFormData({ ...formData, deliver: e.target.value })}
+          />
+          <div className="flex gap-2">
+            <button onClick={handleCreate} className="ac-btn px-4 py-2 text-sm">{t("btn.save")}</button>
+            <button onClick={() => { setShowForm(false); setFormData({ name: "", schedule: "", prompt: "", deliver: "" }); }} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md">{t("btn.cancel")}</button>
+          </div>
+        </div>
+      )}
+
+      {jobs.length === 0 ? (
+        <p className="text-sm text-ac-muted text-center py-8">{t("settings.cronEmpty")}</p>
+      ) : (
+        <div className="space-y-2">
+          {jobs.map((job) => (
+            <div key={job.id} className="group p-3 border border-ac-border bg-ac-surface rounded-lg">
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm font-medium text-ac-ink truncate">{job.name}</span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${job.enabled ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
+                      {job.enabled ? t("settings.cronActive") : t("settings.cronPaused")}
+                    </span>
+                  </div>
+                  <p className="text-xs text-ac-muted truncate">{job.schedule}</p>
+                  {job.prompt && <p className="text-[11px] text-ac-muted mt-1 truncate">{job.prompt}</p>}
+                  {job.deliver && job.deliver.length > 0 && (
+                    <p className="text-[10px] text-ac-muted mt-0.5">→ {job.deliver.join(", ")}</p>
+                  )}
+                </div>
+                <div className="flex gap-1 ml-4">
+                  <button
+                    onClick={() => handleToggle(job)}
+                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-muted rounded hover:bg-ac-surface hover:text-ac-brand"
+                  >
+                    {job.enabled ? t("settings.cronPause") : t("settings.cronResume")}
+                  </button>
+                  <button
+                    onClick={() => handleTrigger(job)}
+                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-brand rounded hover:bg-ac-brand/10"
+                  >
+                    {t("settings.cronTrigger")}
+                  </button>
+                  <button
+                    onClick={() => handleDelete(job.id)}
+                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-red/70 rounded hover:bg-ac-red/5"
+                  >
+                    <Trash2 className="w-3 h-3 inline" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+    </div>
+  );
+}
+
 // ── Main Settings Panel ───────────────────────────────────────────────────
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
@@ -1373,6 +1681,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     { id: "tts", label: "TTS", icon: Send },
     { id: "gateway", label: t("settings.gateway"), icon: Bot },
     { id: "tools", label: t("settings.tools"), icon: Wrench },
+    { id: "skills", label: t("settings.skills"), icon: BookOpen },
+    { id: "cron", label: t("settings.cron"), icon: Clock },
     { id: "telegram", label: t("settings_telegram"), icon: Send },
     { id: "terminal", label: t("settings_terminal"), icon: TermIcon },
     { id: "diagnose", label: t("settings.diagnose"), icon: Stethoscope },
@@ -1448,6 +1758,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             {activeTab === "diagnose" && (
               <div className="-m-4"><DiagnoseScreen /></div>
             )}
+            {activeTab === "skills" && <SkillsTab />}
+            {activeTab === "cron" && <CronTab />}
             {activeTab === "about" && (
               <div className="-m-4"><Versions /></div>
             )}
