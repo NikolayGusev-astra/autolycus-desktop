@@ -9,7 +9,7 @@
 // screens (GatewayScreen, ToolsScreen, DiagnoseScreen, ProvidersScreen,
 // ProfilesScreen, Versions) and an Appearance tab wired to the ThemeProvider.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   X,
@@ -32,6 +32,11 @@ import {
   Monitor,
   Mail,
   CheckSquare,
+  Plus,
+  Trash2,
+  Edit3,
+  Eye,
+  Zap,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";

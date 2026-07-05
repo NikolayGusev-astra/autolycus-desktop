@@ -23,6 +23,7 @@ mod registry;
 mod secrets;
 mod sessions;
 mod skills;
+mod sources;
 mod ssh;
 mod stt;
 mod telegram;
@@ -1275,6 +1276,159 @@ async fn load_telegram_config_cmd(
     Ok(telegram::load_config(&hermes_home))
 }
 
+// ── Sources Commands ────────────────────────────────────────────────────────
+
+/// List all sources
+#[tauri::command]
+async fn list_sources_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<sources::SourcesConfig, String> {
+    let hermes_home = state.hermes_home()?;
+    Ok(sources::SourcesConfig::load(&hermes_home, profile.as_deref()))
+}
+
+/// Add Telegram source
+#[tauri::command]
+async fn add_telegram_source_cmd(
+    state: State<'_, AppState>,
+    source: sources::TelegramSource,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    config.add_telegram(source);
+    config.save(&hermes_home, profile.as_deref())
+}
+
+/// Update Telegram source
+#[tauri::command]
+async fn update_telegram_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    source: sources::TelegramSource,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.update_telegram(&id, source);
+    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    Ok(ok)
+}
+
+/// Remove Telegram source
+#[tauri::command]
+async fn remove_telegram_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.remove_telegram(&id);
+    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    Ok(ok)
+}
+
+/// Add Email source
+#[tauri::command]
+async fn add_email_source_cmd(
+    state: State<'_, AppState>,
+    source: sources::EmailSource,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    config.add_email(source);
+    config.save(&hermes_home, profile.as_deref())
+}
+
+/// Update Email source
+#[tauri::command]
+async fn update_email_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    source: sources::EmailSource,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.update_email(&id, source);
+    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    Ok(ok)
+}
+
+/// Remove Email source
+#[tauri::command]
+async fn remove_email_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.remove_email(&id);
+    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    Ok(ok)
+}
+
+/// Add Jira source
+#[tauri::command]
+async fn add_jira_source_cmd(
+    state: State<'_, AppState>,
+    source: sources::JiraSource,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    config.add_jira(source);
+    config.save(&hermes_home, profile.as_deref())
+}
+
+/// Update Jira source
+#[tauri::command]
+async fn update_jira_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    source: sources::JiraSource,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.update_jira(&id, source);
+    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    Ok(ok)
+}
+
+/// Remove Jira source
+#[tauri::command]
+async fn remove_jira_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.remove_jira(&id);
+    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    Ok(ok)
+}
+
+/// Apply sources to Hermes .env (for backwards compatibility)
+#[tauri::command]
+async fn apply_sources_to_env_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    let config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let env_vars = config.to_env_vars();
+    for (key, value) in env_vars {
+        config::write_env_value(&hermes_home, profile.as_deref(), &key, &value)?;
+    }
+    Ok(())
+}
+
 // ── Media Commands ────────────────────────────────────────────────────────
 
 /// Get media info for a file
@@ -2098,6 +2252,18 @@ pub fn run() {
             list_conn_profiles_cmd,
             create_conn_profile_cmd,
             delete_conn_profile_cmd,
+            // Sources (multiple connectors)
+            list_sources_cmd,
+            add_telegram_source_cmd,
+            update_telegram_source_cmd,
+            remove_telegram_source_cmd,
+            add_email_source_cmd,
+            update_email_source_cmd,
+            remove_email_source_cmd,
+            add_jira_source_cmd,
+            update_jira_source_cmd,
+            remove_jira_source_cmd,
+            apply_sources_to_env_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
