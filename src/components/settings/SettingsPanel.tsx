@@ -72,7 +72,8 @@ type SettingsTab =
   | "diagnose"
   | "about"
   | "skills"
-  | "cron";
+  | "cron"
+  | "mcp";
 
 // ── General tab ────────────────────────────────────────────────────────────
 function GeneralTab() {
@@ -1647,6 +1648,231 @@ function CronTab() {
                   </button>
                   <button
                     onClick={() => handleDelete(job.id)}
+                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-red/70 rounded hover:bg-ac-red/5"
+                  >
+                    <Trash2 className="w-3 h-3 inline" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+    </div>
+  );
+}
+
+// ── MCP Tab ─────────────────────────────────────────────────────────────────
+function McpTab() {
+  const { t } = useTranslation();
+  const [servers, setServers] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [formData, setFormData] = useState({
+    name: "",
+    server_type: "http",
+    url: "",
+    command: "",
+    args: "",
+    auth: "",
+  });
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
+        setServers(result);
+      } catch (e) {
+        console.error("Failed to load MCP servers:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const handleAdd = async () => {
+    if (!formData.name.trim()) {
+      setStatus("✗ " + t("settings.mcpNameRequired"));
+      return;
+    }
+    if (formData.server_type === "http" && !formData.url.trim()) {
+      setStatus("✗ " + t("settings.mcpUrlRequired"));
+      return;
+    }
+    if (formData.server_type === "stdio" && !formData.command.trim()) {
+      setStatus("✗ " + t("settings.mcpCommandRequired"));
+      return;
+    }
+    try {
+      await invoke("add_mcp_server_cmd", {
+        input: {
+          name: formData.name,
+          server_type: formData.server_type,
+          url: formData.url || null,
+          command: formData.command || null,
+          args: formData.args ? formData.args.split(" ").filter(Boolean) : null,
+          env: null,
+          auth: formData.auth || null,
+        },
+        profile: null,
+      });
+      setStatus("✓ " + t("settings.mcpAdded"));
+      setTimeout(() => setStatus(""), 2000);
+      setShowForm(false);
+      setFormData({ name: "", server_type: "http", url: "", command: "", args: "", auth: "" });
+      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
+      setServers(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleRemove = async (name: string) => {
+    if (!confirm(t("settings.mcpRemoveConfirm", { name }))) return;
+    try {
+      await invoke("remove_mcp_server_cmd", { name, profile: null });
+      setStatus("✓ " + t("settings.mcpRemoved"));
+      setTimeout(() => setStatus(""), 2000);
+      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
+      setServers(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleToggle = async (server: any) => {
+    try {
+      await invoke("set_mcp_server_enabled_cmd", { name: server.name, enabled: !server.enabled, profile: null });
+      setStatus("✓ " + t("settings.mcpToggled"));
+      setTimeout(() => setStatus(""), 2000);
+      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
+      setServers(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const handleTest = async (server: any) => {
+    try {
+      setStatus("⏳ " + t("settings.mcpTesting"));
+      const result = await invoke<[boolean, string | null, any[] | null]>("test_mcp_server_cmd", { name: server.name, profile: null });
+      if (result[0]) {
+        setStatus("✓ " + t("settings.mcpTestOk"));
+      } else {
+        setStatus("✗ " + t("settings.mcpTestFailed"));
+      }
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader className="w-6 h-6 animate-spin text-ac-muted" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-ac-ink">{t("settings.mcp")}</h3>
+        <button onClick={() => setShowForm(!showForm)} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+          <Plus className="w-3.5 h-3.5" /> {t("settings.mcpAdd")}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="p-4 border border-ac-border bg-ac-surface rounded-lg space-y-3">
+          <input
+            className="ac-input w-full px-3 py-2 text-sm"
+            placeholder={t("settings.mcpName")}
+            value={formData.name}
+            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+          />
+          <select
+            className="ac-input w-full px-3 py-2 text-sm"
+            value={formData.server_type}
+            onChange={(e) => setFormData({ ...formData, server_type: e.target.value })}
+          >
+            <option value="http">{t("settings.mcpHttp")}</option>
+            <option value="stdio">{t("settings.mcpStdio")}</option>
+          </select>
+          {formData.server_type === "http" && (
+            <input
+              className="ac-input w-full px-3 py-2 text-sm font-mono"
+              placeholder="http://localhost:8080/mcp"
+              value={formData.url}
+              onChange={(e) => setFormData({ ...formData, url: e.target.value })}
+            />
+          )}
+          {formData.server_type === "stdio" && (
+            <>
+              <input
+                className="ac-input w-full px-3 py-2 text-sm"
+                placeholder="python"
+                value={formData.command}
+                onChange={(e) => setFormData({ ...formData, command: e.target.value })}
+              />
+              <input
+                className="ac-input w-full px-3 py-2 text-sm"
+                placeholder="-m server (space-separated)"
+                value={formData.args}
+                onChange={(e) => setFormData({ ...formData, args: e.target.value })}
+              />
+            </>
+          )}
+          <input
+            className="ac-input w-full px-3 py-2 text-sm"
+            placeholder="API key or Bearer token (optional)"
+            value={formData.auth}
+            onChange={(e) => setFormData({ ...formData, auth: e.target.value })}
+          />
+          <div className="flex gap-2">
+            <button onClick={handleAdd} className="ac-btn px-4 py-2 text-sm">{t("btn.save")}</button>
+            <button onClick={() => { setShowForm(false); setFormData({ name: "", server_type: "http", url: "", command: "", args: "", auth: "" }); }} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md">{t("btn.cancel")}</button>
+          </div>
+        </div>
+      )}
+
+      {servers.length === 0 ? (
+        <p className="text-sm text-ac-muted text-center py-8">{t("settings.mcpEmpty")}</p>
+      ) : (
+        <div className="space-y-2">
+          {servers.map((server) => (
+            <div key={server.name} className="group p-3 border border-ac-border bg-ac-surface rounded-lg">
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm font-medium text-ac-ink truncate">{server.name}</span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${server.enabled ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
+                      {server.enabled ? t("settings.mcpEnabled") : t("settings.mcpDisabled")}
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-ac-brand-soft text-ac-brand">{server.server_type}</span>
+                  </div>
+                  <p className="text-xs text-ac-muted truncate">{server.detail || "—"}</p>
+                </div>
+                <div className="flex gap-1 ml-4">
+                  <button
+                    onClick={() => handleToggle(server)}
+                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-muted rounded hover:bg-ac-surface hover:text-ac-brand"
+                  >
+                    {server.enabled ? t("settings.mcpDisable") : t("settings.mcpEnable")}
+                  </button>
+                  <button
+                    onClick={() => handleTest(server)}
+                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-brand rounded hover:bg-ac-brand/10"
+                  >
+                    {t("settings.mcpTest")}
+                  </button>
+                  <button
+                    onClick={() => handleRemove(server.name)}
                     className="px-2 py-1 text-[10px] border border-ac-border text-ac-red/70 rounded hover:bg-ac-red/5"
                   >
                     <Trash2 className="w-3 h-3 inline" />
