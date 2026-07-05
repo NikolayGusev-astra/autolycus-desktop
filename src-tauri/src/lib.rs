@@ -30,7 +30,6 @@ mod terminal;
 mod validation;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -544,7 +543,7 @@ fn save_provider_key_cmd(
     // agent picks them up immediately.
     if let (Some(p), Some(m)) = (provider, model) {
         let b = base_url.unwrap_or_default();
-        config::set_model_config(&hermes_home, None, &p, &m, &b);
+        let _ = config::set_model_config(&hermes_home, None, &p, &m, &b);
     }
     Ok(())
 }

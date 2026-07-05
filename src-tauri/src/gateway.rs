@@ -384,7 +384,7 @@ pub async fn restart_gateway(
     hermes_home: &PathBuf,
     profile: Option<&str>,
 ) -> GatewayStartResult {
-    stop_gateway(state, profile);
+    let _ = stop_gateway(state, profile);
     tokio::time::sleep(Duration::from_millis(500)).await;
     start_gateway(state, hermes_home, profile)
 }

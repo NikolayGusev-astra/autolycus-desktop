@@ -3,7 +3,7 @@
 // Supports drill-down: when projectId prop is set, only shows tasks for that project.
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, Trash2, Check, Loader, ChevronLeft, Pencil } from "lucide-react";
+import { Plus, Trash2, Check, Loader, ChevronLeft, Pencil, Users } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 
 interface Task {
@@ -18,6 +18,7 @@ interface Task {
   labels: string;
 }
 interface Project { id: number; name: string; color: string; }
+interface ConnectionProfile { id: number; name: string; username: string; }
 
 const PRIO_COLOR: Record<number, string> = { 1: "#f44", 2: "#f80", 3: "#fa0", 4: "#8a8", 5: "#888" };
 const PRIO_LABEL: Record<number, string> = { 1: "🔴", 2: "🟠", 3: "🟡", 4: "🟢", 5: "⚪" };
@@ -26,6 +27,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const { t } = useTranslation();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  // const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -36,16 +38,23 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const [projId, setProjId] = useState<number | null>(projectId ?? null);
   const [assignee, setAssignee] = useState("");
   const [labels, setLabels] = useState("");
+  const [assigneeSuggestions, setAssigneeSuggestions] = useState<string[]>([]);
+  const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [t1, p1] = await Promise.all([
+      const [t1, p1, prof1] = await Promise.all([
         invoke<Task[]>("list_tasks_cmd", { profile: null }),
         invoke<Project[]>("list_projects_cmd", { profile: null }),
+        invoke<ConnectionProfile[]>("list_conn_profiles_cmd", { profile: null }),
       ]);
       setTasks(projectId ? t1.filter((x) => x.project_id === projectId) : t1);
       setProjects(p1);
+      // Build assignee suggestions from existing task assignees + profile usernames
+      const existingAssignees = [...new Set(t1.map((x) => x.assignee).filter((a) => a))];
+      const profileUsernames = prof1.map((p) => p.username).filter((u) => u);
+      setAssigneeSuggestions([...new Set([...existingAssignees, ...profileUsernames])]);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, [projectId]);
@@ -113,7 +122,24 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
-            <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.assignee")} value={assignee} onChange={(e) => setAssignee(e.target.value)} />
+            <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.assignee")} value={assignee} onChange={(e) => { setAssignee(e.target.value); setShowAssigneeDropdown(true); }} onFocus={() => setShowAssigneeDropdown(true)} onBlur={() => setTimeout(() => setShowAssigneeDropdown(false), 150)} />
+            {showAssigneeDropdown && assigneeSuggestions.length > 0 && (
+              <div className="absolute z-10 mt-0.5 w-48 bg-ac-surface border border-ac-border rounded-md shadow-lg">
+                {assigneeSuggestions
+                  .filter((s) => s.toLowerCase().includes(assignee.toLowerCase()) || !assignee)
+                  .slice(0, 8)
+                  .map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => { setAssignee(s); setShowAssigneeDropdown(false); }}
+                      className="w-full px-3 py-1.5 text-sm text-ac-ink hover:bg-ac-brand-soft hover:text-ac-brand text-left"
+                    >
+                      <Users className="w-3.5 h-3.5 inline mr-1.5" />
+                      {s}
+                    </button>
+                  ))}
+              </div>
+            )}
             <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.labelsPh")} value={labels} onChange={(e) => setLabels(e.target.value)} />
             <button onClick={() => editingId !== null ? saveEdit(tasks.find((x) => x.id === editingId)!) : create()} className="ac-btn px-4 py-2 text-sm">
               {editingId !== null ? t("btn.save") : t("btn.add")}

@@ -2,6 +2,7 @@
 // Media file management — read, save, cleanup.
 // Ported from fathah/hermes-desktop src/main/media.ts (simplified)
 
+use base64::Engine;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -58,7 +59,7 @@ pub fn get_media_info(path: &str) -> Option<MediaInfo> {
 pub fn read_as_data_url(path: &str) -> Option<String> {
     let info = get_media_info(path)?;
     let bytes = fs::read(path).ok()?;
-    let base64 = base64::encode(&bytes);
+    let base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:{};base64,{}", info.mime, base64))
 }
 

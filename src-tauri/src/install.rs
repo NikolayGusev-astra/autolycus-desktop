@@ -67,7 +67,7 @@ pub async fn install_hermes_cmd(
     // dedicated threads so the async runtime is never stalled.
     // Refuse a second concurrent install.
     {
-        let mut guard = state.active.lock().unwrap();
+        let guard = state.active.lock().unwrap();
         if guard.is_some() {
             return Err("An install is already running".to_string());
         }

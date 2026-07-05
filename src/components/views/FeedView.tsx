@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Mail, Send, CheckSquare, Terminal, Bot, FileText, Loader, RefreshCw,
-  ChevronRight, ListChecks, Sparkles, Columns, ListPlus,
+  ChevronRight, ListChecks, Sparkles, Columns, ListPlus, MessageSquare,
 } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 
@@ -43,9 +43,10 @@ function timeAgo(ts: number): string {
   return `${Math.floor(diff / 86400)} дн`;
 }
 
-export function FeedView({ onNewTask, onOpenSession }: {
+export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
   onNewTask?: () => void;
   onOpenSession?: (sessionId: string) => void;
+  onOpenChat?: (sessionId: string) => void;
 }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<FeedItem[]>([]);
@@ -137,6 +138,20 @@ export function FeedView({ onNewTask, onOpenSession }: {
       }
       setActionStatus(`✓ Делегировано: ${assignee || "без исполнителя"}`);
       setTimeout(() => setActionStatus(""), 3000);
+    } catch (e) {
+      setActionStatus("✗ " + String(e));
+    }
+  };
+
+  // ── Summarize from a feed card ────────────────────────────────────────────
+  const summarizeFromCard = async (item: FeedItem) => {
+    try {
+      const prompt = `Сделай краткое резюме (3-5 пунктов) по сессии ${item.session_id} из источника "${item.source}". Тема: ${item.title || item.preview}.`;
+      const result = await invoke<string>("send_message_cmd", {
+        request: { text: prompt, session_id: null, history: null },
+      });
+      setActionStatus(`✓ Резюме: ${result.slice(0, 80)}...`);
+      setTimeout(() => setActionStatus(""), 4000);
     } catch (e) {
       setActionStatus("✗ " + String(e));
     }
@@ -258,6 +273,8 @@ export function FeedView({ onNewTask, onOpenSession }: {
                         meta={meta}
                         onOpen={() => onOpenSession?.(item.session_id)}
                         onCreateTask={() => void createTaskFromCard(item)}
+                        onSummarize={() => void summarizeFromCard(item)}
+                        onReply={() => onOpenChat?.(item.session_id)}
                         onDelegate={(a) => void delegateFromCard(item, a)}
                       />
                     ))}
@@ -278,6 +295,8 @@ export function FeedView({ onNewTask, onOpenSession }: {
                   meta={meta}
                   onOpen={() => onOpenSession?.(item.session_id)}
                   onCreateTask={() => void createTaskFromCard(item)}
+                  onSummarize={() => void summarizeFromCard(item)}
+                  onReply={() => onOpenChat?.(item.session_id)}
                   onDelegate={(a) => void delegateFromCard(item, a)}
                 />
               );
@@ -291,13 +310,14 @@ export function FeedView({ onNewTask, onOpenSession }: {
 
 // ── Feed Card ──────────────────────────────────────────────────────────────
 function FeedCard({
-  item, meta, onOpen, onCreateTask, onSummarize, onDelegate,
+  item, meta, onOpen, onCreateTask, onSummarize, onReply, onDelegate,
 }: {
   item: FeedItem;
   meta: { icon: typeof Mail; color: string; label: string };
   onOpen: () => void;
   onCreateTask: () => void;
   onSummarize?: () => void;
+  onReply?: () => void;
   onDelegate?: (assignee: string) => void;
 }) {
   const Icon = meta.icon;
@@ -338,6 +358,14 @@ function FeedCard({
             className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
           >
             <Sparkles className="w-2.5 h-2.5 inline" /> Резюме
+          </button>
+        )}
+        {onReply && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onReply(); }}
+            className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
+          >
+            <MessageSquare className="w-2.5 h-2.5 inline" /> Ответить
           </button>
         )}
         <button
