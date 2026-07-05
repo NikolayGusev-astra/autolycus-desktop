@@ -9,7 +9,7 @@
 // screens (GatewayScreen, ToolsScreen, DiagnoseScreen, ProvidersScreen,
 // ProfilesScreen, Versions) and an Appearance tab wired to the ThemeProvider.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   X,
@@ -35,7 +35,7 @@ import {
   Plus,
   Trash2,
   Edit3,
-  Eye,
+  Loader,
   Zap,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -967,115 +967,387 @@ function HermesSectionTab({ section, fields }: { section: string; fields: { key:
   );
 }
 
-// ── Sources tab — configure Telegram + Email connectors (write to Hermes .env)
-// Each connector is a Hermes platform plugin. The desktop writes the env vars
-// the plugin expects; Hermes picks them up on next gateway restart.
+// ── Sources tab — multiple Telegram/Email/Jira connectors
+// Each connector is a separate instance. The desktop writes to sources.json
+// and can apply to Hermes .env for backwards compatibility.
+interface TelegramSource {
+  id: string;
+  name: string;
+  bot_token: string;
+  chat_id: string;
+  allowed_users: string;
+  home_channel: string;
+  enabled: boolean;
+}
+interface EmailSource {
+  id: string;
+  name: string;
+  address: string;
+  password: string;
+  smtp_host: string;
+  smtp_port: number;
+  imap_host: string;
+  enabled: boolean;
+}
+interface JiraSource {
+  id: string;
+  name: string;
+  url: string;
+  username: string;
+  api_token: string;
+  project_key: string;
+  enabled: boolean;
+}
+interface SourcesConfig {
+  telegram: TelegramSource[];
+  email: EmailSource[];
+  jira: JiraSource[];
+}
+
 function SourcesTab() {
   const { t } = useTranslation();
-  const [vals, setVals] = useState<Record<string, string>>({});
+  const [config, setConfig] = useState<SourcesConfig>({ telegram: [], email: [], jira: [] });
   const [status, setStatus] = useState("");
-  const [showTg, setShowTg] = useState(false);
-  const [showEmail, setShowEmail] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // Load current values from Hermes .env via get_env_cmd.
+  // Load sources on mount
   useEffect(() => {
-    const keys = [
-      "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_HOME_CHANNEL",
-      "EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_SMTP_HOST", "EMAIL_SMTP_PORT", "EMAIL_IMAP_HOST",
-    ];
-    Promise.all(keys.map((k) => invoke<string | null>("get_env_cmd", { key: k, profile: null }).catch(() => null)))
-      .then((results) => {
-        const v: Record<string, string> = {};
-        keys.forEach((k, i) => { v[k] = results[i] || ""; });
-        setVals(v);
-      });
+    const load = async () => {
+      try {
+        const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+        setConfig(result);
+      } catch (e) {
+        console.error("Failed to load sources:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
   }, []);
 
-  const save = async (key: string) => {
+
+  // --- Telegram ---
+  const addTelegram = async () => {
+    const newSource: TelegramSource = {
+      id: crypto.randomUUID(),
+      name: `Telegram ${config.telegram.length + 1}`,
+      bot_token: "",
+      chat_id: "",
+      allowed_users: "",
+      home_channel: "",
+      enabled: true,
+    };
     try {
-      await invoke("set_env_cmd", { key, value: vals[key] || "", profile: null });
-      setStatus("✓ " + t("saved"));
-      setTimeout(() => setStatus(""), 2000);
+      await invoke("add_telegram_source_cmd", { source: newSource, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
     } catch (e: any) {
       setStatus("✗ " + (e?.message || String(e)));
     }
   };
 
-  const field = (key: string, label: string, ph: string, isPassword = false) => (
-    <div key={key}>
-      <label className="text-[11px] text-ac-muted block mb-1">{label}</label>
-      <div className="flex gap-2">
-        <input
-          type={isPassword ? "password" : "text"}
-          className="ac-input flex-1 px-3 py-2 text-sm font-mono"
-          placeholder={ph}
-          value={vals[key] ?? ""}
-          onChange={(e) => setVals((p) => ({ ...p, [key]: e.target.value }))}
-        />
-        <button onClick={() => void save(key)} className="ac-btn px-3 py-2 text-xs">{t("btn.save")}</button>
-      </div>
-    </div>
-  );
+  const updateTelegram = async (source: TelegramSource | EmailSource | JiraSource) => {
+    try {
+      await invoke("update_telegram_source_cmd", { id: source.id, source, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
 
-  const tgConfigured = vals["TELEGRAM_BOT_TOKEN"];
-  const emailConfigured = vals["EMAIL_ADDRESS"] && vals["EMAIL_PASSWORD"];
+  const removeTelegram = async (id: string) => {
+    try {
+      await invoke("remove_telegram_source_cmd", { id, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  // --- Email ---
+  const addEmail = async () => {
+    const newSource: EmailSource = {
+      id: crypto.randomUUID(),
+      name: `Email ${config.email.length + 1}`,
+      address: "",
+      password: "",
+      smtp_host: "smtp.gmail.com",
+      smtp_port: 587,
+      imap_host: "imap.gmail.com",
+      enabled: true,
+    };
+    try {
+      await invoke("add_email_source_cmd", { source: newSource, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const updateEmail = async (source: TelegramSource | EmailSource | JiraSource) => {
+    try {
+      await invoke("update_email_source_cmd", { id: source.id, source, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const removeEmail = async (id: string) => {
+    try {
+      await invoke("remove_email_source_cmd", { id, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  // --- Jira ---
+  const addJira = async () => {
+    const newSource: JiraSource = {
+      id: crypto.randomUUID(),
+      name: `Jira ${config.jira.length + 1}`,
+      url: "",
+      username: "",
+      api_token: "",
+      project_key: "",
+      enabled: true,
+    };
+    try {
+      await invoke("add_jira_source_cmd", { source: newSource, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const updateJira = async (source: TelegramSource | EmailSource | JiraSource) => {
+    try {
+      await invoke("update_jira_source_cmd", { id: source.id, source, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const removeJira = async (id: string) => {
+    try {
+      await invoke("remove_jira_source_cmd", { id, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const SourceCard = ({ source, type, onUpdate, onRemove }: {
+    source: TelegramSource | EmailSource | JiraSource;
+    type: "telegram" | "email" | "jira";
+    onUpdate: (s: TelegramSource | EmailSource | JiraSource) => void;
+    onRemove: (id: string) => void;
+  }) => {
+    const [editing, setEditing] = useState(false);
+    const [localSource, setLocalSource] = useState(source);
+
+    const handleChange = (field: string, value: string | number | boolean) => {
+      setLocalSource((s) => ({ ...s, [field]: value }));
+    };
+
+    const fields = type === "telegram" ? [
+      { key: "name", label: "Name", type: "text" as const },
+      { key: "bot_token", label: "Bot Token", type: "password" as const, placeholder: "123456:ABC-DEF..." },
+      { key: "chat_id", label: "Chat ID", type: "text" as const, placeholder: "-1001234567890" },
+      { key: "allowed_users", label: "Allowed Users", type: "text" as const, placeholder: "user_id1, user_id2" },
+      { key: "home_channel", label: "Home Channel", type: "text" as const, placeholder: "-1001234567890" },
+      { key: "enabled", label: "Enabled", type: "checkbox" as const },
+    ] : type === "email" ? [
+      { key: "name", label: "Name", type: "text" as const },
+      { key: "address", label: "Email Address", type: "text" as const, placeholder: "you@example.com" },
+      { key: "password", label: "Password", type: "password" as const, placeholder: "app password" },
+      { key: "smtp_host", label: "SMTP Host", type: "text" as const, placeholder: "smtp.gmail.com" },
+      { key: "smtp_port", label: "SMTP Port", type: "number" as const },
+      { key: "imap_host", label: "IMAP Host", type: "text" as const, placeholder: "imap.gmail.com" },
+      { key: "enabled", label: "Enabled", type: "checkbox" as const },
+    ] : [
+      { key: "name", label: "Name", type: "text" as const },
+      { key: "url", label: "Jira URL", type: "text" as const, placeholder: "https://company.atlassian.net" },
+      { key: "username", label: "Username", type: "text" as const },
+      { key: "api_token", label: "API Token", type: "password" as const, placeholder: "API token" },
+      { key: "project_key", label: "Project Key", type: "text" as const, placeholder: "PROJ" },
+      { key: "enabled", label: "Enabled", type: "checkbox" as const },
+    ];
+
+    const icon = type === "telegram" ? <Send className="w-4 h-4 text-[#0088cc]" /> :
+                type === "email" ? <Mail className="w-4 h-4 text-[#ea4335]" /> :
+                <CheckSquare className="w-4 h-4 text-[#0052cc]" />;
+    const typeLabel = type === "telegram" ? "Telegram" : type === "email" ? "Email" : "Jira";
+
+    return (
+      <div className="border border-ac-border rounded-lg overflow-hidden">
+        <div className="flex items-center gap-3 px-4 py-3 hover:bg-ac-surface transition-colors">
+          {icon}
+          <span className="flex-1 text-left text-sm font-medium text-ac-ink">{typeLabel}: {localSource.name}</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full ${localSource.enabled ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
+            {localSource.enabled ? "✓ Enabled" : "Disabled"}
+          </span>
+          {editing ? (
+            <>
+              <button onClick={() => { onUpdate(localSource); setEditing(false); }} className="ac-btn px-3 py-1.5 text-xs">{t("btn.save")}</button>
+              <button onClick={() => { setLocalSource(source); setEditing(false); }} className="px-3 py-1.5 text-xs border border-ac-border text-ac-muted rounded-md">{t("btn.cancel")}</button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => setEditing(true)} className="p-1.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-surface"><Edit3 className="w-3.5 h-3.5" /></button>
+              <button onClick={() => onRemove(source.id)} className="p-1.5 rounded text-ac-muted hover:text-ac-red hover:bg-ac-surface"><Trash2 className="w-3.5 h-3.5" /></button>
+            </>
+          )}
+        </div>
+        {editing && (
+          <div className="p-4 border-t border-ac-border space-y-3 bg-ac-surface">
+            {fields.map((f) => (
+              <div key={f.key}>
+                <label className="text-[11px] text-ac-muted block mb-1">{f.label}</label>
+                {f.type === "checkbox" ? (
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={localSource[f.key as keyof typeof localSource] === true}
+                      onChange={(e) => handleChange(f.key, e.target.checked)}
+                      className="accent-ac-brand"
+                    />
+                    <span className="text-sm text-ac-ink">{f.label}</span>
+                  </label>
+                ) : (
+                  <input
+                    type={f.type === "number" ? "number" : f.type}
+                    placeholder={f.placeholder}
+                    value={localSource[f.key as keyof typeof localSource] as string | number}
+                    onChange={(e) => handleChange(f.key, f.type === "number" ? Number(e.target.value) : e.target.value)}
+                    className="ac-input w-full px-3 py-2 text-sm font-mono"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader className="w-6 h-6 animate-spin text-ac-muted" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
       <p className="text-[11px] text-ac-muted">{t("sources.hint")}</p>
 
-      {/* Telegram */}
-      <div className="border border-ac-border rounded-lg overflow-hidden">
-        <button
-          onClick={() => setShowTg(!showTg)}
-          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-ac-surface transition-colors"
-        >
-          <Send className="w-4 h-4 text-[#0088cc]" />
-          <span className="flex-1 text-left text-sm font-medium text-ac-ink">Telegram</span>
-          <span className={`text-[10px] px-2 py-0.5 rounded-full ${tgConfigured ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
-            {tgConfigured ? "✓ " + t("sources.configured") : t("sources.notConfigured")}
-          </span>
-        </button>
-        {showTg && (
-          <div className="p-4 border-t border-ac-border space-y-3">
-            {field("TELEGRAM_BOT_TOKEN", "Bot Token (@BotFather)", "123456:ABC-DEF...", true)}
-            {field("TELEGRAM_ALLOWED_USERS", t("sources.allowedUsers"), "user_id1, user_id2")}
-            {field("TELEGRAM_HOME_CHANNEL", t("sources.homeChannel"), "-1001234567890")}
+      {/* Telegram Sources */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Send className="w-4 h-4 text-[#0088cc]" />
+            <span className="text-sm font-medium text-ac-ink">Telegram Bots</span>
           </div>
-        )}
-      </div>
-
-      {/* Email (IMAP + SMTP) */}
-      <div className="border border-ac-border rounded-lg overflow-hidden">
-        <button
-          onClick={() => setShowEmail(!showEmail)}
-          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-ac-surface transition-colors"
-        >
-          <Mail className="w-4 h-4 text-[#ea4335]" />
-          <span className="flex-1 text-left text-sm font-medium text-ac-ink">Email (IMAP/SMTP)</span>
-          <span className={`text-[10px] px-2 py-0.5 rounded-full ${emailConfigured ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
-            {emailConfigured ? "✓ " + t("sources.configured") : t("sources.notConfigured")}
-          </span>
-        </button>
-        {showEmail && (
-          <div className="p-4 border-t border-ac-border space-y-3">
-            {field("EMAIL_ADDRESS", t("sources.emailAddress"), "you@example.com")}
-            {field("EMAIL_PASSWORD", t("sources.emailPassword"), "app password", true)}
-            {field("EMAIL_SMTP_HOST", "SMTP host", "smtp.gmail.com")}
-            {field("EMAIL_SMTP_PORT", "SMTP port", "587")}
-            {field("EMAIL_IMAP_HOST", "IMAP host", "imap.gmail.com")}
-          </div>
-        )}
-      </div>
-
-      {/* Jira / MCP note */}
-      <div className="border border-ac-border rounded-lg p-4 bg-ac-surface">
-        <div className="flex items-center gap-3 mb-1">
-          <CheckSquare className="w-4 h-4 text-[#0052cc]" />
-          <span className="text-sm font-medium text-ac-ink">Jira / MCP / REST API</span>
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-ac-surface-2 text-ac-muted">Hermes tools</span>
+          <button onClick={addTelegram} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> {t("add_model")}
+          </button>
         </div>
-        <p className="text-[11px] text-ac-muted ml-7">{t("sources.toolsHint")}</p>
+        {config.telegram.length === 0 ? (
+          <p className="text-sm text-ac-muted ml-7 py-4">No Telegram bots configured. Click + to add one.</p>
+        ) : (
+          <div className="space-y-2 ml-7">
+            {config.telegram.map((src) => (
+              <SourceCard
+                key={src.id}
+                source={src}
+                type="telegram"
+                onUpdate={updateTelegram}
+                onRemove={removeTelegram}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Email Sources */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Mail className="w-4 h-4 text-[#ea4335]" />
+            <span className="text-sm font-medium text-ac-ink">Email Accounts (IMAP/SMTP)</span>
+          </div>
+          <button onClick={addEmail} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> {t("add_model")}
+          </button>
+        </div>
+        {config.email.length === 0 ? (
+          <p className="text-sm text-ac-muted ml-7 py-4">No email accounts configured. Click + to add one.</p>
+        ) : (
+          <div className="space-y-2 ml-7">
+            {config.email.map((src) => (
+              <SourceCard
+                key={src.id}
+                source={src}
+                type="email"
+                onUpdate={updateEmail}
+                onRemove={removeEmail}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Jira Sources */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <CheckSquare className="w-4 h-4 text-[#0052cc]" />
+            <span className="text-sm font-medium text-ac-ink">Jira Instances</span>
+          </div>
+          <button onClick={addJira} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> {t("add_model")}
+          </button>
+        </div>
+        {config.jira.length === 0 ? (
+          <p className="text-sm text-ac-muted ml-7 py-4">No Jira instances configured. Click + to add one.</p>
+        ) : (
+          <div className="space-y-2 ml-7">
+            {config.jira.map((src) => (
+              <SourceCard
+                key={src.id}
+                source={src}
+                type="jira"
+                onUpdate={updateJira}
+                onRemove={removeJira}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Apply to .env button */}
+      <div className="border-t border-ac-border pt-4">
+        <button
+          onClick={() => invoke("apply_sources_to_env_cmd", { profile: null }).then(() => {
+            setStatus("✓ Applied to Hermes .env");
+            setTimeout(() => setStatus(""), 2000);
+          }).catch((e: any) => setStatus("✗ " + String(e)))}
+          className="ac-btn px-4 py-2 text-sm flex items-center gap-2"
+        >
+          <Zap className="w-4 h-4" /> Apply to Hermes .env (for backwards compatibility)
+        </button>
       </div>
 
       {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
