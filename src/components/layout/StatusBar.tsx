@@ -27,6 +27,16 @@ export function StatusBar() {
         {pipelineStatus.model && (
           <span className="opacity-60">{pipelineStatus.model}</span>
         )}
+        {pipelineStatus.tokensUsed !== undefined && pipelineStatus.tokensLimit !== undefined && (
+          <span className="opacity-60 px-2 py-0.5 rounded bg-ac-brand/10 text-ac-brand text-[10px]">
+            {pipelineStatus.tokensUsed.toLocaleString()} / {pipelineStatus.tokensLimit.toLocaleString()} tokens
+          </span>
+        )}
+        {pipelineStatus.costUsd !== undefined && (
+          <span className="opacity-60 px-2 py-0.5 rounded bg-ac-brand/10 text-ac-brand text-[10px]">
+            ${pipelineStatus.costUsd.toFixed(4)}
+          </span>
+        )}
         <span className={`opacity-60 ${connected ? "text-green-400" : "text-red-400"}`}>
           {connected ? t("status.connected") : t("status.disconnected")}
         </span>
