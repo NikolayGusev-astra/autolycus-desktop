@@ -1,8 +1,9 @@
-import { useState, useRef, useCallback, useMemo, type KeyboardEvent } from "react";
-import { Send, Paperclip, X, Mic } from "lucide-react";
+import { useState, useRef, useCallback, useMemo, useEffect, type KeyboardEvent } from "react";
+import { Send, Paperclip, X, Mic, ChevronDown, Cpu, Brain } from "lucide-react";
 import type { AgentStatus } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 import { VoiceInput } from "./VoiceInput";
+import { invoke } from "@tauri-apps/api/core";
 
 /** A user attachment. Either a browser File (will be saved on send) or a
  * media clip already saved to disk by the backend (e.g. a voice recording). */
@@ -60,9 +61,28 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);
+  const [currentModel, setCurrentModel] = useState<string>("");
+  const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [savedModels, setSavedModels] = useState<any[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useTranslation();
+
+  // Load saved models on mount
+  useEffect(() => {
+    invoke<any[]>("list_models_cmd")
+      .then((models) => {
+        setSavedModels(models);
+        if (models.length > 0) setCurrentModel(models[0].id);
+      })
+      .catch(() => {});
+    invoke<any>("get_model_config_cmd", { profile: null })
+      .then((config) => {
+        if (config?.model) setCurrentModel(`${config.provider}/${config.model}`);
+      })
+      .catch(() => {});
+  }, []);
 
   // Slash menu: show when the input starts with "/".
   const slashOpen = text.startsWith("/") && !text.includes(" ");
@@ -229,6 +249,49 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
             setAttachments((prev) => [...prev, att])
           }
         />
+
+        {/* Model selector */}
+        <div className="relative">
+          <button
+            onClick={() => setShowModelDropdown(!showModelDropdown)}
+            className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-ac-muted hover:text-ac-brand border border-ac-border rounded-md"
+            title={t("chat.selectModel") || "Выбрать модель"}
+          >
+            <Cpu className="w-3 h-3" />
+            <span className="max-w-24 truncate">{currentModel || t("chat.selectModel") || "Модель"}</span>
+            <ChevronDown className="w-3 h-3" />
+          </button>
+          {showModelDropdown && (
+            <div className="absolute bottom-full left-0 mb-1 w-64 rounded-lg border border-ac-border bg-ac-surface shadow-lg overflow-hidden z-20">
+              {savedModels.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs ${currentModel === m.name ? "bg-ac-brand-soft" : ""}`}
+                  onClick={() => { setCurrentModel(m.name); setShowModelDropdown(false); }}
+                >
+                  <span className="text-ac-ink">{m.name}</span>
+                  <span className="text-ac-muted">{m.provider}/{m.model}</span>
+                </button>
+              ))}
+              {savedModels.length === 0 && (
+                <div className="px-3 py-2 text-xs text-ac-muted">{t("chat.noModels") || "Нет моделей"}</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Reasoning mode toggle */}
+        <button
+          onClick={() => setReasoningEnabled(!reasoningEnabled)}
+          className={`flex items-center gap-1 px-2 py-1.5 text-[10px] border rounded-md ${
+            reasoningEnabled ? "bg-ac-brand/10 text-ac-brand border-ac-brand/30" : "text-ac-muted border-ac-border"
+          }`}
+          title={t("chat.reasoningMode") || "Режим рассуждений"}
+        >
+          <Brain className="w-3 h-3" />
+          {t("chat.reasoning") || "Reasoning"}
+        </button>
 
         <div className="flex-1 relative">
           {slashMatches.length > 0 && (

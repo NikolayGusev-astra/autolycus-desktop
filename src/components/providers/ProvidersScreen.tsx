@@ -3,7 +3,7 @@
 // Uses Tauri invoke instead of Electron IPC
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { KeyRound, Plus, Trash2, Eye, EyeOff, Check } from "lucide-react";
+import { KeyRound, Plus, Trash2, Eye, EyeOff, Check, ChevronDown, Loader2, Search } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 import { invoke } from "@tauri-apps/api/core";
 import OAuthLoginModal from "../auth/OAuthLoginModal";
@@ -78,6 +78,10 @@ function ProvidersScreen({ profile }: { profile?: string }): React.JSX.Element {
   const [poolProvider, setPoolProvider] = useState("");
   const [poolNewKey, setPoolNewKey] = useState("");
   const [poolNewLabel, setPoolNewLabel] = useState("");
+
+  // Model discovery
+  const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
+  const [discoveringModels, setDiscoveringModels] = useState(false);
 
   // OAuth modal
   const [oauthModal, setOauthModal] = useState<string | null>(null);
@@ -207,6 +211,59 @@ function ProvidersScreen({ profile }: { profile?: string }): React.JSX.Element {
     });
   }
 
+  // Model discovery
+  const discoverModels = useCallback(async () => {
+    if (!modelBaseUrl || discoveringModels) return;
+    
+    setDiscoveringModels(true);
+    try {
+      // Try to fetch models from the provider's /v1/models endpoint
+      const response = await fetch(`${modelBaseUrl.replace(/\/$/, "")}/models`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.data && Array.isArray(data.data)) {
+          const models = data.data
+            .filter((m: any) => m.id)
+            .map((m: any) => m.id)
+            .sort();
+          setDiscoveredModels(models);
+        }
+      } else {
+        // Try Ollama format
+        const ollamaResponse = await fetch(`${modelBaseUrl.replace(/\/$/, "")}/api/tags`, {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        });
+        
+        if (ollamaResponse.ok) {
+          const data = await ollamaResponse.json();
+          if (data.models && Array.isArray(data.models)) {
+            const models = data.models
+              .filter((m: any) => m.name)
+              .map((m: any) => m.name)
+              .sort();
+            setDiscoveredModels(models);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to discover models:", err);
+    } finally {
+      setDiscoveringModels(false);
+    }
+  }, [modelBaseUrl, discoveringModels]);
+
+  const handleDiscoverModels = () => {
+    setDiscoveredModels([]);
+    void discoverModels();
+  };
+
   const isCustomProvider = modelProvider === "custom";
 
   return (
@@ -260,30 +317,68 @@ function ProvidersScreen({ profile }: { profile?: string }): React.JSX.Element {
             <label className="block text-sm font-medium text-ac-muted mb-1.5">
               {t("common.model")}
             </label>
-            <input
-              className="w-full px-3 py-2 rounded-lg bg-ac-bg border border-border text-ac-text"
-              type="text"
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-              placeholder={t("settings.modelNamePlaceholder")}
-            />
-          </div>
-
-          {/* Base URL (custom only) */}
-          {isCustomProvider && (
-            <div>
-              <label className="block text-sm font-medium text-ac-muted mb-1.5">
-                {t("common.baseUrl")}
-              </label>
+            <div className="relative">
               <input
-                className="w-full px-3 py-2 rounded-lg bg-ac-bg border border-border text-ac-text"
+                className="w-full px-3 py-2 rounded-lg bg-ac-bg border border-border text-ac-text pr-10"
                 type="text"
-                value={modelBaseUrl}
-                onChange={(e) => setModelBaseUrl(e.target.value)}
-                placeholder="http://localhost:1234/v1"
+                value={modelName}
+                onChange={(e) => setModelName(e.target.value)}
+                placeholder={t("settings.modelNamePlaceholder")}
               />
+              {discoveredModels.length > 0 && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // Show dropdown - for now we'll use a simple approach
+                  }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-ac-muted hover:text-ac-brand"
+                >
+                  <ChevronDown className="w-4 h-4" />
+                </button>
+              )}
+              {discoveredModels.length > 0 && (
+                <ul className="absolute z-10 w-full mt-1 bg-ac-bg border border-border rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                  {discoveredModels.map((model) => (
+                    <li key={model}>
+                      <button
+                        type="button"
+                        onClick={() => setModelName(model)}
+                        className={`w-full px-3 py-2 text-sm text-left ${modelName === model ? "bg-ac-brand/10 text-ac-brand" : "hover:bg-ac-surface"}`}
+                      >
+                        {model}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
-          )}
+            {discoveredModels.length === 0 && !isCustomProvider && (
+              <p className="text-xs text-ac-muted mt-1">{t("settings.noModelsDiscovered")}</p>
+            )}
+            {discoveredModels.length === 0 && !discoveringModels && !isCustomProvider && (
+              <button
+                type="button"
+                onClick={handleDiscoverModels}
+                disabled={discoveringModels}
+                className="mt-2 text-xs text-ac-brand hover:underline flex items-center gap-1"
+              >
+                {discoveringModels ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" /> {t("settings.discoveringModels")}
+                  </>
+                ) : (
+                  <>
+                    <Search className="w-3 h-3" /> {t("settings.discoverModels")}
+                  </>
+                )}
+              </button>
+            )}
+            <p className="text-xs text-ac-muted mt-1">
+              {isCustomProvider ? t("settings.customModelHint") : t("settings.modelHint")}
+            </p>
+          </div>
         </div>
       </div>
 

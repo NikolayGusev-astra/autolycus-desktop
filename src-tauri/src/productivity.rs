@@ -80,6 +80,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL", []);
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN labels TEXT DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT DEFAULT ''", []);
     // Sections within projects (like Todoist).
     let _ = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sections (

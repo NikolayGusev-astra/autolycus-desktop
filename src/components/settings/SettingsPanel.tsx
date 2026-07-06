@@ -687,6 +687,30 @@ function ModelsTab() {
           </div>
         )}
 
+        {/* Default Model Selection */}
+        <div className="mb-4 p-3 rounded-lg border border-ac-border bg-ac-surface">
+          <label className="text-xs font-medium text-ac-ink mb-2 block">{t("settings.defaultModel")}</label>
+          <select
+            className="ac-input w-full px-3 py-2 text-sm"
+            value={modelConfig?.model || ""}
+            onChange={(e) => {
+              if (e.target.value) {
+                const selected = models.find(m => `${m.provider}/${m.model}` === e.target.value);
+                if (selected) setActiveModel(selected.provider, selected.model, selected.base_url);
+              }
+            }}
+            disabled={models.length === 0}
+          >
+            <option value="">{t("settings.noDefaultModel")}</option>
+            {models.map((m) => (
+              <option key={m.id} value={`${m.provider}/${m.model}`}>
+                {m.name} ({m.provider}/{m.model})
+              </option>
+            ))}
+          </select>
+          <p className="text-[11px] text-ac-muted mt-1">{t("settings.defaultModelHint")}</p>
+        </div>
+
         {modelsLoading ? (
           <p className="text-xs text-ac-muted">{t("model_loading")}</p>
         ) : models.length === 0 ? (

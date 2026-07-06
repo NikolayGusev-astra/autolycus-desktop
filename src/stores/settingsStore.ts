@@ -19,6 +19,7 @@ export interface ModelConfig {
   provider: string;
   model: string;
   base_url: string;
+  is_default?: boolean;  // optional default model flag
 }
 
 interface GeneralInfo {
@@ -47,6 +48,7 @@ interface SettingsStore {
   addModel: (name: string, provider: string, model: string, base_url: string) => Promise<SavedModel | null>;
   removeModel: (id: string) => Promise<boolean>;
   setActiveModel: (provider: string, model: string, base_url: string) => Promise<boolean>;
+  setDefaultModel: (id: string) => Promise<boolean>;
   setTheme: (dark: boolean) => Promise<void>;
 }
 
@@ -141,6 +143,18 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
       return result;
     } catch (err) {
       console.error("Failed to remove model:", err);
+      return false;
+    }
+  },
+
+  setDefaultModel: async (id: string) => {
+    try {
+      await invoke("set_default_model_cmd", { id });
+      const models = await invoke<SavedModel[]>("list_models_cmd");
+      set({ models });
+      return true;
+    } catch (err) {
+      console.error("Failed to set default model:", err);
       return false;
     }
   },
