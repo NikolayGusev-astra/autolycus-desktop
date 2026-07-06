@@ -50,6 +50,7 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
 }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<FeedItem[]>([]);
+  const [sourcesConfig, setSourcesConfig] = useState<any>({ telegram: [], email: [], jira: [] });
   const [loading, setLoading] = useState(true);
   const [layout, setLayout] = useState<"columns" | "list">("columns");
   const [briefings, setBriefings] = useState<Record<string, string>>({});
@@ -59,10 +60,14 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
 
   const load = useCallback(async () => {
     try {
-      const result = await invoke<FeedItem[]>("list_feed_cmd", { limit: 80, profile: null });
-      setItems(result);
+      const [itemsResult, sourcesResult] = await Promise.all([
+        invoke<FeedItem[]>("list_feed_cmd", { limit: 80, profile: null }),
+        invoke<any>("list_sources_cmd", { profile: null }),
+      ]);
+      setItems(itemsResult);
+      setSourcesConfig(sourcesResult);
       // Retry once if empty (init timing).
-      if (result.length === 0 && retryRef.current < 2) {
+      if (itemsResult.length === 0 && retryRef.current < 2) {
         retryRef.current++;
         setTimeout(() => void load(), 1500);
         return;
@@ -93,9 +98,42 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
     const key = source || "unified";
     setBriefingLoading(key);
     try {
+      // Get items for this source, filter by recent (last 7 days)
+      const now = Date.now() / 1000;
+      const weekAgo = now - 7 * 24 * 60 * 60;
+      const sourceItems = source
+        ? items.filter(i => i.source === source && i.started_at >= weekAgo)
+        : items.filter(i => i.started_at >= weekAgo);
+
+      if (sourceItems.length === 0) {
+        setBriefings((p) => ({ ...p, [key]: "Нет недавних сообщений за последние 7 дней." }));
+        return;
+      }
+
+      // Build context with source attribution
+      const context = sourceItems
+        .map(i => `[${i.source}] ${i.title || i.preview} (${new Date(i.started_at * 1000).toLocaleDateString("ru-RU")})`)
+        .join("\n");
+
       const prompt = source
-        ? `Проанализируй последние сообщения из источника "${source}" и дай краткий брифинг: что важно, что требует действий? 3 главных пункта.`
-        : "Дай краткий брифинг по всем источникам: что требует моего внимания сегодня? 3 главных пункта.";
+        ? `Проанализируй недавние сообщения из источника "${source}" за последние 7 дней. Дай краткий структурированный брифинг с указанием источников:
+${context}
+
+Формат ответа:
+1. **Важное** - что требует внимания
+2. **Действия** - что нужно сделать
+3. **Риски** - потенциальные проблемы
+Каждый пункт с указанием источника в скобках.`
+        : `Проанализируй недавние сообщения из всех источников за последние 7 дней. Дай сводный брифинг:
+${context}
+
+Формат ответа:
+1. **Важное** - что требует внимания (источник)
+2. **Действия** - что нужно сделать (источник)
+3. **Риски** - потенциальные проблемы (источник)
+
+Группируй по источникам, где возможно.`;
+
       const result = await invoke<string>("send_message_cmd", {
         request: { text: prompt, session_id: null, history: null },
       });
@@ -105,7 +143,7 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
     } finally {
       setBriefingLoading(null);
     }
-  }, []);
+  }, [items]);
 
   // Auto-generate unified briefing once on mount (after items load).
   const autoBriefRef = useRef(false);
@@ -132,11 +170,27 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
   const delegateFromCard = async (item: FeedItem, assignee: string) => {
     const title = item.title || item.preview?.slice(0, 80) || `Из ${item.source}`;
     try {
-      const id = await invoke<number>("create_task_cmd", { title, profile: null });
+      // Detect project from content using LLM
+      let projectId: number | null = null;
+      try {
+        const projectPrompt = `Определи к какому проекту относится эта задача. Список проектов будет предоставлен. Ответь только ID проекта или "none".
+Задача: ${title}
+Источник: ${item.source}
+Контекст: ${item.preview}`;
+        const projectResult = await invoke<string>("send_message_cmd", {
+          request: { text: projectPrompt, session_id: null, history: null },
+        });
+        const parsed = parseInt(projectResult.trim());
+        if (!isNaN(parsed)) projectId = parsed;
+      } catch {
+        // ignore project detection errors
+      }
+
+      const id = await invoke<number>("create_task_cmd", { title, projectId, profile: null });
       if (assignee) {
         await invoke("update_task_cmd", { id, assignee, profile: null });
       }
-      setActionStatus(`✓ Делегировано: ${assignee || "без исполнителя"}`);
+      setActionStatus(`✓ Делегировано: ${assignee || "без исполнителя"}${projectId ? ` (проект #${projectId})` : ""}`);
       setTimeout(() => setActionStatus(""), 3000);
     } catch (e) {
       setActionStatus("✗ " + String(e));
@@ -146,7 +200,17 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
   // ── Summarize from a feed card ────────────────────────────────────────────
   const summarizeFromCard = async (item: FeedItem) => {
     try {
-      const prompt = `Сделай краткое резюме (3-5 пунктов) по сессии ${item.session_id} из источника "${item.source}". Тема: ${item.title || item.preview}.`;
+      const prompt = `Сделай структурированное резюме (3-5 пунктов) по сессии ${item.session_id} из источника "${item.source}".
+Тема: ${item.title || item.preview}.
+Дата: ${new Date(item.started_at * 1000).toLocaleDateString("ru-RU")}.
+
+Формат:
+1. **Суть** - главная мысль
+2. **Детали** - ключевые факты
+3. **Действия** - что нужно сделать
+4. **Источник** - ${item.source}
+
+Ответь кратко, по пунктам.`;
       const result = await invoke<string>("send_message_cmd", {
         request: { text: prompt, session_id: null, history: null },
       });
@@ -222,6 +286,32 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
 
         {actionStatus && (
           <div className={`mb-3 text-xs ${actionStatus.startsWith("✓") ? "text-green-500" : "text-ac-red"}`}>{actionStatus}</div>
+        )}
+
+        {/* Configured Sources */}
+        {((sourcesConfig.telegram?.length || 0) + (sourcesConfig.email?.length || 0) + (sourcesConfig.jira?.length || 0)) > 0 && (
+          <div className="mb-4 p-3 rounded-lg border border-ac-border bg-ac-surface">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-medium text-ac-ink">{t("feed.configuredSources")}</span>
+            <div className="flex flex-wrap gap-2">
+              {sourcesConfig.telegram?.map((s: any) => s.enabled && (
+                <span key={s.id} className="text-[10px] px-2 py-0.5 rounded-full bg-[#0088cc]/15 text-[#0088cc] flex items-center gap-1">
+                  <Send className="w-3 h-3" /> {s.name}
+                </span>
+              ))}
+              {sourcesConfig.email?.map((s: any) => s.enabled && (
+                <span key={s.id} className="text-[10px] px-2 py-0.5 rounded-full bg-[#ea4335]/15 text-[#ea4335] flex items-center gap-1">
+                  <Mail className="w-3 h-3" /> {s.name}
+                </span>
+              ))}
+{sourcesConfig.jira?.map((s: any) => s.enabled && (
+                <span key={s.id} className="text-[10px] px-2 py-0.5 rounded-full bg-[#0052cc]/15 text-[#0052cc] flex items-center gap-1">
+                  <CheckSquare className="w-3 h-3" /> {s.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
         )}
 
         {/* Empty state */}

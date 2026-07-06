@@ -301,6 +301,7 @@ export function App() {
                   } catch (e) { console.error("feed session load", e); }
                   setActiveView("chat");
                 }}
+                onOpenChat={() => setActiveView("chat")}
               />
             </div>
           ) : activeView === "tasks" ? (

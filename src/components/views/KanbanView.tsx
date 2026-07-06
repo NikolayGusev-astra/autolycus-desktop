@@ -13,6 +13,7 @@ import {
   useSensor,
   useSensors,
   DragEndEvent,
+  useDroppable,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -119,9 +120,13 @@ function KanbanColumn({
   projectMap: Map<number, { name: string; color: string }>;
 }) {
   const meta = COL_LABELS[columnId];
+  const { setNodeRef, isOver } = useDroppable({ id: columnId });
 
   return (
-    <div className="w-72 shrink-0 flex flex-col">
+    <div
+      ref={setNodeRef}
+      className={`w-72 shrink-0 flex flex-col ${isOver ? "bg-ac-brand/5" : ""}`}
+    >
       {/* Column header */}
       <div className="flex items-center gap-2 mb-3 px-2">
         <span className="w-2.5 h-2.5 rounded-full" style={{ background: meta.color }} />

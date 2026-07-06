@@ -63,8 +63,8 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
 
   const create = async () => {
     if (!title.trim()) return;
-    await invoke("create_task_cmd", { title: title.trim(), priority, dueDate: dueDate || null, projectId: projId, profile: null });
-    setTitle(""); setDueDate(""); setShowForm(false); void load();
+    await invoke("create_task_cmd", { title: title.trim(), priority, dueDate: dueDate || null, projectId: projId, assignee: assignee.trim() || null, profile: null });
+    setTitle(""); setDueDate(""); setAssignee(""); setShowForm(false); void load();
   };
 
   const toggle = async (task: Task) => {
@@ -122,24 +122,37 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
-            <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.assignee")} value={assignee} onChange={(e) => { setAssignee(e.target.value); setShowAssigneeDropdown(true); }} onFocus={() => setShowAssigneeDropdown(true)} onBlur={() => setTimeout(() => setShowAssigneeDropdown(false), 150)} />
-            {showAssigneeDropdown && assigneeSuggestions.length > 0 && (
-              <div className="absolute z-10 mt-0.5 w-48 bg-ac-surface border border-ac-border rounded-md shadow-lg">
-                {assigneeSuggestions
-                  .filter((s) => s.toLowerCase().includes(assignee.toLowerCase()) || !assignee)
-                  .slice(0, 8)
-                  .map((s) => (
+            <div className="relative">
+              <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.assignee")} value={assignee} onChange={(e) => { setAssignee(e.target.value); setShowAssigneeDropdown(true); }} onFocus={() => setShowAssigneeDropdown(true)} onBlur={() => setTimeout(() => setShowAssigneeDropdown(false), 200)} />
+              {showAssigneeDropdown && (
+                <div className="absolute z-10 mt-0.5 w-48 bg-ac-surface border border-ac-border rounded-md shadow-lg">
+{assigneeSuggestions
+                    .filter((s) => s.toLowerCase().includes(assignee.toLowerCase()) || !assignee)
+                    .slice(0, 8)
+                    .map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => { setAssignee(s); setShowAssigneeDropdown(false); }}
+                        onMouseDown={(e) => e.preventDefault()}
+                        className="w-full px-3 py-1.5 text-sm text-ac-ink hover:bg-ac-brand-soft hover:text-ac-brand text-left"
+                      >
+                        <Users className="w-3.5 h-3.5 inline mr-1.5" />
+                        {s}
+                      </button>
+                    ))}
+                  {(assignee && !assigneeSuggestions.includes(assignee)) && (
                     <button
-                      key={s}
-                      onClick={() => { setAssignee(s); setShowAssigneeDropdown(false); }}
-                      className="w-full px-3 py-1.5 text-sm text-ac-ink hover:bg-ac-brand-soft hover:text-ac-brand text-left"
+                      onClick={() => { setShowAssigneeDropdown(false); }}
+                      onMouseDown={(e) => e.preventDefault()}
+                      className="w-full px-3 py-1.5 text-sm text-ac-brand hover:bg-ac-brand-soft text-left border-t border-ac-border"
                     >
                       <Users className="w-3.5 h-3.5 inline mr-1.5" />
-                      {s}
+                      {t("tasks.useAssignee", { name: assignee })}
                     </button>
-                  ))}
-              </div>
-            )}
+                  )}
+                </div>
+              )}
+            </div>
             <input className="ac-input px-3 py-2 text-sm" placeholder={t("tasks.labelsPh")} value={labels} onChange={(e) => setLabels(e.target.value)} />
             <button onClick={() => editingId !== null ? saveEdit(tasks.find((x) => x.id === editingId)!) : create()} className="ac-btn px-4 py-2 text-sm">
               {editingId !== null ? t("btn.save") : t("btn.add")}
