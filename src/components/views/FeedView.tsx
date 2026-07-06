@@ -288,30 +288,42 @@ ${context}
           <div className={`mb-3 text-xs ${actionStatus.startsWith("✓") ? "text-green-500" : "text-ac-red"}`}>{actionStatus}</div>
         )}
 
-        {/* Configured Sources */}
-        {((sourcesConfig.telegram?.length || 0) + (sourcesConfig.email?.length || 0) + (sourcesConfig.jira?.length || 0)) > 0 && (
-          <div className="mb-4 p-3 rounded-lg border border-ac-border bg-ac-surface">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-ac-ink">{t("feed.configuredSources")}</span>
-            <div className="flex flex-wrap gap-2">
-              {sourcesConfig.telegram?.map((s: any) => s.enabled && (
-                <span key={s.id} className="text-[10px] px-2 py-0.5 rounded-full bg-[#0088cc]/15 text-[#0088cc] flex items-center gap-1">
-                  <Send className="w-3 h-3" /> {s.name}
-                </span>
+        {/* Source Briefing Columns */}
+        {((sourcesConfig.telegram?.filter((s: any) => s.enabled).length || 0) + (sourcesConfig.email?.filter((s: any) => s.enabled).length || 0) + (sourcesConfig.jira?.filter((s: any) => s.enabled).length || 0)) > 0 && (
+          <div className="mb-5 p-4 rounded-lg border border-ac-brand-border bg-ac-brand-soft">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-ac-brand" />
+                <span className="text-sm font-semibold text-ac-ink">{t("feed.sourceBriefings")}</span>
+              </div>
+              <button
+                onClick={() => void generateBriefing(null)}
+                disabled={briefingLoading === "unified"}
+                className="ml-auto text-xs text-ac-brand hover:underline flex items-center gap-1"
+              >
+                {briefingLoading === "unified" ? <Loader className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                {briefings["unified"] ? t("feed.update") : t("feed.generate")}
+              </button>
+            </div>
+            {briefings["unified"] ? (
+              <p className="text-sm text-ac-ink-2 whitespace-pre-wrap leading-relaxed mb-4">{briefings["unified"]}</p>
+            ) : (
+              <p className="text-xs text-ac-muted">{t("feed.briefingHint")}</p>
+            )}
+            
+            {/* Per-source briefing columns */}
+            <div className="flex gap-4 overflow-x-auto pb-2">
+              {sourcesConfig.telegram?.filter((s: any) => s.enabled).map((s: any) => (
+                <SourceBriefingColumn key={s.id} source={s} sourceType="telegram" onGenerate={() => generateBriefing(`telegram:${s.id}`)} />
               ))}
-              {sourcesConfig.email?.map((s: any) => s.enabled && (
-                <span key={s.id} className="text-[10px] px-2 py-0.5 rounded-full bg-[#ea4335]/15 text-[#ea4335] flex items-center gap-1">
-                  <Mail className="w-3 h-3" /> {s.name}
-                </span>
+              {sourcesConfig.email?.filter((s: any) => s.enabled).map((s: any) => (
+                <SourceBriefingColumn key={s.id} source={s} sourceType="email" onGenerate={() => generateBriefing(`email:${s.id}`)} />
               ))}
-{sourcesConfig.jira?.map((s: any) => s.enabled && (
-                <span key={s.id} className="text-[10px] px-2 py-0.5 rounded-full bg-[#0052cc]/15 text-[#0052cc] flex items-center gap-1">
-                  <CheckSquare className="w-3 h-3" /> {s.name}
-                </span>
+              {sourcesConfig.jira?.filter((s: any) => s.enabled).map((s: any) => (
+                <SourceBriefingColumn key={s.id} source={s} sourceType="jira" onGenerate={() => generateBriefing(`jira:${s.id}`)} />
               ))}
             </div>
           </div>
-        </div>
         )}
 
         {/* Empty state */}
@@ -496,6 +508,59 @@ function FeedCard({
 // Simple t() shim for card (avoids prop drilling).
 function t_global(key: string): string {
   return key; // i18n keys fall through gracefully
+}
+
+// ── Source Briefing Column ────────────────────────────────────────────────
+interface SourceBriefingColumnProps {
+  source: any;
+  sourceType: "telegram" | "email" | "jira";
+  onGenerate: () => void;
+}
+
+function SourceBriefingColumn({ source, sourceType, onGenerate }: SourceBriefingColumnProps) {
+  const [loading, setLoading] = useState(false);
+  const color = sourceType === "telegram" ? "#0088cc" : sourceType === "email" ? "#ea4335" : "#0052cc";
+
+  const handleGenerate = async () => {
+    setLoading(true);
+    try {
+      onGenerate();
+      await new Promise(r => setTimeout(r, 500));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="shrink-0 w-72 flex flex-col">
+      <div className="flex items-center gap-2 mb-2 px-1">
+        <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: color + "18" }}>
+          {sourceType === "telegram" && <Send className="w-3.5 h-3.5" style={{ color }} />}
+          {sourceType === "email" && <Mail className="w-3.5 h-3.5" style={{ color }} />}
+          {sourceType === "jira" && <CheckSquare className="w-3.5 h-3.5" style={{ color }} />}
+        </div>
+        <span className="text-sm font-medium text-ac-ink">{source.name}</span>
+      </div>
+
+      <button
+        onClick={handleGenerate}
+        disabled={loading}
+        className="mb-2 text-[10px] text-ac-brand hover:underline text-left px-1 flex items-center gap-1"
+      >
+        {loading ? <Loader className="w-2.5 h-2.5 animate-spin" /> : <Sparkles className="w-2.5 h-2.5" />}
+        {loading ? "Генерация..." : "Сгенерировать брифинг"}
+      </button>
+
+      {loading && (
+        <div className="mb-2 p-2 rounded-md bg-ac-brand-soft border border-ac-brand-border text-[11px] text-ac-ink-2 whitespace-pre-wrap max-h-24 overflow-y-auto">
+          <Loader className="w-2.5 h-2.5 animate-spin inline mr-1" />
+          Генерация брифинга...
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default FeedView;
