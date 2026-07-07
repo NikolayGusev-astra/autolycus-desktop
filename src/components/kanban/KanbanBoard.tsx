@@ -1,10 +1,24 @@
 // src/components/kanban/KanbanBoard.tsx
-// v0.5.0: Kanban board view with columns and tasks
+// v0.5.0: Kanban board view with columns and tasks.
+// B5 (2026-07-07): drag-and-drop between columns via @dnd-kit.
 
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Trash, RefreshCw } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDraggable,
+  useDroppable,
+  closestCorners,
+  type DragStartEvent,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
 
 interface KanbanTask {
   id: string;
@@ -52,6 +66,12 @@ export function KanbanBoard() {
   const [loading, setLoading] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [showAddTask, setShowAddTask] = useState(false);
+  const [activeTask, setActiveTask] = useState<KanbanTask | null>(null);
+
+  // Drag needs a small movement before it starts so clicks (delete) still work.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
 
   useEffect(() => {
     loadBoards();
@@ -132,6 +152,25 @@ export function KanbanBoard() {
     }
   };
 
+  const onDragStart = (event: DragStartEvent) => {
+    const id = String(event.active.id);
+    const found = boardView?.columns
+      .flatMap((c) => c.tasks)
+      .find((tk) => tk.id === id);
+    setActiveTask(found ?? null);
+  };
+
+  const onDragEnd = (event: DragEndEvent) => {
+    setActiveTask(null);
+    const { active, over } = event;
+    if (!over) return;
+    const fromStatus = (active.data.current?.status as string) ?? "";
+    const toStatus = String(over.id);
+    if (fromStatus && toStatus && fromStatus !== toStatus) {
+      handleMoveTask(String(active.id), toStatus);
+    }
+  };
+
   if (boards.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -205,17 +244,30 @@ export function KanbanBoard() {
           <span className="text-ac-stone text-sm">{t("loading")}</span>
         </div>
       ) : boardView ? (
-        <div className="flex gap-3 p-4 overflow-x-auto flex-1">
-          {boardView.columns.map((col) => (
-            <KanbanColumnView
-              key={col.key}
-              column={col}
-              onMoveTask={handleMoveTask}
-              onDeleteTask={handleDeleteTask}
-              t={t}
-            />
-          ))}
-        </div>
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCorners}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+        >
+          <div className="flex gap-3 p-4 overflow-x-auto flex-1">
+            {boardView.columns.map((col) => (
+              <KanbanColumnView
+                key={col.key}
+                column={col}
+                onDeleteTask={handleDeleteTask}
+                t={t}
+              />
+            ))}
+          </div>
+          <DragOverlay>
+            {activeTask ? (
+              <div className="w-52 bg-ac-pitch border border-ac-brand rounded p-2 text-xs shadow-lg">
+                <span className="text-ac-ivory font-medium leading-tight">{activeTask.title}</span>
+              </div>
+            ) : null}
+          </DragOverlay>
+        </DndContext>
       ) : null}
     </div>
   );
@@ -224,69 +276,81 @@ export function KanbanBoard() {
 // ── Column Component ─────────────────────────────────────────────────────
 function KanbanColumnView({
   column,
-  onMoveTask,
   onDeleteTask,
   t,
 }: {
   column: KanbanColumn;
-  onMoveTask: (taskId: string, newStatus: string) => void;
   onDeleteTask: (taskId: string) => void;
   t: (key: any) => string;
 }) {
   const colorClass = COLUMN_COLORS[column.key] || "border-ac-border";
   const label = t(column.key as any) || column.label;
+  const { setNodeRef, isOver } = useDroppable({ id: column.key });
 
   return (
-    <div className="flex-shrink-0 w-56">
+    <div className="flex-shrink-0 w-56 flex flex-col">
       <div className={`flex items-center justify-between mb-2 border-l-2 ${colorClass} pl-2`}>
         <span className="text-xs font-medium text-ac-ivory">{label}</span>
         <span className="text-[10px] text-ac-stone">{column.tasks.length}</span>
       </div>
 
-      <div className="space-y-1.5 min-h-[100px]">
+      <div
+        ref={setNodeRef}
+        className={`space-y-1.5 min-h-[100px] flex-1 rounded-md transition-colors ${
+          isOver ? "bg-ac-brand-soft outline-dashed outline-1 outline-ac-brand" : ""
+        }`}
+      >
         {column.tasks.map((task) => (
-          <div
-            key={task.id}
-            className="bg-ac-pitch/50 border border-ac-border rounded p-2 text-xs"
-          >
-            <div className="flex items-start justify-between gap-1">
-              <span className="text-ac-ivory font-medium leading-tight">{task.title}</span>
-              <button onClick={() => onDeleteTask(task.id)} className="text-ac-stone hover:text-ac-red">
-                <Trash className="w-3 h-3" />
-              </button>
-            </div>
-            {task.body && (
-              <p className="text-ac-stone mt-1 line-clamp-2">{task.body}</p>
-            )}
-
-            {/* Move buttons */}
-            <div className="flex gap-1 mt-2">
-              {column.key !== "backlog" && (
-                <button
-                  onClick={() => onMoveTask(task.id, "backlog")}
-                  className="px-1.5 py-0.5 text-[10px] text-ac-stone hover:text-ac-ivory border border-ac-border rounded"
-                >
-                  ← {t("backlog")}
-                </button>
-              )}
-              {column.key !== "done" && (
-                <button
-                  onClick={() => {
-                    const next = column.key === "backlog" ? "todo"
-                      : column.key === "todo" ? "in_progress"
-                      : column.key === "in_progress" ? "review"
-                      : "done";
-                    onMoveTask(task.id, next);
-                  }}
-                  className="px-1.5 py-0.5 text-[10px] text-ac-stone hover:text-ac-ivory border border-ac-border rounded"
-                >
-                  {t("next")}
-                </button>
-              )}
-            </div>
-          </div>
+          <KanbanCardView key={task.id} task={task} columnKey={column.key} onDeleteTask={onDeleteTask} />
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Draggable Card Component ─────────────────────────────────────────────
+function KanbanCardView({
+  task,
+  columnKey,
+  onDeleteTask,
+}: {
+  task: KanbanTask;
+  columnKey: string;
+  onDeleteTask: (taskId: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: task.id,
+    data: { status: columnKey },
+  });
+
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.4 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="bg-ac-pitch/50 border border-ac-border rounded p-2 text-xs cursor-grab active:cursor-grabbing touch-none"
+    >
+      <div className="flex items-start justify-between gap-1">
+        <span className="text-ac-ivory font-medium leading-tight">{task.title}</span>
+        <button
+          onClick={() => onDeleteTask(task.id)}
+          className="text-ac-stone hover:text-ac-red"
+        >
+          <Trash className="w-3 h-3" />
+        </button>
+      </div>
+      {task.body && (
+        <p className="text-ac-stone mt-1 line-clamp-2">{task.body}</p>
+      )}
+      {task.assignee && (
+        <p className="text-ac-stone mt-1 text-[10px]">👤 {task.assignee}</p>
+      )}
     </div>
   );
 }

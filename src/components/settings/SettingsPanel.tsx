@@ -1176,11 +1176,12 @@ function SourcesTab() {
     }
   };
 
-  const SourceCard = ({ source, type, onUpdate, onRemove }: {
+  const SourceCard = ({ source, type, onUpdate, onRemove, isActive }: {
     source: TelegramSource | EmailSource | JiraSource;
     type: "telegram" | "email" | "jira";
     onUpdate: (s: TelegramSource | EmailSource | JiraSource) => void;
     onRemove: (id: string) => void;
+    isActive: boolean;
   }) => {
     const [editing, setEditing] = useState(false);
     const [localSource, setLocalSource] = useState(source);
@@ -1223,8 +1224,12 @@ function SourcesTab() {
         <div className="flex items-center gap-3 px-4 py-3 hover:bg-ac-surface transition-colors">
           {icon}
           <span className="flex-1 text-left text-sm font-medium text-ac-ink">{typeLabel}: {localSource.name}</span>
-          <span className={`text-[10px] px-2 py-0.5 rounded-full ${localSource.enabled ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
-            {localSource.enabled ? "✓ Enabled" : "Disabled"}
+          <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+            isActive ? "bg-ac-brand-soft text-ac-brand"
+              : localSource.enabled ? "bg-green-500/15 text-green-500"
+              : "bg-ac-surface-2 text-ac-muted"
+          }`}>
+            {isActive ? "● Active" : localSource.enabled ? "✓ Enabled" : "Disabled"}
           </span>
           {editing ? (
             <>
@@ -1296,19 +1301,27 @@ function SourcesTab() {
         {config.telegram.length === 0 ? (
           <p className="text-sm text-ac-muted ml-7 py-4">No Telegram bots configured. Click + to add one.</p>
         ) : (
+          <>
           <div className="space-y-2 ml-7">
-            {config.telegram.map((src) => (
+            {config.telegram.map((src, i) => (
               <SourceCard
                 key={src.id}
                 source={src}
                 type="telegram"
+                isActive={src.enabled && i === config.telegram.findIndex((s) => s.enabled)}
                 onUpdate={updateTelegram}
                 onRemove={removeTelegram}
               />
             ))}
           </div>
+          {config.telegram.filter((s) => s.enabled).length > 1 && (
+            <p className="text-[11px] text-ac-faint ml-7 mt-1">
+              ⚠ Only the first enabled Telegram bot is pushed to Hermes .env (single-token limit).
+            </p>
+          )}
+          </>
         )}
-      </div>
+        </div>
 
       {/* Email Sources */}
       <div className="space-y-3">
@@ -1324,19 +1337,27 @@ function SourcesTab() {
         {config.email.length === 0 ? (
           <p className="text-sm text-ac-muted ml-7 py-4">No email accounts configured. Click + to add one.</p>
         ) : (
+          <>
           <div className="space-y-2 ml-7">
-            {config.email.map((src) => (
+            {config.email.map((src, i) => (
               <SourceCard
                 key={src.id}
                 source={src}
                 type="email"
+                isActive={src.enabled && i === config.email.findIndex((s) => s.enabled)}
                 onUpdate={updateEmail}
                 onRemove={removeEmail}
               />
             ))}
           </div>
+          {config.email.filter((s) => s.enabled).length > 1 && (
+            <p className="text-[11px] text-ac-faint ml-7 mt-1">
+              ⚠ Only the first enabled Email account is pushed to Hermes .env (single-account limit).
+            </p>
+          )}
+          </>
         )}
-      </div>
+        </div>
 
       {/* Jira Sources */}
       <div className="space-y-3">
@@ -1352,17 +1373,20 @@ function SourcesTab() {
         {config.jira.length === 0 ? (
           <p className="text-sm text-ac-muted ml-7 py-4">No Jira instances configured. Click + to add one.</p>
         ) : (
+          <>
           <div className="space-y-2 ml-7">
-            {config.jira.map((src) => (
+            {config.jira.map((src, i) => (
               <SourceCard
                 key={src.id}
                 source={src}
                 type="jira"
+                isActive={src.enabled && i === config.jira.findIndex((s) => s.enabled)}
                 onUpdate={updateJira}
                 onRemove={removeJira}
               />
             ))}
           </div>
+          </>
         )}
       </div>
 

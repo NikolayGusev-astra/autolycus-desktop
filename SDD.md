@@ -243,8 +243,8 @@ YouTube, RSS. Сейчас SourcesTab поддерживает один инст
 
 | # | Задача | Объём | Зависимости |
 |---|---|---|---|
-| P2.1 | **Множественные источники** (CRUD таблица + skills) | большой | Hermes skills/cron study |
-| P2.2 | **Kanban-доска** (drag-and-drop статусы) | средний | dnd-kit или аналог |
+| P2.1 | **Множественные источники** (CRUD таблица + skills) | большой | ✅ Готово (2026-07-07): backend (sources.rs Vec) + UI CRUD (SourcesTab) + apply_sources_to_env_cmd уже были; добавлен бейдж Active + варнинг мульти-enable. RSS/YouTube — P3.8 |
+| P2.2 | **Kanban-доска** (drag-and-drop статусы) | средний | ✅ Готово (2026-07-07): @dnd-kit в KanbanBoard.tsx |
 | P2.3 | **Делегирование** из карточки фида | средний | P1.1 assignee |
 | P2.4 | **Авто-брифинг** при запуске | малый | FeedView useEffect |
 | P2.5 | **Jira-синк** (двусторонний через Hermes tool) | большой | Hermes MCP |

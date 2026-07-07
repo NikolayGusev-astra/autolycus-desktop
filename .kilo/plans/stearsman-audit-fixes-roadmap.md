@@ -78,10 +78,17 @@
       auto-upload артефактов в GitHub Releases (AppImage/deb/MSI).
 
 Приоритет 2 — важно:
-- [ ] **B4. Множественные источники** (SDD P2.1): CRUD-таблица источников любого типа
-      (TG/Email/RSS/YouTube) + управление skills/cron Hermes.
-- [ ] **B5. Kanban-доска drag-and-drop** (SDD P2.2): статусы triage/todo/running/blocked/done
-      через `@dnd-kit` (уже в зависимостях) — подключить к `KanbanBoard.tsx`.
+- [x] **B4. Множественные источники** (SDD P2.1): ✅ Готово 2026-07-07. Backend
+      (`sources.rs` с `Vec<Telegram/Email/Jira>`) + UI CRUD (`SourcesTab`) уже были
+      реализованы, включая `apply_sources_to_env_cmd`. Добавлено UX-улучшение:
+      бейдж «● Active» на первом enabled-источнике (тот, что реально пишется в
+      Hermes .env) + предупреждение, когда включено несколько одного типа (Hermes
+      поддерживает только один токен/аккаунт в env). RSS/YouTube — отдельно (P3.8).
+- [x] **B5. Kanban-доска drag-and-drop** (SDD P2.2): ✅ Готово 2026-07-07.
+      `KanbanBoard.tsx` переписан на `@dnd-kit` (DndContext + useDraggable/useDroppable
+      + DragOverlay + PointerSensor с activation distance). Перетаскивание между
+      колонками вызывает `move_kanban_task_cmd`. Кнопки-перемещения заменены на DnD.
+      `tsc --noEmit` зелёный.
 - [ ] **B6. Делегирование из карточки фида** (SDD P2.3): зависит от B1 (assignee).
 - [ ] **B7. Авто-брифинг при запуске** (SDD P2.4): `useEffect` в `FeedView` генерит брифинг
       при старте (не только по клику).
