@@ -72,10 +72,12 @@
       были; баг — `create_task`/`create_task_cmd` не принимали assignee (тихо
       терялся). Исправлено: `productivity.rs::create_task` + `lib.rs::create_task_cmd`
       теперь принимают `assignee: Option<String>` и пишут в БД. `tsc` зелёный.
-- [ ] **B2. Generative-UI действия на карточках фида** (SDD P1.2): inline-кнопки
-      Ответить/Делегировать/Резюме в `FeedView.tsx`/`FeedCard`.
-- [ ] **B3. Дистрибутив / Release** (SDD P1.4): проверить `.github/workflows/release.yml`,
-      auto-upload артефактов в GitHub Releases (AppImage/deb/MSI).
+- [x] **B2. Generative-UI действия на карточках фида** (SDD P1.2): ✅ Уже
+      реализовано в `FeedView.tsx`/`FeedCard` — inline-кнопки toTask/Резюме/Ответить/
+      Открыть/Делегировать.
+- [x] **B3. Дистрибутив / Release** (SDD P1.4): ✅ `release.yml` собирает Linux
+      (AppImage/deb), Windows (MSI/NSIS), macOS (dmg/app) и публикует в GitHub
+      Releases по тегу `v*`. Работает.
 
 Приоритет 2 — важно:
 - [x] **B4. Множественные источники** (SDD P2.1): ✅ Готово 2026-07-07. Backend
@@ -89,17 +91,33 @@
       + DragOverlay + PointerSensor с activation distance). Перетаскивание между
       колонками вызывает `move_kanban_task_cmd`. Кнопки-перемещения заменены на DnD.
       `tsc --noEmit` зелёный.
-- [ ] **B6. Делегирование из карточки фида** (SDD P2.3): зависит от B1 (assignee).
-- [ ] **B7. Авто-брифинг при запуске** (SDD P2.4): `useEffect` в `FeedView` генерит брифинг
-      при старте (не только по клику).
+- [x] **B6. Делегирование из карточки фида** (SDD P2.3): ✅ Уже реализовано —
+      `delegateFromCard` + inline-форма исполнителя в `FeedCard` (создание задачи +
+      `update_task_cmd` с assignee, опц. определение проекта через LLM). Зависит от B1.
+- [x] **B7. Авто-брифинг при запуске** (SDD P2.4): ✅ Уже реализовано — `autoBriefRef`
+      effect в `FeedView` генерит unified-брифинг при монтировании (не только по клику).
 - [ ] **B8. Jira-синк** (SDD P2.5): двусторонняя синхронизация через Hermes MCP/REST.
+      Сейчас только add/update/remove_jira_source_cmd (без синка). НЕ СДЕЛАНО.
 
 Приоритет 3 — полировка/рост:
-- [ ] **B9. Sections/sub-projects** (P3.1) · **B10. Labels/теги** (P3.2) ·
-      **B11. Профили подключения UI** (P3.3, backend `profiles.rs` уже есть) ·
-      **B12. Skills/cron management UI** (P3.4) · **B13. MCP servers UI** (P3.5) ·
-      **B14. Confidence signaling** (P3.6) · **B15. Motion animations** (P3.7) ·
-      **B16. RSS/YouTube через skills** (P3.8) · **B17. Telegram-каналы по теме** (P3.9).
+- [x] **B10. Labels/теги** (P3.2): ✅ Реализовано — поле `labels` в задачах + UI в
+      `TasksView` (ввод + отрисовка #тегов).
+- [x] **B11. Профили подключения UI** (P3.3): ✅ `ProfilesScreen.tsx` + backend
+      `profiles.rs` (list/create/delete).
+- [x] **B12. Skills/cron management UI** (P3.4): ✅ `SkillsTab` + `CronTab` в
+      `SettingsPanel` (list/enable/disable; cron CRUD).
+- [x] **B13. MCP servers UI** (P3.5): ✅ `McpTab` в `SettingsPanel` (list/add/remove/
+      toggle/test).
+- [x] **B15. Motion animations** (P3.7): ✅ Готово 2026-07-07 — CSS keyframes
+      `fade-in` (+ reduced-motion guard) в `globals.css`; применено к `FeedCard` и
+      модальным окнам (`.ac-modal`).
+- [~] **B9. Sections/sub-projects** (P3.1): backend готов (`sections` table +
+      list/create/delete_section в `productivity.rs`), НО UI в `ProjectsView`/
+      привязка task→section ОТСУТСТВУЕТ (нужна миграция `tasks.section_id`).
+- [ ] **B8. Jira-синк** (P2.5): НЕ СДЕЛАНО (только CRUD источника).
+- [ ] **B14. Confidence signaling** (P3.6): НЕ СДЕЛАНО (нет данных из backend).
+- [ ] **B16. RSS/YouTube через skills** (P3.8): НЕ СДЕЛАНО.
+- [ ] **B17. Telegram-каналы по теме** (P3.9): НЕ СДЕЛАНО.
 
 ---
 

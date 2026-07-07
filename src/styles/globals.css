@@ -468,6 +468,18 @@
     max-width: 480px;
     width: 90%;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+    animation: fade-in 0.18s ease-out;
+  }
+}
+
+/* B15: respect users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-fade-in-delay-1,
+  .animate-fade-in-delay-2,
+  .animate-fade-in-delay-3,
+  .ac-modal {
+    animation: none !important;
   }
 }
 

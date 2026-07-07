@@ -427,7 +427,7 @@ function FeedCard({
   const [assignee, setAssignee] = useState("");
   return (
     <div
-      className="group p-3 rounded-lg border border-ac-border bg-ac-surface hover:border-ac-brand-border transition-colors cursor-pointer"
+      className="group p-3 rounded-lg border border-ac-border bg-ac-surface hover:border-ac-brand-border transition-colors cursor-pointer animate-fade-in"
       onClick={onOpen}
     >
       <div className="flex items-start gap-2.5">
