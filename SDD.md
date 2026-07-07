@@ -1,9 +1,9 @@
 # Штурман Desktop — Спецификация разработки (SDD)
 ## Единый документ: требования, архитектура, состояние, план доработок
 
-**Версия документа:** 1.0  
-**Версия приложения:** 3.1.0  
-**Дата:** 2026-07-04
+**Версия документа:** 1.1  
+**Версия приложения:** 3.2.0  
+**Дата:** 2026-07-07
 
 ---
 
@@ -269,7 +269,7 @@ YouTube, RSS. Сейчас SourcesTab поддерживает один инст
 
 | Метрика | Значение |
 |---|---|
-| Версия | 3.1.0 |
+| Версия | 3.2.0 |
 | Rust LOC | ~9,900 |
 | TypeScript LOC | ~9,800 |
 | CSS LOC | ~490 |
@@ -284,15 +284,34 @@ YouTube, RSS. Сейчас SourcesTab поддерживает один инст
 
 ---
 
-## 7. ТЕХНИЧЕСКИЙ ДОЛГ
+## 7. ТЕХНИЧЕСКИЙ ДОЛГ (актуально на 2026-07-07)
 
-1. **connectionStore.fetchGatewayStatus** — вызывает gateway_status_cmd (bool)
-   ожидая объект. Исправлено в аудите, но connectionStore может ещё иметь старый код.
-2. **groupMessages** — no-op passthrough в MessageList. Удалить.
-3. **detect_instances** — legacy команда, используется только ConnectScreen (fallback).
-4. **DashboardView.tsx удалён**, но ссылка может остаться в импортах.
-5. **CSS `@import` порядок** — fonts перед tailwindcss (исправлено, но проверить).
-6. **40 warnings** в cargo — неиспользуемые функции/structs (cleanup).
+> Предыдущая редакция §7 (6 пунктов) устарела — все перечисленные пункты уже
+> решены или не актуальны. Ниже — актуальное состояние по результатам аудита кода.
+
+### 7.1. Закрытые (проверено в коде)
+- `connectionStore.fetchGatewayStatus` — корректно использует `bool`
+  (connectionStore.ts:122-138), не объект. ✅
+- `groupMessages` — был no-op passthrough в MessageList; **удалён** в аудите. ✅
+- `detect_instances` — существует и используется (ConnectScreen.tsx:96,
+  lib.rs:185). Не legacy. ✅
+- `DashboardView.tsx` — удалён, висячих импортов нет (grep чист). ✅
+- CSS `@import` — порядок корректен (globals.css: fonts перед tailwindcss). ✅
+- Self-diagnosis modal — подключён (App.tsx:357, StatsView → add_self_check_cmd). ✅
+
+### 7.2. Открытые (требуют работы)
+1. **Документация/бренд рассинхрон.** Репозиторий GitHub — `autolycus-desktop`,
+   но продукт внутри — «Steersman / Штурман Desktop». Деплой по ссылке брендирован
+   «Autolycus Desktop» + «Built with Next.js + shadcn/ui» (фактический стек —
+   Tauri 2 + React 19 + Vite). Каноничное имя (решено): **Steersman / Штурман**;
+   внешний landing править отдельно при наличии доступа.
+2. **cargo warnings** — число не подтверждено (сборка Rust недоступна в CI-среде
+   аудита). Требуется `cargo check` + `clippy` и чистка unused-предупреждений.
+3. **Целостность Tauri-команд** — сверить `#[tauri::command]` (lib.rs) с вызовами
+   `invoke(...)` во фронте; убедиться, что все `invoke` типизированы в
+   `src/lib/types.ts`.
+4. **Миграции БД** — добавление полей (напр. `assignee` в tasks, см. §4 P1.1)
+   требует механизма миграций `kanban-desktop.db`.
 
 ---
 

@@ -1,14 +1,8 @@
-import { useRef, useEffect, useMemo, useState } from "react";
+import { useRef, useEffect, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { MessageBubble } from "./MessageBubble";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import type { Message } from "../../lib/types";
-
-function groupMessages(messages: Message[]): Message[] {
-  // Simple pass-through for now; grouping logic can be added later
-  return messages;
-}
 
 /** Empty-state greeting derived from the agent's soul (soul.md). Falls back to
  * a sensible default. The user can customize this via onboarding/Settings. */
@@ -57,10 +51,9 @@ function SoulGreeting() {
 export function MessageList() {
   const parentRef = useRef<HTMLDivElement>(null);
   const messages = useGatewayStore((s) => s.messages);
-  const grouped = useMemo(() => groupMessages(messages), [messages]);
 
   const virtualizer = useVirtualizer({
-    count: grouped.length,
+    count: messages.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 80,
     overscan: 5,
@@ -74,14 +67,14 @@ export function MessageList() {
   });
 
   // Auto-scroll on new message OR content update
-  const lastContent = grouped.length > 0 ? grouped[grouped.length - 1].content : "";
+  const lastContent = messages.length > 0 ? messages[messages.length - 1].content : "";
   useEffect(() => {
-    if (grouped.length > 0) {
-      virtualizer.scrollToIndex(grouped.length - 1, { align: "end" });
+    if (messages.length > 0) {
+      virtualizer.scrollToIndex(messages.length - 1, { align: "end" });
     }
-  }, [grouped.length, lastContent]);
+  }, [messages.length, lastContent]);
 
-  if (grouped.length === 0) {
+  if (messages.length === 0) {
     return <SoulGreeting />;
   }
 
@@ -90,13 +83,13 @@ export function MessageList() {
       <div style={{ height: virtualizer.getTotalSize() }} className="relative">
         {virtualizer.getVirtualItems().map((item) => (
           <div
-            key={grouped[item.index]?.id ?? item.key}
+            key={messages[item.index]?.id ?? item.key}
             ref={virtualizer.measureElement}
             data-index={item.index}
             className="absolute top-0 left-0 w-full"
             style={{ transform: `translateY(${item.start}px)` }}
           >
-            <MessageBubble message={grouped[item.index]} />
+            <MessageBubble message={messages[item.index]} />
           </div>
         ))}
       </div>
