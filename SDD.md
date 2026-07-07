@@ -234,7 +234,7 @@ YouTube, RSS. Сейчас SourcesTab поддерживает один инст
 
 | # | Задача | Объём | Зависимости |
 |---|---|---|---|
-| P1.1 | **Assignee в задачах** + UI picker | малый | schema migration |
+| P1.1 | **Assignee в задачах** + UI picker | малый | ✅ Готово (2026-07-07): схема (assignee) была, UI (TasksView) был, но `create_task`/`create_task_cmd` не принимали assignee → исправлено в productivity.rs + lib.rs |
 | P1.2 | **Generative-UI действия** на карточках фида | средний | FeedCard rewrite |
 | P1.3 | **Self-diagnosis modal** → add_self_check_cmd | малый | wiring |
 | P1.4 | **Дистрибутив** — GitHub Release auto-upload | малый | release.yml fix |

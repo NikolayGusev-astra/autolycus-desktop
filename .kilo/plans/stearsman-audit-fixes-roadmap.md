@@ -68,8 +68,10 @@
 ## Часть B — Roadmap фич из SDD §4 (пропущенные требования)
 
 Приоритет 1 — критично (MVP-щели пользователя):
-- [ ] **B1. Assignee в задачах** (SDD P1.1): миграция схемы `tasks` (поле assignee) в
-      `productivity.rs`/`kanban.rs` + UI-picker в `TasksView.tsx`.
+- [x] **B1. Assignee в задачах** (SDD P1.1): ✅ Готово 2026-07-07. Схема и UI уже
+      были; баг — `create_task`/`create_task_cmd` не принимали assignee (тихо
+      терялся). Исправлено: `productivity.rs::create_task` + `lib.rs::create_task_cmd`
+      теперь принимают `assignee: Option<String>` и пишут в БД. `tsc` зелёный.
 - [ ] **B2. Generative-UI действия на карточках фида** (SDD P1.2): inline-кнопки
       Ответить/Делегировать/Резюме в `FeedView.tsx`/`FeedCard`.
 - [ ] **B3. Дистрибутив / Release** (SDD P1.4): проверить `.github/workflows/release.yml`,

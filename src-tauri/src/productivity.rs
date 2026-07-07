@@ -163,11 +163,12 @@ pub fn create_task(
     priority: i64,
     due_date: Option<&str>,
     project_id: Option<i64>,
+    assignee: &str,
 ) -> Result<i64, String> {
     let conn = open(hermes_home, profile)?;
     conn.execute(
-        "INSERT INTO tasks (title, priority, due_date, project_id) VALUES (?1, ?2, ?3, ?4)",
-        params![title, priority, due_date, project_id],
+        "INSERT INTO tasks (title, priority, due_date, project_id, assignee) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![title, priority, due_date, project_id, assignee],
     )
     .map_err(|e| format!("insert: {}", e))?;
     Ok(conn.last_insert_rowid())
