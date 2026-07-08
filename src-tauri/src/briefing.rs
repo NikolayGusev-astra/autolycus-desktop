@@ -4,7 +4,7 @@
 // + sessions), formats it as a human-readable briefing, and writes it
 // into state.db as a special session (source="briefing_smart").
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,17 +104,48 @@ pub struct BriefingResult {
 }
 
 fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayload, String> {
-    let python = hermes_home
-        .join("hermes-agent/venv/Scripts/python.exe");
-    let python = if python.exists() {
-        python.to_string_lossy().to_string()
-    } else {
-        "python".to_string()
+    // Search both possible home locations: ~/.hermes (user checkout) and
+    // %LOCALAPPDATA%\hermes (uv-managed install). On Windows the desktop
+    // resolves the install dir, but the user may keep their config in ~/.hermes.
+    let candidate_homes: Vec<PathBuf> = {
+        let mut v = vec![hermes_home.to_path_buf()];
+        if let Some(user_home) = dirs::home_dir() {
+            let uh = user_home.join(".hermes");
+            if uh != *hermes_home && uh.exists() {
+                v.push(uh);
+            }
+            let local = user_home
+                .join("AppData")
+                .join("Local")
+                .join("hermes");
+            if local != *hermes_home && local.exists() {
+                v.push(local);
+            }
+        }
+        v
     };
-    let server = hermes_home.join("mcp-smart-briefing/server.py");
-    if !server.exists() {
-        return Err(format!("MCP server not found: {}", server.display()));
-    }
+    let server = candidate_homes
+        .iter()
+        .map(|h| h.join("mcp-smart-briefing/server.py"))
+        .find(|p| p.exists())
+        .ok_or_else(|| {
+            format!(
+                "MCP server not found in any of: {}",
+                candidate_homes
+                    .iter()
+                    .map(|h| h.join("mcp-smart-briefing/server.py").display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+    let server_home = server.parent().and_then(|p| p.parent()).unwrap_or(hermes_home);
+
+    let python = candidate_homes
+        .iter()
+        .map(|h| h.join("hermes-agent/venv/Scripts/python.exe"))
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "python".to_string());
 
     let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
     let call_req = format!(
@@ -125,7 +156,7 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
 
     let output = Command::new(&python)
         .arg(&server)
-        .current_dir(hermes_home)
+        .current_dir(server_home)
         .env("HERMES_HOME", hermes_home)
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(std::process::Stdio::piped())
