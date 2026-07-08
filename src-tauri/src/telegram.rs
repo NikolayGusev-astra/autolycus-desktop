@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
@@ -18,11 +19,31 @@ pub struct TelegramResult {
     pub error: Option<String>,
 }
 
+/// Build a reqwest client, optionally routing through a SOCKS5 proxy.
+/// `use_proxy == false` or empty `proxy_url` => direct client (no proxy).
+fn build_client(use_proxy: bool, proxy_url: &str) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    if use_proxy && !proxy_url.is_empty() {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("Proxy config error: {}", e))?;
+        builder
+            .proxy(proxy)
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))
+    } else {
+        builder
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))
+    }
+}
+
 /// Send a message to Telegram chat.
 pub async fn send_message(
     bot_token: &str,
     chat_id: &str,
     text: &str,
+    use_proxy: bool,
+    proxy_url: &str,
 ) -> TelegramResult {
     if bot_token.is_empty() || chat_id.is_empty() {
         return TelegramResult {
@@ -41,15 +62,12 @@ pub async fn send_message(
     params.insert("text", text.to_string());
     params.insert("parse_mode", "HTML".to_string());
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
+    let client = match build_client(use_proxy, proxy_url) {
         Ok(c) => c,
         Err(e) => {
             return TelegramResult {
                 success: false,
-                error: Some(format!("HTTP client error: {}", e)),
+                error: Some(e),
             };
         }
     };
@@ -76,7 +94,7 @@ pub async fn send_message(
 }
 
 /// Validate a bot token by calling getMe.
-pub async fn validate_bot_token(bot_token: &str) -> TelegramResult {
+pub async fn validate_bot_token(bot_token: &str, use_proxy: bool, proxy_url: &str) -> TelegramResult {
     if bot_token.is_empty() {
         return TelegramResult {
             success: false,
@@ -89,15 +107,12 @@ pub async fn validate_bot_token(bot_token: &str) -> TelegramResult {
         bot_token
     );
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
+    let client = match build_client(use_proxy, proxy_url) {
         Ok(c) => c,
         Err(e) => {
             return TelegramResult {
                 success: false,
-                error: Some(format!("HTTP client error: {}", e)),
+                error: Some(e),
             };
         }
     };

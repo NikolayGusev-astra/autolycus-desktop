@@ -20,6 +20,7 @@ export interface ModelConfig {
   model: string;
   base_url: string;
   is_default?: boolean;  // optional default model flag
+  proxy?: { use_proxy: boolean; proxy_url: string };
 }
 
 interface GeneralInfo {
@@ -49,10 +50,11 @@ interface SettingsStore {
   removeModel: (id: string) => Promise<boolean>;
   setActiveModel: (provider: string, model: string, base_url: string) => Promise<boolean>;
   setDefaultModel: (id: string) => Promise<boolean>;
+  saveProxyConfig: (use_proxy: boolean, proxy_url: string) => Promise<boolean>;
   setTheme: (dark: boolean) => Promise<void>;
 }
 
-export const useSettingsStore = create<SettingsStore>((set) => ({
+export const useSettingsStore = create<SettingsStore>((set, get) => ({
   // General
   generalInfo: null,
   generalLoading: false,
@@ -165,12 +167,34 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
         provider,
         model,
         baseUrl: base_url,
+        proxy: null,
         profile: null as string | null,
       });
       set({ modelConfig: { provider, model, base_url } });
       return true;
     } catch (err) {
       console.error("Failed to set active model:", err);
+      return false;
+    }
+  },
+
+  saveProxyConfig: async (use_proxy: boolean, proxy_url: string) => {
+    try {
+      const current = get().modelConfig;
+      const provider = current?.provider ?? "";
+      const model = current?.model ?? "";
+      const base_url = current?.base_url ?? "";
+      await invoke("set_model_config_cmd", {
+        provider,
+        model,
+        baseUrl: base_url,
+        proxy: { use_proxy, proxy_url },
+        profile: null as string | null,
+      });
+      set({ modelConfig: { provider, model, base_url, proxy: { use_proxy, proxy_url } } });
+      return true;
+    } catch (err) {
+      console.error("Failed to save proxy config:", err);
       return false;
     }
   },

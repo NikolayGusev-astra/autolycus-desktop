@@ -32,6 +32,16 @@ pub fn canonical_base_url(provider: &str) -> Option<&'static str> {
     }
 }
 
+/// Get all known provider IDs — single source of truth for the frontend provider list.
+pub fn all_provider_ids() -> Vec<&'static str> {
+    vec![
+        "openai", "openrouter", "ollama-cloud", "deepseek", "groq", "mistral",
+        "together", "fireworks", "atlascloud", "cerebras", "perplexity",
+        "huggingface", "xiaomi", "zai", "anthropic", "lmstudio", "atomicchat",
+        "ollama", "vllm", "llamacpp", "kilo",
+    ]
+}
+
 /// Get all provider base URLs as a HashMap.
 pub fn all_provider_urls() -> HashMap<String, String> {
     let mut map = HashMap::new();

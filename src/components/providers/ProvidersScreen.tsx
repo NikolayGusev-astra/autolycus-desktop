@@ -54,6 +54,7 @@ const PROVIDERS_OPTIONS = [
   { value: "huggingface", label: "providers.huggingface" },
   { value: "perplexity", label: "providers.perplexity" },
   { value: "cerebras", label: "providers.cerebras" },
+  { value: "kilo", label: "providers.kilo" },
   { value: "custom", label: "providers.custom" },
 ];
 

@@ -556,7 +556,7 @@ function TelegramTab() {
 
 // ── Models tab content ────────────────────────────────────────────────────
 function ModelsTab() {
-  const { models, modelConfig, modelsLoading, loadModels, loadModelConfig, addModel, removeModel, setActiveModel } = useSettingsStore();
+  const { models, modelConfig, modelsLoading, loadModels, loadModelConfig, addModel, removeModel, setActiveModel, saveProxyConfig } = useSettingsStore();
   const { t } = useTranslation();
 
   // Add model form state
@@ -566,6 +566,10 @@ function ModelsTab() {
   const [newModel, setNewModel] = useState("");
   const [newBaseUrl, setNewBaseUrl] = useState("https://openrouter.ai/api/v1");
   const [addStatus, setAddStatus] = useState("");
+  // Proxy settings (SOCKS5) — applied to model API calls (Remote/Ssh modes)
+  const [proxyEnabled, setProxyEnabled] = useState(true);
+  const [proxyUrl, setProxyUrl] = useState("socks5://127.0.0.1:12334");
+  const [proxyStatus, setProxyStatus] = useState("");
   // Available models from gateway /v1/models
   const [apiModels, setApiModels] = useState<string[]>([]);
   const [apiModelsLoading, setApiModelsLoading] = useState(false);
@@ -577,6 +581,14 @@ function ModelsTab() {
     setApiModelsLoading(true);
     invoke<string[]>("list_models_api_cmd").then(setApiModels).catch(() => setApiModels([])).finally(() => setApiModelsLoading(false));
   }, [loadModels, loadModelConfig]);
+
+  // Sync proxy state from loaded model config
+  useEffect(() => {
+    if (modelConfig?.proxy) {
+      setProxyEnabled(modelConfig.proxy.use_proxy);
+      setProxyUrl(modelConfig.proxy.proxy_url || "socks5://127.0.0.1:12334");
+    }
+  }, [modelConfig]);
 
   const handleAddModel = async () => {
     if (!newName.trim() || !newModel.trim()) {
@@ -608,6 +620,12 @@ function ModelsTab() {
     if (ok) {
       setAddStatus(`✓ ${t("models.active")}: ${provider}/${model}`);
     }
+  };
+
+  const handleSaveProxy = async () => {
+    setProxyStatus(t("saving_dots") || "…");
+    const ok = await saveProxyConfig(proxyEnabled, proxyUrl.trim());
+    setProxyStatus(ok ? `✓ ${t("proxy.saved") || "Proxy saved"}` : `✗ ${t("proxy.saveError") || "Save failed"}`);
   };
 
   return (
@@ -770,6 +788,40 @@ function ModelsTab() {
             {addStatus}
           </p>
         )}
+
+        {/* Proxy (SOCKS5) — applied to model API calls in Remote/Ssh modes */}
+        <div className="mt-4 p-3 rounded-lg border border-ac-border bg-ac-surface">
+          <div className="flex items-center gap-2 mb-2">
+            <Globe className="w-3.5 h-3.5 text-ac-brand" />
+            <label className="text-xs font-medium text-ac-ink">{t("proxy.title") || "SOCKS5 Proxy"}</label>
+          </div>
+          <p className="text-[11px] text-ac-muted mb-2">{t("proxy.hint") || "Used for OpenAI-compatible model APIs (OpenRouter, etc.) in Remote/Ssh connection modes."}</p>
+          <label className="flex items-center gap-2 cursor-pointer mb-2">
+            <input
+              type="checkbox"
+              checked={proxyEnabled}
+              onChange={(e) => setProxyEnabled(e.target.checked)}
+              className="accent-ac-brand"
+            />
+            <span className="text-sm text-ac-ink">{t("proxy.useProxy") || "Use proxy"}</span>
+          </label>
+          <input
+            type="text"
+            value={proxyUrl}
+            disabled={!proxyEnabled}
+            onChange={(e) => setProxyUrl(e.target.value)}
+            placeholder="socks5://127.0.0.1:12334"
+            className="ac-input w-full px-3 py-2 text-sm font-mono mb-2"
+          />
+          <div className="flex items-center gap-2">
+            <button onClick={handleSaveProxy} className="ac-btn px-3 py-1.5 text-xs">
+              {t("proxy.save") || "Save proxy"}
+            </button>
+            {proxyStatus && (
+              <span className={`text-xs ${proxyStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{proxyStatus}</span>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1007,6 +1059,8 @@ interface TelegramSource {
   allowed_users: string;
   home_channel: string;
   enabled: boolean;
+  use_proxy?: boolean;
+  proxy_url?: string;
 }
 interface EmailSource {
   id: string;
@@ -1017,6 +1071,8 @@ interface EmailSource {
   smtp_port: number;
   imap_host: string;
   enabled: boolean;
+  use_proxy?: boolean;
+  proxy_url?: string;
 }
 interface JiraSource {
   id: string;
@@ -1026,6 +1082,8 @@ interface JiraSource {
   api_token: string;
   project_key: string;
   enabled: boolean;
+  use_proxy?: boolean;
+  proxy_url?: string;
 }
 interface SourcesConfig {
   telegram: TelegramSource[];
@@ -1065,6 +1123,7 @@ function SourcesTab() {
       allowed_users: "",
       home_channel: "",
       enabled: true,
+      use_proxy: true,
     };
     try {
       await invoke("add_telegram_source_cmd", { source: newSource, profile: null });
@@ -1106,6 +1165,7 @@ function SourcesTab() {
       smtp_port: 587,
       imap_host: "imap.gmail.com",
       enabled: true,
+      use_proxy: true,
     };
     try {
       await invoke("add_email_source_cmd", { source: newSource, profile: null });
@@ -1146,6 +1206,7 @@ function SourcesTab() {
       api_token: "",
       project_key: "",
       enabled: true,
+      use_proxy: true,
     };
     try {
       await invoke("add_jira_source_cmd", { source: newSource, profile: null });
@@ -1191,28 +1252,34 @@ function SourcesTab() {
     };
 
     const fields = type === "telegram" ? [
-      { key: "name", label: "Name", type: "text" as const },
-      { key: "bot_token", label: "Bot Token", type: "password" as const, placeholder: "123456:ABC-DEF..." },
-      { key: "chat_id", label: "Chat ID", type: "text" as const, placeholder: "-1001234567890" },
-      { key: "allowed_users", label: "Allowed Users", type: "text" as const, placeholder: "user_id1, user_id2" },
-      { key: "home_channel", label: "Home Channel", type: "text" as const, placeholder: "-1001234567890" },
-      { key: "enabled", label: "Enabled", type: "checkbox" as const },
-    ] : type === "email" ? [
-      { key: "name", label: "Name", type: "text" as const },
-      { key: "address", label: "Email Address", type: "text" as const, placeholder: "you@example.com" },
-      { key: "password", label: "Password", type: "password" as const, placeholder: "app password" },
-      { key: "smtp_host", label: "SMTP Host", type: "text" as const, placeholder: "smtp.gmail.com" },
-      { key: "smtp_port", label: "SMTP Port", type: "number" as const },
-      { key: "imap_host", label: "IMAP Host", type: "text" as const, placeholder: "imap.gmail.com" },
-      { key: "enabled", label: "Enabled", type: "checkbox" as const },
-    ] : [
-      { key: "name", label: "Name", type: "text" as const },
-      { key: "url", label: "Jira URL", type: "text" as const, placeholder: "https://company.atlassian.net" },
-      { key: "username", label: "Username", type: "text" as const },
-      { key: "api_token", label: "API Token", type: "password" as const, placeholder: "API token" },
-      { key: "project_key", label: "Project Key", type: "text" as const, placeholder: "PROJ" },
-      { key: "enabled", label: "Enabled", type: "checkbox" as const },
-    ];
+          { key: "name", label: "Name", type: "text" as const },
+          { key: "bot_token", label: "Bot Token", type: "password" as const, placeholder: "123456:ABC-DEF..." },
+          { key: "chat_id", label: "Chat ID", type: "text" as const, placeholder: "-1001234567890" },
+          { key: "allowed_users", label: "Allowed Users", type: "text" as const, placeholder: "user_id1, user_id2" },
+          { key: "home_channel", label: "Home Channel", type: "text" as const, placeholder: "-1001234567890" },
+          { key: "enabled", label: "Enabled", type: "checkbox" as const },
+          { key: "use_proxy", label: "Use Proxy (SOCKS5)", type: "checkbox" as const },
+          { key: "proxy_url", label: "Proxy URL (optional)", type: "text" as const, placeholder: "socks5://127.0.0.1:12334" },
+        ] : type === "email" ? [
+          { key: "name", label: "Name", type: "text" as const },
+          { key: "address", label: "Email Address", type: "text" as const, placeholder: "you@example.com" },
+          { key: "password", label: "Password", type: "password" as const, placeholder: "app password" },
+          { key: "smtp_host", label: "SMTP Host", type: "text" as const, placeholder: "smtp.gmail.com" },
+          { key: "smtp_port", label: "SMTP Port", type: "number" as const },
+          { key: "imap_host", label: "IMAP Host", type: "text" as const, placeholder: "imap.gmail.com" },
+          { key: "enabled", label: "Enabled", type: "checkbox" as const },
+          { key: "use_proxy", label: "Use Proxy (SOCKS5)", type: "checkbox" as const },
+          { key: "proxy_url", label: "Proxy URL (optional)", type: "text" as const, placeholder: "socks5://127.0.0.1:12334" },
+        ] : [
+          { key: "name", label: "Name", type: "text" as const },
+          { key: "url", label: "Jira URL", type: "text" as const, placeholder: "https://company.atlassian.net" },
+          { key: "username", label: "Username", type: "text" as const },
+          { key: "api_token", label: "API Token", type: "password" as const, placeholder: "API token" },
+          { key: "project_key", label: "Project Key", type: "text" as const, placeholder: "PROJ" },
+          { key: "enabled", label: "Enabled", type: "checkbox" as const },
+          { key: "use_proxy", label: "Use Proxy (SOCKS5)", type: "checkbox" as const },
+          { key: "proxy_url", label: "Proxy URL (optional)", type: "text" as const, placeholder: "socks5://127.0.0.1:12334" },
+        ];
 
     const icon = type === "telegram" ? <Send className="w-4 h-4 text-[#0088cc]" /> :
                 type === "email" ? <Mail className="w-4 h-4 text-[#ea4335]" /> :

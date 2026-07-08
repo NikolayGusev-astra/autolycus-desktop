@@ -110,6 +110,7 @@ export const PROVIDERS = {
     { value: "google-gemini-cli", label: "Gemini (CLI OAuth)" },
     { value: "minimax-oauth", label: "MiniMax (OAuth)" },
     { value: "kimi-coding", label: "Kimi (Coding Plan)" },
+    { value: "kilo", label: "Kilo Code" },
     { value: "custom", label: "OpenAI Compatible / Local" },
   ],
   labels: {
@@ -145,6 +146,7 @@ export const PROVIDERS = {
     "google-gemini-cli": "Gemini (CLI OAuth)",
     "minimax-oauth": "MiniMax (OAuth)",
     "kimi-coding": "Kimi (Coding Plan)",
+    kilo: "Kilo Code",
     custom: "OpenAI Compatible / Local",
   } as Record<string, string>,
   setup: [

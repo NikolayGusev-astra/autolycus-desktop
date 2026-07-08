@@ -73,6 +73,7 @@ pub fn list_sessions(
                     ''
                 ) as preview
          FROM sessions s
+         WHERE s.id NOT LIKE 'briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
          ORDER BY s.started_at DESC
          LIMIT ?1 OFFSET ?2",
     )?;
@@ -336,6 +337,7 @@ pub fn list_feed(
                 ) as preview
          FROM sessions s
          WHERE s.source NOT IN ('subagent')  -- skip internal subagent sessions
+           AND s.id NOT LIKE 'briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
          ORDER BY s.started_at DESC
          LIMIT ?1",
     )?;

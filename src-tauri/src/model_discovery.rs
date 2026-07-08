@@ -44,6 +44,7 @@ pub async fn discover_models(
     provider: &str,
     base_url: Option<&str>,
     api_key: Option<&str>,
+    use_proxy: bool,
 ) -> DiscoveryResult {
     let p = provider.to_lowercase();
 
@@ -75,17 +76,31 @@ pub async fn discover_models(
         }
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return DiscoveryResult {
-                success: false,
-                models: Vec::new(),
-                error: Some(format!("HTTP client error: {}", e)),
-            };
+    let client = {
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10));
+        if use_proxy {
+            let proxy_url = crate::config::get_model_config(
+                &dirs::home_dir().unwrap_or_default().join(".hermes"),
+                None,
+            ).proxy.resolve_url();
+            if !proxy_url.is_empty() {
+                // If the proxy URL is malformed, fall back to a direct client
+                // rather than failing the whole discovery call.
+                if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+        }
+        match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                return DiscoveryResult {
+                    success: false,
+                    models: Vec::new(),
+                    error: Some(format!("HTTP client error: {}", e)),
+                };
+            }
         }
     };
 

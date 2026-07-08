@@ -8,6 +8,12 @@ use std::path::Path;
 
 use crate::config::profile_home;
 
+/// Default for the `use_proxy` per-connector flag: on by default, matching the
+/// requirement that every connector can be toggled through a proxy.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramSource {
     pub id: String,
@@ -17,6 +23,10 @@ pub struct TelegramSource {
     pub allowed_users: String,
     pub home_channel: String,
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub use_proxy: bool,
+    #[serde(default)]
+    pub proxy_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +39,10 @@ pub struct EmailSource {
     pub smtp_port: u16,
     pub imap_host: String,
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub use_proxy: bool,
+    #[serde(default)]
+    pub proxy_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +54,10 @@ pub struct JiraSource {
     pub api_token: String,
     pub project_key: String,
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub use_proxy: bool,
+    #[serde(default)]
+    pub proxy_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -389,11 +389,54 @@ fn yaml_value_to_json(yaml: &yaml_rust2::Yaml) -> Result<serde_json::Value, Stri
 
 // ── Model Config ──────────────────────────────────────────────────────────
 
+/// Per-connector / global SOCKS5 proxy settings.
+/// IPC contract matches the frontend `ProxySettings` type: { use_proxy, proxy_url }.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxySettings {
+    #[serde(default = "default_true")]
+    pub use_proxy: bool,
+    #[serde(default)]
+    pub proxy_url: String, // socks5://host:port, дефолт socks5://127.0.0.1:12334
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            use_proxy: true,
+            proxy_url: "socks5://127.0.0.1:12334".to_string(),
+        }
+    }
+}
+
+impl ProxySettings {
+    /// Resolve effective proxy URL: explicit setting → env HTTP_PROXY/HTTPS_PROXY → default.
+    pub fn resolve_url(&self) -> String {
+        if !self.proxy_url.is_empty() {
+            return self.proxy_url.clone();
+        }
+        if let Ok(env_p) = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("HTTPS_PROXY")) {
+            if !env_p.is_empty() {
+                return env_p;
+            }
+        }
+        "socks5://127.0.0.1:12334".to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelConfig {
+    #[serde(default)]
     pub provider: String,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
+    pub proxy: ProxySettings,
 }
 
 pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfig {
@@ -404,11 +447,30 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
             let provider = model_block.get("provider").and_then(|v| v.as_str()).unwrap_or("");
             let default = model_block.get("default").and_then(|v| v.as_str()).unwrap_or("");
             let base_url = model_block.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+            // proxy: read from a top-level `proxy:` block (desktop-managed) or
+            // from `model.proxy.*` for backward compatibility.
+            let mut proxy = ProxySettings::default();
+            if let Some(pb) = yaml.get("proxy").and_then(|m| m.as_object()) {
+                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+                proxy.proxy_url = pb
+                    .get("proxy_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            } else if let Some(pb) = model_block.get("proxy").and_then(|m| m.as_object()) {
+                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+                proxy.proxy_url = pb
+                    .get("proxy_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            }
             if !provider.is_empty() || !default.is_empty() {
                 return ModelConfig {
                     provider: provider.to_string(),
                     model: default.to_string(),
                     base_url: base_url.to_string(),
+                    proxy,
                 };
             }
         }
@@ -420,6 +482,7 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
         provider: env.get("PROVIDER").cloned().unwrap_or_default(),
         model: env.get("MODEL").cloned().unwrap_or_default(),
         base_url: env.get("BASE_URL").cloned().unwrap_or_default(),
+        proxy: ProxySettings::default(),
     }
 }
 
@@ -429,21 +492,32 @@ pub fn set_model_config(
     provider: &str,
     model: &str,
     base_url: &str,
+    proxy: Option<ProxySettings>,
 ) -> Result<(), String> {
     // Write to config.yaml's `model:` block — this is the source of truth that
     // `hermes setup`/Hermes itself reads (aligning the desktop with the agent,
     // instead of maintaining a divergent .env overlay). We also keep the .env
     // writes for backward compatibility with any code that still reads there.
-    set_yaml_block_scalars(
-        hermes_home,
-        profile,
-        "model",
-        &[
-            ("provider", provider),
-            ("default", model),
-            ("base_url", base_url),
-        ],
-    )?;
+    let mut kvs: Vec<(&str, &str)> = vec![
+        ("provider", provider),
+        ("default", model),
+        ("base_url", base_url),
+    ];
+    if let Some(p) = &proxy {
+        // Persist proxy in a dedicated top-level `proxy:` block (desktop-managed),
+        // separate from Hermes's `model:` block, so we don't fight `hermes setup`
+        // over the same keys. get_model_config reads it back from here.
+        set_yaml_block_scalars(
+            hermes_home,
+            profile,
+            "proxy",
+            &[
+                ("use_proxy", if p.use_proxy { "true" } else { "false" }),
+                ("proxy_url", p.proxy_url.as_str()),
+            ],
+        )?;
+    }
+    set_yaml_block_scalars(hermes_home, profile, "model", &kvs)?;
     write_env_value(hermes_home, profile, "PROVIDER", provider)?;
     write_env_value(hermes_home, profile, "MODEL", model)?;
     write_env_value(hermes_home, profile, "BASE_URL", base_url)?;

@@ -30,6 +30,7 @@ const SOURCE_META: Record<string, { icon: typeof Mail; color: string; label: str
   cli: { icon: Terminal, color: "#6b7280", label: "CLI" },
   tui: { icon: Terminal, color: "#6b7280", label: "TUI" },
   mcp: { icon: FileText, color: "#9333ea", label: "MCP" },
+  briefing_smart: { icon: Sparkles, color: "#10b981", label: "Smart Briefing" },
 };
 const DEFAULT_META = { icon: FileText, color: "#6b7280", label: "Источник" };
 
@@ -93,6 +94,28 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
     grouped[s] = items.filter((i) => i.source === s);
   }
 
+  // ── Smart briefing via Tauri + MCP (urgent/important/stale/personal) ────
+  const generateSmartBriefing = useCallback(async () => {
+    setBriefingLoading("smart");
+    setActionStatus("Smart briefing: querying MCP...");
+    try {
+      const result = await invoke<any>("generate_smart_briefing_cmd", {
+        days: 7,
+        profile: null,
+      });
+      setBriefings((p) => ({ ...p, smart: result.formatted }));
+      // Refresh feed to surface the new session row from state.db
+      void load();
+      setActionStatus(`Smart briefing: ${result.title}`);
+    } catch (e: any) {
+      console.error("smart briefing failed", e);
+      setActionStatus("Smart briefing failed: " + (e?.message || String(e)));
+    } finally {
+      setBriefingLoading(null);
+      setTimeout(() => setActionStatus(""), 4000);
+    }
+  }, [load]);
+
   // ── Briefing generation ──────────────────────────────────────────────────
   const generateBriefing = useCallback(async (source: string | null) => {
     const key = source || "unified";
@@ -105,37 +128,77 @@ export function FeedView({ onNewTask, onOpenSession, onOpenChat }: {
         ? items.filter(i => i.source === source && i.started_at >= weekAgo)
         : items.filter(i => i.started_at >= weekAgo);
 
-      if (sourceItems.length === 0) {
-        setBriefings((p) => ({ ...p, [key]: "Нет недавних сообщений за последние 7 дней." }));
+      // Bug B fix: also aggregate tasks / projects / goals so the briefing
+      // isn't just "the last N conversations".
+      const [tasksResult, projectsResult, goalsResult] = await Promise.all([
+        invoke<any[]>("list_tasks_cmd", { profile: null }).catch(() => []),
+        invoke<any[]>("list_projects_cmd", { profile: null }).catch(() => []),
+        invoke<any[]>("list_goals_cmd", { profile: null }).catch(() => []),
+      ]);
+      const activeTasks = (tasksResult || [])
+        .filter((t: any) => t.status !== "done" && t.status !== "completed")
+        .slice(0, 25);
+      const projects = (projectsResult || []).slice(0, 15);
+      const goals = (goalsResult || []).slice(0, 10);
+
+      if (sourceItems.length === 0 && activeTasks.length === 0) {
+        setBriefings((p) => ({ ...p, [key]: "Нет недавней активности и открытых задач за последние 7 дней." }));
         return;
       }
 
       // Build context with source attribution
-      const context = sourceItems
+      const sessionContext = sourceItems
         .map(i => `[${i.source}] ${i.title || i.preview} (${new Date(i.started_at * 1000).toLocaleDateString("ru-RU")})`)
         .join("\n");
+      const tasksContext = activeTasks.length
+        ? activeTasks.map((t: any) => `- [задача #${t.id}] ${t.title}${t.project_id ? ` (проект #${t.project_id})` : ""}${t.assignee ? ` @${t.assignee}` : ""} [${t.status}]`).join("\n")
+        : "—";
+      const projectsContext = projects.length
+        ? projects.map((p: any) => `- [проект #${p.id}] ${p.name}`).join("\n")
+        : "—";
+      const goalsContext = goals.length
+        ? goals.map((g: any) => `- [цель #${g.id}] ${g.title}${g.progress != null ? ` (${g.progress}%)` : ""}`).join("\n")
+        : "—";
 
       const prompt = source
-        ? `Проанализируй недавние сообщения из источника "${source}" за последние 7 дней. Дай краткий структурированный брифинг с указанием источников:
-${context}
+        ? `Проанализируй недавние сообщения из источника "${source}" за последние 7 дней. Дай краткий структурированный брифинг с указанием источников.
+
+Сессии:
+${sessionContext}
+
+Открытые задачи (контекст):
+${tasksContext}
 
 Формат ответа:
 1. **Важное** - что требует внимания
 2. **Действия** - что нужно сделать
 3. **Риски** - потенциальные проблемы
 Каждый пункт с указанием источника в скобках.`
-        : `Проанализируй недавние сообщения из всех источников за последние 7 дней. Дай сводный брифинг:
-${context}
+        : `Сделай сводный брифинг по всем источникам за последние 7 дней. Учти сессии, открытые задачи, проекты и цели.
+
+Сессии (последние 7 дней):
+${sessionContext}
+
+Открытые задачи:
+${tasksContext}
+
+Проекты:
+${projectsContext}
+
+Цели:
+${goalsContext}
 
 Формат ответа:
-1. **Важное** - что требует внимания (источник)
-2. **Действия** - что нужно сделать (источник)
-3. **Риски** - потенциальные проблемы (источник)
+1. **Важное** - что требует внимания (источник/задача)
+2. **Действия** - что нужно сделать (источник/задача)
+3. **Риски** - потенциальные проблемы
 
-Группируй по источникам, где возможно.`;
+Группируй по источникам/проектам, где возможно.`;
 
+      // Bug A fix: deterministic session_id so briefing calls don't spawn new
+      // desk-<uuid> sessions that would feed back into the feed (recursion).
       const result = await invoke<string>("send_message_cmd", {
-        request: { text: prompt, session_id: null, history: null },
+        request: { text: prompt, session_id: `briefing:${key}`, history: null },
       });
       setBriefings((p) => ({ ...p, [key]: result }));
     } catch (e) {
@@ -304,7 +367,22 @@ ${context}
                 {briefingLoading === "unified" ? <Loader className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
                 {briefings["unified"] ? t("feed.update") : t("feed.generate")}
               </button>
+              <button
+                onClick={() => void generateSmartBriefing()}
+                disabled={briefingLoading === "smart"}
+                className="ml-2 text-xs text-ac-brand hover:underline flex items-center gap-1"
+                title="Smart briefing: urgent Jira + emails + sessions via MCP"
+              >
+                {briefingLoading === "smart" ? <Loader className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                {briefings["smart"] ? "Smart \u21bb" : "Smart briefing"}
+              </button>
             </div>
+            {briefings["smart"] && (
+              <div className="mb-4 p-3 rounded border border-ac-brand-border bg-ac-card/50">
+                <div className="text-xs uppercase tracking-wide text-ac-muted mb-2">Smart MCP Briefing</div>
+                <p className="text-sm text-ac-ink-2 whitespace-pre-wrap leading-relaxed">{briefings["smart"]}</p>
+              </div>
+            )}
             {briefings["unified"] ? (
               <p className="text-sm text-ac-ink-2 whitespace-pre-wrap leading-relaxed mb-4">{briefings["unified"]}</p>
             ) : (

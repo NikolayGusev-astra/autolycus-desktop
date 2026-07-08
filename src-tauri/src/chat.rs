@@ -182,8 +182,19 @@ pub async fn send_message_via_api(
     history: Option<&Vec<HistoryItem>>,
     session_id: Option<&str>,
     app_handle: &AppHandle,
+    use_proxy: bool,
 ) -> Result<String, String> {
-    let client = Client::new();
+    // Only route through proxy when talking to a remote/ssh endpoint. Local
+    // gateway lives on localhost and must stay direct (SOCKS5 breaks 127.0.0.1).
+    let proxy_url = if use_proxy { model_config.proxy.resolve_url() } else { String::new() };
+    let client = if proxy_url.is_empty() {
+        Client::new()
+    } else {
+        Client::builder()
+            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Proxy config error: {}", e))?)
+            .build()
+            .map_err(|e| format!("Proxy client error: {}", e))?
+    };
 
     // Build messages array
     let mut messages: Vec<Value> = Vec::new();
@@ -488,6 +499,7 @@ pub async fn send_message(
                 request.history.as_ref(),
                 request.session_id.as_deref(),
                 app_handle,
+                false,
             )
             .await
         }
@@ -500,6 +512,7 @@ pub async fn send_message(
                 request.history.as_ref(),
                 request.session_id.as_deref(),
                 app_handle,
+                true,
             )
             .await
         }
@@ -534,6 +547,7 @@ pub async fn send_message(
                 request.history.as_ref(),
                 request.session_id.as_deref(),
                 app_handle,
+                true,
             )
             .await
         }

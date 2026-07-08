@@ -22,6 +22,7 @@ mod provider_registry;
 mod registry;
 mod secrets;
 mod sessions;
+mod briefing;
 mod skills;
 mod sources;
 mod ssh;
@@ -545,7 +546,7 @@ fn save_provider_key_cmd(
     // agent picks them up immediately.
     if let (Some(p), Some(m)) = (provider, model) {
         let b = base_url.unwrap_or_default();
-        let _ = config::set_model_config(&hermes_home, None, &p, &m, &b);
+        let _ = config::set_model_config(&hermes_home, None, &p, &m, &b, None);
     }
     Ok(())
 }
@@ -957,6 +958,16 @@ async fn list_feed_cmd(
         .map_err(|e| format!("SQLite error: {}", e))
 }
 
+#[tauri::command]
+async fn generate_smart_briefing_cmd(
+    state: State<'_, AppState>,
+    days: Option<i64>,
+    profile: Option<String>,
+) -> Result<briefing::BriefingResult, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    briefing::generate_smart_briefing(&hermes_home, profile.as_deref(), days.unwrap_or(7))
+}
+
 // ── Profile Commands ──────────────────────────────────────────────────────
 
 /// List profiles
@@ -1098,10 +1109,11 @@ async fn set_model_config_cmd(
     model: String,
     base_url: String,
     profile: Option<String>,
+    proxy: Option<config::ProxySettings>,
 ) -> Result<(), String> {
     let hermes_home = state.hermes_home()?;
 
-    config::set_model_config(&hermes_home, profile.as_deref(), &provider, &model, &base_url)
+    config::set_model_config(&hermes_home, profile.as_deref(), &provider, &model, &base_url, proxy)
 }
 
 // ── Skills Commands ───────────────────────────────────────────────────────
@@ -1242,20 +1254,37 @@ async fn ssh_tunnel_status_cmd(
 /// Send Telegram message
 #[tauri::command]
 async fn send_telegram_message_cmd(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     bot_token: String,
     chat_id: String,
     text: String,
 ) -> Result<telegram::TelegramResult, String> {
-    Ok(telegram::send_message(&bot_token, &chat_id, &text).await)
+    let hermes_home = state.hermes_home()?;
+    let model_config = config::get_model_config(&hermes_home, None);
+    // Resolve proxy: per-source override -> global proxy config -> env fallback.
+    let sources = sources::SourcesConfig::load(&hermes_home, None);
+    let source_proxy = sources.telegram.iter()
+        .find(|t| t.bot_token == bot_token || t.chat_id == chat_id)
+        .and_then(|t| if t.proxy_url.is_empty() { None } else { Some(t.proxy_url.clone()) });
+    let use_proxy = sources.telegram.iter()
+        .find(|t| t.bot_token == bot_token || t.chat_id == chat_id)
+        .map(|t| t.use_proxy)
+        .unwrap_or(true);
+    let proxy_url = source_proxy.unwrap_or_else(|| model_config.proxy.resolve_url());
+    Ok(telegram::send_message(&bot_token, &chat_id, &text, use_proxy, &proxy_url).await)
 }
 
 /// Validate Telegram bot token
 #[tauri::command]
 async fn validate_telegram_bot_token_cmd(
+    state: State<'_, AppState>,
     bot_token: String,
 ) -> Result<telegram::TelegramResult, String> {
-    Ok(telegram::validate_bot_token(&bot_token).await)
+    let hermes_home = state.hermes_home()?;
+    let model_config = config::get_model_config(&hermes_home, None);
+    let proxy_url = model_config.proxy.resolve_url();
+    // Validation hits api.telegram.org, which is blocked in RU — route via proxy.
+    Ok(telegram::validate_bot_token(&bot_token, true, &proxy_url).await)
 }
 
 /// Save Telegram config
@@ -1550,8 +1579,10 @@ async fn discover_models_cmd(
     provider: String,
     base_url: Option<String>,
     api_key: Option<String>,
+    use_proxy: Option<bool>,
 ) -> Result<model_discovery::DiscoveryResult, String> {
-    Ok(model_discovery::discover_models(&provider, base_url.as_deref(), api_key.as_deref()).await)
+    let use_proxy = use_proxy.unwrap_or(true);
+    Ok(model_discovery::discover_models(&provider, base_url.as_deref(), api_key.as_deref(), use_proxy).await)
 }
 
 /// Check if provider supports model discovery
@@ -1586,6 +1617,12 @@ async fn get_provider_base_url_cmd(provider: String) -> Result<Option<String>, S
 #[tauri::command]
 async fn get_all_provider_urls_cmd() -> Result<std::collections::HashMap<String, String>, String> {
     Ok(provider_registry::all_provider_urls())
+}
+
+/// List all known provider IDs (single source of truth for frontend dropdowns).
+#[tauri::command]
+async fn list_providers_cmd() -> Result<Vec<String>, String> {
+    Ok(provider_registry::all_provider_ids().into_iter().map(|s| s.to_string()).collect())
 }
 
 // ── Registry Commands ─────────────────────────────────────────────────────
@@ -2220,6 +2257,7 @@ pub fn run() {
             delete_session_cmd,
             get_session_stats_cmd,
             list_feed_cmd,
+            generate_smart_briefing_cmd,
             // Profiles
             list_profiles_cmd,
             create_profile_cmd,
@@ -2268,8 +2306,9 @@ pub fn run() {
             // Terminal
             open_terminal_cmd,
             // Provider Registry
-            get_provider_base_url_cmd,
-            get_all_provider_urls_cmd,
+                        get_provider_base_url_cmd,
+                        get_all_provider_urls_cmd,
+                        list_providers_cmd,
             // Registry
             fetch_registry_catalog_cmd,
             get_installed_registry_cmd,

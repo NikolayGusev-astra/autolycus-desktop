@@ -91,10 +91,16 @@ export interface ProfileInfo {
   gateway_running: boolean;
 }
 
+export interface ProxySettings {
+  use_proxy: boolean;
+  proxy_url: string;
+}
+
 export interface ModelConfig {
   provider: string;
   model: string;
   base_url: string;
+  proxy?: ProxySettings;
 }
 
 export interface PipelineStatus {
