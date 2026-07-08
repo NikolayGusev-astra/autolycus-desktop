@@ -1,9 +1,9 @@
 # Штурман Desktop — Спецификация разработки (SDD)
 ## Единый документ: требования, архитектура, состояние, план доработок
 
-**Версия документа:** 1.1  
+**Версия документа:** 1.2  
 **Версия приложения:** 3.2.0  
-**Дата:** 2026-07-07
+**Дата:** 2026-07-08
 
 ---
 
@@ -32,7 +32,7 @@ SQLite (state.db Hermes + kanban-desktop.db десктопа).
 - [x] Мастер установки Hermes при отсутствии (install_hermes_cmd)
 - [x] Onboarding wizard: remote vs install → provider → key → soul
 - [x] 3 режима подключения: локальный, SSH-туннель, HTTP gateway API
-- [ ] **Профили подключения** (несколько сохранённых серверов)
+- [x] **Профили подключения** (несколько сохранённых серверов) — ProfilesScreen + profiles.rs
 
 ### 2.2. Единый фид (главный экран)
 - [x] list_feed_cmd: объединяет сессии из state.db Hermes по источникам
@@ -42,14 +42,14 @@ SQLite (state.db Hermes + kanban-desktop.db десктопа).
 - [x] Retry при пустом фиде (init timing)
 - [x] Клик по карточке → загрузка конкретной сессии
 - [x] Постановка задач из карточки (ListChecks → create_task)
-- [ ] **Generative-UI действия на карточках** (Ответить/Делегировать/Резюме)
+- [x] **Generative-UI действия на карточках** (Ответить/Делегировать/Резюме) — FeedCard
 - [ ] **Фильтрация по приоритету** (AI-оценка важности)
 
 ### 2.3. Брифинги
 - [x] Сводный AI-брифинг (hero-блок на главном экране)
 - [x] Per-source брифинги (по каждому источнику отдельно)
 - [x] Кнопка генерации/обновления
-- [ ] **Авто-генерация брифинга при запуске** (не ждать клика)
+- [x] **Авто-генерация брифинга при запуске** (не ждать клика) — autoBriefRef в FeedView
 - [ ] **Структурированные карточки-метрики** вместо plain text
 
 ### 2.4. Чат (Ассистент)
@@ -75,23 +75,23 @@ SQLite (state.db Hermes + kanban-desktop.db десктопа).
 - [x] goal_id на projects (assign project to goal)
 - [x] Прогресс целей (slider + progress bar)
 - [x] Приоритеты задач (1-5, цветовая индикация)
-- [x] assignee поле в задачах — **НЕТ, нужно добавить**
+- [x] assignee поле в задачах — **Готово** (B1)
 - [x] Протоколы: форма загрузки файла/URL/текста → агент-обработка
-- [ ] **Sections/sub-projects** (как Todoist sections внутри проекта)
-- [ ] **Labels/теги** для кросс-проектной группировки
-- [ ] **Kanban-доска** (колонки по статусам, drag-and-drop)
-- [ ] **Jira-синк** (двусторонняя синхронизация статусов)
-- [ ] **Делегирование** человеку с уведомлением
+- [x] **Sections/sub-projects** (как Todoist sections внутри проекта) — **Готово** (B9)
+- [x] **Labels/теги** для кросс-проектной группировки — **Готово** (B10)
+- [x] **Kanban-доска** (колонки по статусам, drag-and-drop) — **Готово** (B5)
+- [ ] **Jira-синк** (двусторонняя синхронизация статусов) — **Не сделано** (B8)
+- [x] **Делегирование** человеку с уведомлением — **Готово** (B6)
 
 ### 2.6. Источники (коннекторы)
 - [x] SourcesTab: Telegram (bot token) + Email (IMAP/SMTP)
 - [x] Запись в .env Hermes через get_env_cmd/set_env_cmd
 - [x] Статус-бейджи "Настроено/Не настроено"
-- [ ] **Множественные инстансы** (несколько почт, TG-ботов)
-- [ ] **RSS-ленты** (через skills + cron Hermes)
-- [ ] **YouTube-каналы** (мониторинг через skills)
-- [ ] **Telegram-каналы по тематике** (фильтрация)
-- [ ] **Управление skills/cron** из десктопа
+- [x] **Множественные инстансы** (несколько почт, TG-ботов) — **Готово** (B4)
+- [ ] **RSS-ленты** (через skills + cron Hermes) — **Не сделано** (B16)
+- [ ] **YouTube-каналы** (мониторинг через skills) — **Не сделано** (B16)
+- [ ] **Telegram-каналы по тематике** (фильтрация) — **Не сделано** (B17)
+- [x] **Управление skills/cron** из десктопа — **Готово** (B12)
 
 ### 2.7. Credential Pool
 - [x] Двусторонняя синхронизация с auth.json Hermes
@@ -99,7 +99,7 @@ SQLite (state.db Hermes + kanban-desktop.db десктопа).
 - [x] fingerprint (sha256:16hex) для env-source
 - [x] resolve_secret (manual→access_token; env→.env)
 - [x] STT ключи ищутся в credential pool + keyring + .env
-- [ ] **Список моделей по провайдеру** (загрузка из /v1/models)
+- [x] **Список моделей по провайдеру** (загрузка из /v1/models) — ModelsTab
 
 ### 2.8. Настройки Hermes
 - [x] GeneralTab: язык, тема (Light/Dark), токен-счётчик
@@ -112,9 +112,9 @@ SQLite (state.db Hermes + kanban-desktop.db десктопа).
 - [x] HermesSectionTab: agent/tts (config.yaml read/write)
 - [x] GatewayTab: start/stop/status
 - [x] DiagnoseTab: health check + autofix
-- [ ] **MCP servers** (list/add/remove)
-- [ ] **Skills management** (list/enable/disable)
-- [ ] **Cron jobs management** (list/create/pause)
+- [x] **MCP servers** (list/add/remove) — **Готово** (B13)
+- [x] **Skills management** (list/enable/disable) — **Готово** (B12)
+- [x] **Cron jobs management** (list/create/pause) — **Готово** (B12)
 
 ### 2.9. Дизайн
 - [x] 2 темы: Light (#f82530 на #fff) + Dark (navy #1a1a2e + coral #e94560)
@@ -124,8 +124,8 @@ SQLite (state.db Hermes + kanban-desktop.db десктопа).
 - [x] 8 секций навигации
 - [x] "Самодиагностика" в footer сайдбара
 - [ ] **Bento-grid dashboard** вместо плоского фида
-- [ ] **Motion animations** (framer-motion или CSS transitions)
-- [ ] **Confidence signaling** на AI-предложениях
+- [x] **Motion animations** (framer-motion или CSS transitions) — **Готово** (B15)
+- [ ] **Confidence signaling** на AI-предложениях — **Не сделано** (B14)
 - [ ] **Progressive delegation + override** UI
 
 ---
@@ -182,49 +182,35 @@ soul.md (Hermes)            — agent persona text
 
 ### 4.1. Критические пробелы
 
-**A. Множественные источники** — пользователь хочет несколько почт, TG-ботов,
-YouTube, RSS. Сейчас SourcesTab поддерживает один инстанс каждого типа.
-**Решение:** CRUD-таблица источников любого типа + skills/cron Hermes.
+**A. Множественные источники** — ✅ **РЕАЛИЗОВАНО (B4)**: CRUD-таблица источников любого типа + apply_sources_to_env_cmd.
 
-**B. Дистрибутив** — нет GitHub Release с .exe. Только локальная сборка.
-**Решение:** CI/CD (release.yml) → auto-upload to Releases. Или ручная загрузка.
+**B. Дистрибутив** — ✅ **РЕАЛИЗОВАНО (B3)**: CI/CD (release.yml) → auto-upload to Releases.
 
-**C. Assignee** — задачи не имеют assignee (исполнителя). Todoist-style.
-**Решение:** поле assignee в tasks + UI picker.
+**C. Assignee** — ✅ **РЕАЛИЗОВАНО (B1)**: поле assignee в tasks + UI picker.
 
-**D. Jira-синк** — двусторонняя синхронизация статусов задач.
-**Решение:** через Hermes Jira tool (MCP) или прямой REST API.
+**D. Jira-синк** — ❌ **НЕ РЕАЛИЗОВАНО (B8)**: двусторонняя синхронизация статусов задач.
 
-**E. Делегирование** — из карточки фида → задача + уведомление исполнителю.
-**Решение:** кнопка "Делегировать" → create_task с assignee.
+**E. Делегирование** — ✅ **РЕАЛИЗОВАНО (B6)**: кнопка "Делегировать" → create_task с assignee.
 
 ### 4.2. UX пробелы
 
-**F. Generative-UI карточки** — фид это flat list, не intent-first cards.
-**Решение:** карточки с inline-действиями (Ответить/Делегировать/Резюме).
+**F. Generative-UI карточки** — ✅ **РЕАЛИЗОВАНО (B2)**: карточки с inline-действиями (Ответить/Делегировать/Резюме).
 
-**G. Авто-брифинг** — генерируется только по клику.
-**Решение:** авто-генерация при запуске (или по cron).
+**G. Авто-брифинг** — ✅ **РЕАЛИЗОВАНО (B7)**: авто-генерация при запуске.
 
-**H. Confidence signaling** — нет индикатора уверенности AI.
-**Решение:** badges/confidence dots на AI-предложениях.
+**H. Confidence signaling** — ❌ **НЕ РЕАЛИЗОВАНО (B14)**: нет индикатора уверенности AI.
 
-**I. Kanban-доска** — нет визуальной доски задач.
-**Решение:** перетаскиваемые колонки todo/in-progress/done.
+**I. Kanban-доска** — ✅ **РЕАЛИЗОВАНО (B5)**: перетаскиваемые колонки todo/in-progress/done.
 
-**J. Self-diagnosis modal не работает** — placeholder без вызова.
-**Решение:** подключить к add_self_check_cmd.
+**J. Self-diagnosis modal не работает** — ✅ **РЕАЛИЗОВАНО**: подключён к add_self_check_cmd.
 
 ### 4.3. Технические пробелы
 
-**K. Профили подключения** — нельзя сохранить несколько серверов.
-**Решение:** profiles.json + UI list.
+**K. Профили подключения** — ✅ **РЕАЛИЗОВАНО (B11)**: profiles.json + UI list.
 
-**L. Skills/cron management** — нет UI для управления skills Hermes.
-**Решение:** list/enable/disable skills + cron CRUD.
+**L. Skills/cron management** — ✅ **РЕАЛИЗОВАНО (B12)**: list/enable/disable skills + cron CRUD.
 
-**M. MCP servers** — нет UI управления MCP.
-**Решение:** list/add/remove MCP servers.
+**M. MCP servers** — ✅ **РЕАЛИЗОВАНО (B13)**: list/add/remove MCP servers.
 
 ---
 
@@ -234,34 +220,34 @@ YouTube, RSS. Сейчас SourcesTab поддерживает один инст
 
 | # | Задача | Объём | Зависимости |
 |---|---|---|---|
-| P1.1 | **Assignee в задачах** + UI picker | малый | ✅ Готово (2026-07-07): схема (assignee) была, UI (TasksView) был, но `create_task`/`create_task_cmd` не принимали assignee → исправлено в productivity.rs + lib.rs |
-| P1.2 | **Generative-UI действия** на карточках фида | средний | FeedCard rewrite |
-| P1.3 | **Self-diagnosis modal** → add_self_check_cmd | малый | wiring |
-| P1.4 | **Дистрибутив** — GitHub Release auto-upload | малый | release.yml fix |
+| P1.1 | **Assignee в задачах** + UI picker | малый | ✅ **Готово (B1)** |
+| P1.2 | **Generative-UI действия** на карточках фида | средний | ✅ **Готово (B2)** |
+| P1.3 | **Self-diagnosis modal** → add_self_check_cmd | малый | ✅ **Готово** |
+| P1.4 | **Дистрибутив** — GitHub Release auto-upload | малый | ✅ **Готово (B3)** |
 
 ### Приоритет 2 — Важно для полноценного продукта
 
 | # | Задача | Объём | Зависимости |
 |---|---|---|---|
-| P2.1 | **Множественные источники** (CRUD таблица + skills) | большой | ✅ Готово (2026-07-07): backend (sources.rs Vec) + UI CRUD (SourcesTab) + apply_sources_to_env_cmd уже были; добавлен бейдж Active + варнинг мульти-enable. RSS/YouTube — P3.8 |
-| P2.2 | **Kanban-доска** (drag-and-drop статусы) | средний | ✅ Готово (2026-07-07): @dnd-kit в KanbanBoard.tsx |
-| P2.3 | **Делегирование** из карточки фида | средний | P1.1 assignee |
-| P2.4 | **Авто-брифинг** при запуске | малый | FeedView useEffect |
-| P2.5 | **Jira-синк** (двусторонний через Hermes tool) | большой | Hermes MCP |
+| P2.1 | **Множественные источники** (CRUD таблица + skills) | большой | ✅ **Готово (B4)** |
+| P2.2 | **Kanban-доска** (drag-and-drop статусы) | средний | ✅ **Готово (B5)** |
+| P2.3 | **Делегирование** из карточки фида | средний | ✅ **Готово (B6)** |
+| P2.4 | **Авто-брифинг** при запуске | малый | ✅ **Готово (B7)** |
+| P2.5 | **Jira-синк** (двусторонний через Hermes tool) | большой | ❌ **Не сделано (B8)** |
 
 ### Приоритет 3 — Полировка и рост
 
 | # | Задача | Объём |
 |---|---|---|
-| P3.1 | **Sections/sub-projects** (как Todoist) | средний |
-| P3.2 | **Labels/теги** кросс-проектные | средний |
-| P3.3 | **Профили подключения** (несколько серверов) | малый |
-| P3.4 | **Skills/cron management UI** | средний |
-| P3.5 | **MCP servers UI** | средний |
-| P3.6 | **Confidence signaling** на AI | малый |
-| P3.7 | **Motion animations** | малый |
-| P3.8 | **RSS/YouTube** через skills | средний |
-| P3.9 | **Telegram channels по теме** | средний |
+| P3.1 | **Sections/sub-projects** (как Todoist) | средний | ✅ **Готово (B9)** |
+| P3.2 | **Labels/теги** кросс-проектные | средний | ✅ **Готово (B10)** |
+| P3.3 | **Профили подключения** (несколько серверов) | малый | ✅ **Готово (B11)** |
+| P3.4 | **Skills/cron management UI** | средний | ✅ **Готово (B12)** |
+| P3.5 | **MCP servers UI** | средний | ✅ **Готово (B13)** |
+| P3.6 | **Confidence signaling** на AI | малый | ❌ **Не сделано (B14)** |
+| P3.7 | **Motion animations** | малый | ✅ **Готово (B15)** |
+| P3.8 | **RSS/YouTube** через skills | средний | ❌ **Не сделано (B16)** |
+| P3.9 | **Telegram channels по теме** | средний | ❌ **Не сделано (B17)** |
 
 ---
 
@@ -284,7 +270,7 @@ YouTube, RSS. Сейчас SourcesTab поддерживает один инст
 
 ---
 
-## 7. ТЕХНИЧЕСКИЙ ДОЛГ (актуально на 2026-07-07)
+## 7. ТЕХНИЧЕСКИЙ ДОЛГ (актуально на 2026-07-08)
 
 > Предыдущая редакция §7 (6 пунктов) устарела — все перечисленные пункты уже
 > решены или не актуальны. Ниже — актуальное состояние по результатам аудита кода.
