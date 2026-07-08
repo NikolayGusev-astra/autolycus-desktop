@@ -111,9 +111,7 @@
 - [x] **B15. Motion animations** (P3.7): ✅ Готово 2026-07-07 — CSS keyframes
       `fade-in` (+ reduced-motion guard) в `globals.css`; применено к `FeedCard` и
       модальным окнам (`.ac-modal`).
-- [~] **B9. Sections/sub-projects** (P3.1): backend готов (`sections` table +
-      list/create/delete_section в `productivity.rs`), НО UI в `ProjectsView`/
-      привязка task→section ОТСУТСТВУЕТ (нужна миграция `tasks.section_id`).
+- [x] **B9. Sections/sub-projects** (P3.1): ✅ Готово 2026-07-08. Backend (`sections` table + list/create/delete_section) + UI в `ProjectsView` (CRUD секций) + привязка task→section (миграция `tasks.section_id`, section picker в `TasksView`).
 - [ ] **B8. Jira-синк** (P2.5): НЕ СДЕЛАНО (только CRUD источника).
 - [ ] **B14. Confidence signaling** (P3.6): НЕ СДЕЛАНО (нет данных из backend).
 - [ ] **B16. RSS/YouTube через skills** (P3.8): НЕ СДЕЛАНО.
