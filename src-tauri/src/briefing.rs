@@ -157,8 +157,23 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
     let output = Command::new(&python)
         .arg(&server)
         .current_dir(server_home)
-        .env("HERMES_HOME", hermes_home)
+        .env("HERMES_HOME", server_home)
         .env("PYTHONIOENCODING", "utf-8")
+        .env("USERPROFILE", std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()))
+        // Pass through credentials/secrets from the desktop process env so the
+        // spawned MCP servers (jira/email) can authenticate. Command inherits
+        // the parent env by default, but we set them explicitly so the app
+        // works even when launched outside a shell that sourced .env.
+        .env("JIRA_PAT", std::env::var("JIRA_PAT").unwrap_or_default())
+        .env("JIRA_BASE_URL", std::env::var("JIRA_BASE_URL").unwrap_or_default())
+        .env("EMAIL_HOST", std::env::var("EMAIL_HOST").unwrap_or_default())
+        .env("EMAIL_USER", std::env::var("EMAIL_USER").unwrap_or_default())
+        .env("EMAIL_PASSWORD", std::env::var("EMAIL_PASSWORD").unwrap_or_default())
+        .env("EMAIL_IMAP_HOST", std::env::var("EMAIL_IMAP_HOST").unwrap_or_default())
+        .env("EMAIL_IMAP_PORT", std::env::var("EMAIL_IMAP_PORT").unwrap_or_default())
+        .env("EMAIL_SMTP_HOST", std::env::var("EMAIL_SMTP_HOST").unwrap_or_default())
+        .env("EMAIL_SMTP_PORT", std::env::var("EMAIL_SMTP_PORT").unwrap_or_default())
+        .env("EMAIL_USE_SSL", std::env::var("EMAIL_USE_SSL").unwrap_or_default())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
