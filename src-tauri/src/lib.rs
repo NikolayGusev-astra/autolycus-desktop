@@ -1934,9 +1934,9 @@ async fn list_tasks_cmd(state: State<'_, AppState>, profile: Option<String>) -> 
     productivity::list_tasks(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_task_cmd(state: State<'_, AppState>, title: String, priority: Option<i64>, due_date: Option<String>, project_id: Option<i64>, assignee: Option<String>, profile: Option<String>) -> Result<i64, String> {
+async fn create_task_cmd(state: State<'_, AppState>, title: String, priority: Option<i64>, due_date: Option<String>, project_id: Option<i64>, assignee: Option<String>, section_id: Option<i64>, profile: Option<String>) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_task(&hh, profile.as_deref(), &title, priority.unwrap_or(3), due_date.as_deref(), project_id, assignee.as_deref().unwrap_or(""))
+    productivity::create_task(&hh, profile.as_deref(), &title, priority.unwrap_or(3), due_date.as_deref(), project_id, assignee.as_deref().unwrap_or(""), section_id)
 }
 #[tauri::command]
 async fn update_task_status_cmd(state: State<'_, AppState>, id: i64, status: String, profile: Option<String>) -> Result<(), String> {
@@ -1949,9 +1949,9 @@ async fn delete_task_cmd(state: State<'_, AppState>, id: i64, profile: Option<St
     productivity::delete_task(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, assignee: Option<String>, labels: Option<String>, profile: Option<String>) -> Result<(), String> {
+async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, assignee: Option<String>, labels: Option<String>, section_id: Option<i64>, profile: Option<String>) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
-    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id, assignee.as_deref(), labels.as_deref())
+    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id, assignee.as_deref(), labels.as_deref(), section_id)
 }
 #[tauri::command]
 async fn list_goals_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Goal>, String> {

@@ -16,9 +16,11 @@ interface Task {
   project_id: number | null;
   assignee: string;
   labels: string;
+  section_id: number | null;
 }
 interface Project { id: number; name: string; color: string; }
 interface ConnectionProfile { id: number; name: string; username: string; }
+interface Section { id: number; project_id: number; name: string; position: number; }
 
 const PRIO_COLOR: Record<number, string> = { 1: "#f44", 2: "#f80", 3: "#fa0", 4: "#8a8", 5: "#888" };
 const PRIO_LABEL: Record<number, string> = { 1: "🔴", 2: "🟠", 3: "🟡", 4: "🟢", 5: "⚪" };
@@ -38,8 +40,17 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const [projId, setProjId] = useState<number | null>(projectId ?? null);
   const [assignee, setAssignee] = useState("");
   const [labels, setLabels] = useState("");
+  const [sections, setSections] = useState<Section[]>([]);
+  const [sectionId, setSectionId] = useState<number | null>(null);
   const [assigneeSuggestions, setAssigneeSuggestions] = useState<string[]>([]);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
+
+  const loadSections = useCallback(async (pid: number) => {
+    try {
+      const s = await invoke<Section[]>("list_sections_cmd", { projectId: pid, profile: null });
+      setSections(s);
+    } catch (e) { console.error(e); }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -60,11 +71,12 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   }, [projectId]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (projId != null) void loadSections(projId); else setSections([]); }, [projId, loadSections]);
 
   const create = async () => {
     if (!title.trim()) return;
-    await invoke("create_task_cmd", { title: title.trim(), priority, dueDate: dueDate || null, projectId: projId, assignee: assignee.trim() || null, profile: null });
-    setTitle(""); setDueDate(""); setAssignee(""); setShowForm(false); void load();
+    await invoke("create_task_cmd", { title: title.trim(), priority, dueDate: dueDate || null, projectId: projId, assignee: assignee.trim() || null, sectionId, profile: null });
+    setTitle(""); setDueDate(""); setAssignee(""); setSectionId(null); setShowForm(false); void load();
   };
 
   const toggle = async (task: Task) => {
@@ -75,7 +87,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const remove = async (id: number) => { await invoke("delete_task_cmd", { id, profile: null }); void load(); };
 
   const saveEdit = async (task: Task) => {
-    await invoke("update_task_cmd", { id: task.id, title: title.trim() || undefined, priority, dueDate: dueDate || undefined, projectId: projId, assignee: assignee.trim() || undefined, labels: labels.trim() || undefined, profile: null });
+    await invoke("update_task_cmd", { id: task.id, title: title.trim() || undefined, priority, dueDate: dueDate || undefined, projectId: projId, assignee: assignee.trim() || undefined, labels: labels.trim() || undefined, sectionId, profile: null });
     setEditingId(null); void load();
   };
 
@@ -87,6 +99,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
     setProjId(task.project_id ?? null);
     setAssignee(task.assignee || "");
     setLabels(task.labels || "");
+    setSectionId(task.section_id ?? null);
   };
 
   const projName = (pid: number | null) => projects.find((p) => p.id === pid)?.name;
@@ -120,6 +133,12 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
               <select className="ac-input px-3 py-2 text-sm" value={projId ?? ""} onChange={(e) => setProjId(e.target.value ? Number(e.target.value) : null)}>
                 <option value="">{t("tasks.noProject")}</option>
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
+            {projId != null && sections.length > 0 && (
+              <select className="ac-input px-3 py-2 text-sm" value={sectionId ?? ""} onChange={(e) => setSectionId(e.target.value ? Number(e.target.value) : null)}>
+                <option value="">{t("tasks.noSection")}</option>
+                {sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             )}
             <div className="relative">

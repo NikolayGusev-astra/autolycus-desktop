@@ -81,6 +81,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN labels TEXT DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN section_id INTEGER", []);
     // Sections within projects (like Todoist).
     let _ = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sections (
@@ -123,6 +124,7 @@ pub struct Task {
     pub assignee: String,
     #[serde(default)]
     pub labels: String,
+    pub section_id: Option<i64>,
     pub created_at: Option<i64>,
     pub completed_at: Option<i64>,
 }
@@ -130,7 +132,7 @@ pub struct Task {
 pub fn list_tasks(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Task>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
-        .prepare("SELECT id, title, description, status, priority, due_date, project_id, assignee, labels, created_at, completed_at FROM tasks ORDER BY created_at DESC")
+        .prepare("SELECT id, title, description, status, priority, due_date, project_id, assignee, labels, section_id, created_at, completed_at FROM tasks ORDER BY created_at DESC")
         .map_err(|e| format!("prepare: {}", e))?;
     let rows = stmt
         .query_map([], |r| {
@@ -144,8 +146,9 @@ pub fn list_tasks(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Task>
                 project_id: r.get(6)?,
                 assignee: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
                 labels: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                created_at: r.get(9)?,
-                completed_at: r.get(10)?,
+                section_id: r.get(9)?,
+                created_at: r.get(10)?,
+                completed_at: r.get(11)?,
             })
         })
         .map_err(|e| format!("query: {}", e))?;
@@ -164,11 +167,12 @@ pub fn create_task(
     due_date: Option<&str>,
     project_id: Option<i64>,
     assignee: &str,
+    section_id: Option<i64>,
 ) -> Result<i64, String> {
     let conn = open(hermes_home, profile)?;
     conn.execute(
-        "INSERT INTO tasks (title, priority, due_date, project_id, assignee) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![title, priority, due_date, project_id, assignee],
+        "INSERT INTO tasks (title, priority, due_date, project_id, assignee, section_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![title, priority, due_date, project_id, assignee, section_id],
     )
     .map_err(|e| format!("insert: {}", e))?;
     Ok(conn.last_insert_rowid())
@@ -212,6 +216,7 @@ pub fn update_task(
     project_id: Option<Option<i64>>,
     assignee: Option<&str>,
     labels: Option<&str>,
+    section_id: Option<i64>,
 ) -> Result<(), String> {
     let conn = open(hermes_home, profile)?;
     let mut sets: Vec<String> = Vec::new();
@@ -222,6 +227,7 @@ pub fn update_task(
     if let Some(pi) = project_id { sets.push("project_id = ?".into()); binds.push(Box::new(pi)); }
     if let Some(a) = assignee { sets.push("assignee = ?".into()); binds.push(Box::new(a.to_string())); }
     if let Some(l) = labels { sets.push("labels = ?".into()); binds.push(Box::new(l.to_string())); }
+    if let Some(sid) = section_id { sets.push("section_id = ?".into()); binds.push(Box::new(sid)); }
     if sets.is_empty() { return Ok(()); }
     sets.push("id = id".into()); // no-op to ensure non-empty
     let sql = format!("UPDATE tasks SET {} WHERE id = ?", sets.join(", "));

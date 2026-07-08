@@ -2,12 +2,13 @@
 // Projects with drill-down: click a project → see its tasks. Edit name/color.
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, Trash2, FolderOpen, Target, Loader, ChevronLeft, Pencil, ListChecks } from "lucide-react";
+import { Plus, Trash2, FolderOpen, Target, Loader, ChevronLeft, Pencil, ListChecks, Layers } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
 
 interface Project { id: number; name: string; color: string; description: string; goal_id?: number | null; }
 interface Goal { id: number; title: string; }
 interface Task { id: number; title: string; status: string; project_id: number | null; }
+interface Section { id: number; project_id: number; name: string; position: number; }
 
 export function ProjectsView({ goalId, goalTitle, onBack, onOpenTasks }: {
   goalId?: number | null; goalTitle?: string; onBack?: () => void;
@@ -23,6 +24,28 @@ export function ProjectsView({ goalId, goalTitle, onBack, onOpenTasks }: {
   const [name, setName] = useState("");
   const [color, setColor] = useState("#f82530");
   const [selGoalId, setSelGoalId] = useState<number | null>(goalId ?? null);
+  const [sections, setSections] = useState<Record<number, Section[]>>({});
+  const [expandedProject, setExpandedProject] = useState<number | null>(null);
+  const [newSectionName, setNewSectionName] = useState("");
+
+  const loadSections = useCallback(async (projectId: number) => {
+    try {
+      const s = await invoke<Section[]>("list_sections_cmd", { projectId, profile: null });
+      setSections((prev) => ({ ...prev, [projectId]: s }));
+    } catch (e) { console.error(e); }
+  }, []);
+
+  const createSection = async (projectId: number) => {
+    if (!newSectionName.trim()) return;
+    await invoke("create_section_cmd", { projectId, name: newSectionName.trim(), profile: null });
+    setNewSectionName("");
+    void loadSections(projectId);
+  };
+
+  const deleteSection = async (sectionId: number, projectId: number) => {
+    await invoke("delete_section_cmd", { id: sectionId, profile: null });
+    void loadSections(projectId);
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -104,6 +127,29 @@ export function ProjectsView({ goalId, goalTitle, onBack, onOpenTasks }: {
                 <button onClick={() => onOpenTasks?.(p.id, p.name)} className="mt-2 flex items-center gap-1.5 text-xs text-ac-brand hover:underline">
                   <ListChecks className="w-3.5 h-3.5" /> {taskCount(p.id)} {t("nav.tasks").toLowerCase()}
                 </button>
+              )}
+              <button onClick={() => { setExpandedProject(expandedProject === p.id ? null : p.id); if (expandedProject !== p.id) void loadSections(p.id); }} className="mt-2 flex items-center gap-1.5 text-xs text-ac-muted hover:text-ac-brand">
+                <Layers className="w-3.5 h-3.5" /> {t("projects.sections")}
+              </button>
+              {expandedProject === p.id && (
+                <div className="mt-2 space-y-2">
+                  <div className="flex gap-2">
+                    <input className="ac-input flex-1 px-2 py-1 text-xs" placeholder={t("projects.sectionNamePh")} value={newSectionName} onChange={(e) => setNewSectionName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void createSection(p.id)} />
+                    <button onClick={() => void createSection(p.id)} className="ac-btn px-2 py-1 text-xs"><Plus className="w-3 h-3" /></button>
+                  </div>
+                  {(sections[p.id] || []).length === 0 ? (
+                    <p className="text-xs text-ac-faint">{t("projects.noSections")}</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {(sections[p.id] || []).map((s) => (
+                        <div key={s.id} className="flex items-center gap-2 text-xs">
+                          <span className="flex-1 text-ac-ink">{s.name}</span>
+                          <button onClick={() => void deleteSection(s.id, p.id)} className="text-ac-faint hover:text-ac-red"><Trash2 className="w-3 h-3" /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           ))}

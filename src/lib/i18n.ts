@@ -129,6 +129,7 @@ const translations = {
   'tasks.assignee': { en: 'Assignee', ru: 'Исполнитель' },
   'tasks.useAssignee': { en: 'Use: {name}', ru: 'Использовать: {name}' },
   'tasks.labelsPh': { en: 'Tags (comma-separated)', ru: 'Теги (через запятую)' },
+  'tasks.noSection': { en: 'No section', ru: 'Без секции' },
   // Goals
   'goals.new': { en: 'New goal', ru: 'Новая цель' },
   'goals.namePh': { en: 'e.g. AI-buddy', ru: 'Например: ИИ-бадди' },
@@ -140,6 +141,9 @@ const translations = {
   'projects.namePh': { en: 'Project name', ru: 'Название проекта' },
   'projects.empty': { en: 'No projects. Create one to group tasks.', ru: 'Нет проектов. Создайте проект для группировки задач.' },
   'projects.noGoal': { en: 'No goal (standalone)', ru: 'Без цели (отдельный)' },
+  'projects.sections': { en: 'Sections', ru: 'Секции' },
+  'projects.sectionNamePh': { en: 'Section name', ru: 'Название секции' },
+  'projects.noSections': { en: 'No sections yet. Add one to group tasks.', ru: 'Нет секций. Добавьте секцию для группировки задач.' },
   // Protocols
   'protocols.new': { en: 'New protocol', ru: 'Новый протокол' },
   'protocols.title': { en: 'Protocol title', ru: 'Название протокола' },
