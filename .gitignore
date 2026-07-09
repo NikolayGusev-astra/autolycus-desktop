@@ -45,9 +45,25 @@ pnpm-debug.log*
 lerna-debug.log*
 node_modules
 
-# Lock files (cross-platform CI handles per-platform resolution)
-package-lock.json
+# Lock files — DO NOT ignore package-lock.json. A committed lockfile is
+# required for `npm ci` reproducible builds and supply-chain auditing.
+# (Previous entry removed; commit package-lock.json to the repo.)
 artifacts/
 linux-appimage/
 linux-deb/
 windows-msi/
+
+# AI agent scaffolding — never commit workflow artifacts
+BUILD_PLAN.md
+BUILD_STAGES.md
+INTEGRATION_REVIEWER_PROMPT.md
+integration-reviewer_MANIFEST.json
+integration-reviewer_PROMPT.md
+integration-reviewer_RESULT.md
+plan.md
+.kilo/
+.claude/
+.aider*
+
+# OS
+Thumbs.db

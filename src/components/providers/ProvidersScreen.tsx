@@ -212,53 +212,40 @@ function ProvidersScreen({ profile }: { profile?: string }): React.JSX.Element {
     });
   }
 
-  // Model discovery
+  // Model discovery — routed through the Rust backend (discover_models_cmd)
+  // so the request bypasses the webview CSP, can inject credentials from the
+  // keyring, and respects the user's proxy config. The previous code called
+  // fetch() directly, which was blocked by CSP in production builds.
   const discoverModels = useCallback(async () => {
     if (!modelBaseUrl || discoveringModels) return;
-    
+
     setDiscoveringModels(true);
     try {
-      // Try to fetch models from the provider's /v1/models endpoint
-      const response = await fetch(`${modelBaseUrl.replace(/\/$/, "")}/models`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
+      const provider = modelProvider || "custom";
+      const result = await invoke<{
+        success: boolean;
+        models: string[];
+        error?: string;
+      }>("discover_models_cmd", {
+        provider,
+        baseUrl: modelBaseUrl,
+        apiKey: null,
+        useProxy: false,
       });
-      
-      if (response.ok) {
-        const data = await response.json();
-        if (data.data && Array.isArray(data.data)) {
-          const models = data.data
-            .filter((m: any) => m.id)
-            .map((m: any) => m.id)
-            .sort();
-          setDiscoveredModels(models);
-        }
+
+      if (result.success && Array.isArray(result.models)) {
+        setDiscoveredModels(result.models.slice().sort());
       } else {
-        // Try Ollama format
-        const ollamaResponse = await fetch(`${modelBaseUrl.replace(/\/$/, "")}/api/tags`, {
-          method: "GET",
-          headers: { "Content-Type": "application/json" },
-        });
-        
-        if (ollamaResponse.ok) {
-          const data = await ollamaResponse.json();
-          if (data.models && Array.isArray(data.models)) {
-            const models = data.models
-              .filter((m: any) => m.name)
-              .map((m: any) => m.name)
-              .sort();
-            setDiscoveredModels(models);
-          }
-        }
+        // Surface the backend error as a console warning; the UI already
+        // shows an empty discovered-models list.
+        console.warn("Model discovery failed:", result.error ?? "unknown error");
       }
     } catch (err) {
       console.error("Failed to discover models:", err);
     } finally {
       setDiscoveringModels(false);
     }
-  }, [modelBaseUrl, discoveringModels]);
+  }, [modelBaseUrl, modelProvider, discoveringModels]);
 
   const handleDiscoverModels = () => {
     setDiscoveredModels([]);

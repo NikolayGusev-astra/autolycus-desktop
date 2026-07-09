@@ -1262,15 +1262,17 @@ async fn send_telegram_message_cmd(
     let hermes_home = state.hermes_home()?;
     let model_config = config::get_model_config(&hermes_home, None);
     // Resolve proxy: per-source override -> global proxy config -> env fallback.
+    // Iterate once (the previous code iterated twice and used an OR-predicate
+    // that could match the wrong source if chat_id collided across bots).
     let sources = sources::SourcesConfig::load(&hermes_home, None);
-    let source_proxy = sources.telegram.iter()
-        .find(|t| t.bot_token == bot_token || t.chat_id == chat_id)
-        .and_then(|t| if t.proxy_url.is_empty() { None } else { Some(t.proxy_url.clone()) });
-    let use_proxy = sources.telegram.iter()
-        .find(|t| t.bot_token == bot_token || t.chat_id == chat_id)
-        .map(|t| t.use_proxy)
-        .unwrap_or(true);
-    let proxy_url = source_proxy.unwrap_or_else(|| model_config.proxy.resolve_url());
+    let matched = sources.telegram.iter()
+        .find(|t| t.bot_token == bot_token)
+        .or_else(|| sources.telegram.iter().find(|t| t.chat_id == chat_id));
+    let (use_proxy, proxy_url) = match matched {
+        Some(t) if !t.proxy_url.is_empty() => (t.use_proxy, t.proxy_url.clone()),
+        Some(_) => (model_config.proxy.use_proxy, model_config.proxy.resolve_url()),
+        None => (model_config.proxy.use_proxy, model_config.proxy.resolve_url()),
+    };
     Ok(telegram::send_message(&bot_token, &chat_id, &text, use_proxy, &proxy_url).await)
 }
 
@@ -1282,9 +1284,11 @@ async fn validate_telegram_bot_token_cmd(
 ) -> Result<telegram::TelegramResult, String> {
     let hermes_home = state.hermes_home()?;
     let model_config = config::get_model_config(&hermes_home, None);
+    // Respect the user's global proxy setting. The previous code hardcoded
+    // `use_proxy=true`, which forced every validation through a SOCKS5 proxy
+    // that non-developer users do not have.
     let proxy_url = model_config.proxy.resolve_url();
-    // Validation hits api.telegram.org, which is blocked in RU — route via proxy.
-    Ok(telegram::validate_bot_token(&bot_token, true, &proxy_url).await)
+    Ok(telegram::validate_bot_token(&bot_token, model_config.proxy.use_proxy, &proxy_url).await)
 }
 
 /// Save Telegram config
@@ -1581,7 +1585,7 @@ async fn discover_models_cmd(
     api_key: Option<String>,
     use_proxy: Option<bool>,
 ) -> Result<model_discovery::DiscoveryResult, String> {
-    let use_proxy = use_proxy.unwrap_or(true);
+    let use_proxy = use_proxy.unwrap_or(false);
     Ok(model_discovery::discover_models(&provider, base_url.as_deref(), api_key.as_deref(), use_proxy).await)
 }
 
@@ -2306,9 +2310,9 @@ pub fn run() {
             // Terminal
             open_terminal_cmd,
             // Provider Registry
-                        get_provider_base_url_cmd,
-                        get_all_provider_urls_cmd,
-                        list_providers_cmd,
+            get_provider_base_url_cmd,
+            get_all_provider_urls_cmd,
+            list_providers_cmd,
             // Registry
             fetch_registry_catalog_cmd,
             get_installed_registry_cmd,

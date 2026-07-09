@@ -35,8 +35,8 @@ function fallback(key: string): string | null {
 export function useTranslation() {
   const lang = useUIStore((s) => s.language);
   return {
-    t: (key: string, _params?: unknown) => {
-      const result = dictT(key, lang);
+    t: (key: string, params?: Record<string, string | number>) => {
+      const result = dictT(key, lang, params);
       // If dictionary returned the key back (no translation found), try fallback
       if (result === key) {
         return fallback(key) ?? key;

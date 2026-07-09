@@ -147,23 +147,27 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "python".to_string());
 
-    let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+    // MCP over stdio uses newline-delimited JSON-RPC. We must WRITE the
+    // requests to the child's stdin, then read responses from stdout.
+    // The previous implementation built `_input` but never wrote it, so the
+    // server received EOF immediately and the function always failed with
+    // "no JSON-RPC id=2 response in MCP output".
+    let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"steersman-desktop","version":"3.2.0"}}}"#;
     let call_req = format!(
         r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"generate_briefing","arguments":{{"days":{}}}}}}}"#,
         days
     );
-    let _input = format!("{}\n{}\n", init_req, call_req);
+    let stdin_payload = format!("{}\n{}\n", init_req, call_req);
 
-    let output = Command::new(&python)
+    let mut child = Command::new(&python)
         .arg(&server)
         .current_dir(server_home)
         .env("HERMES_HOME", server_home)
         .env("PYTHONIOENCODING", "utf-8")
-        .env("USERPROFILE", std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()))
-        // Pass through credentials/secrets from the desktop process env so the
-        // spawned MCP servers (jira/email) can authenticate. Command inherits
-        // the parent env by default, but we set them explicitly so the app
-        // works even when launched outside a shell that sourced .env.
+        // Pass through credentials from the desktop process env so the spawned
+        // MCP servers (jira/email) can authenticate. The child also inherits
+        // the parent env by default; we only override these explicitly so the
+        // app works when launched outside a shell that sourced .env.
         .env("JIRA_PAT", std::env::var("JIRA_PAT").unwrap_or_default())
         .env("JIRA_BASE_URL", std::env::var("JIRA_BASE_URL").unwrap_or_default())
         .env("EMAIL_HOST", std::env::var("EMAIL_HOST").unwrap_or_default())
@@ -178,7 +182,18 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("spawn failed: {}", e))?
+        .map_err(|e| format!("spawn failed: {}", e))?;
+
+    // Write the JSON-RPC requests to stdin, then drop stdin to signal EOF.
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_payload.as_bytes())
+            .map_err(|e| format!("stdin write failed: {}", e))?;
+        // Drop stdin to close the pipe; the MCP server reads until EOF.
+    }
+
+    let output = child
         .wait_with_output()
         .map_err(|e| format!("wait failed: {}", e))?;
 
@@ -191,6 +206,7 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
+        // Skip JSON-RPC notifications (no "id") and the initialize response (id=1).
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
             if v.get("id").and_then(|x| x.as_i64()) == Some(2) {
                 if let Some(text) = v.pointer("/result/content/0/text").and_then(|x| x.as_str()) {
@@ -200,7 +216,11 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
             }
         }
     }
-    Err("no JSON-RPC id=2 response in MCP output".into())
+    Err(format!(
+        "no JSON-RPC id=2 response in MCP output (stdout {} bytes, stderr {} bytes)",
+        output.stdout.len(),
+        output.stderr.len()
+    ))
 }
 
 fn format_briefing(p: &BriefingPayload) -> String {
@@ -288,6 +308,13 @@ fn insert_briefing_session(
     assistant_msg: &str,
 ) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
+    // Wipe any previously-persisted messages for this (deterministic) session
+    // id BEFORE inserting, so a repeat briefing replaces the content instead of
+    // appending duplicate user/assistant rows under the same session_id.
+    conn.execute(
+        "DELETE FROM messages WHERE session_id = ?1",
+        params![session_id],
+    )?;
     conn.execute(
         "INSERT OR REPLACE INTO sessions
          (id, source, user_id, model, started_at, ended_at, end_reason,
@@ -319,7 +346,15 @@ pub fn generate_smart_briefing(
     let formatted = format_briefing(&payload);
 
     let started_at = now_ts();
-    let session_id = format!("smart_briefing:{}", started_at as i64);
+    // Deterministic session id keyed by profile: every briefing run for the
+    // same profile overwrites the SAME row (INSERT OR REPLACE) instead of
+    // spawning a new `smart_briefing:<ts>` session each time. Previously the
+    // id embedded `started_at`, so each call created a fresh session and the
+    // DB grew without bound (they were only hidden from the feed by a
+    // `NOT LIKE 'smart_briefing:%'` filter). The profile key keeps per-profile
+    // briefings distinct while still collapsing repeats.
+    let profile_key = profile.unwrap_or("default");
+    let session_id = format!("smart_briefing:{}", profile_key);
     let title = format!(
         "Smart Briefing {}d. {} urgent / {} changed",
         payload.summary.period_days,

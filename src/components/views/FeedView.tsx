@@ -503,6 +503,7 @@ function FeedCard({
   const Icon = meta.icon;
   const [showDelegate, setShowDelegate] = useState(false);
   const [assignee, setAssignee] = useState("");
+  const { t } = useTranslation();
   return (
     <div
       className="group p-3 rounded-lg border border-ac-border bg-ac-surface hover:border-ac-brand-border transition-colors cursor-pointer animate-fade-in"
@@ -530,7 +531,7 @@ function FeedCard({
           onClick={(e) => { e.stopPropagation(); onCreateTask(); }}
           className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
         >
-          <ListChecks className="w-2.5 h-2.5 inline" /> {t_global("feed.toTask")}
+          <ListChecks className="w-2.5 h-2.5 inline" /> {t("feed.toTask")}
         </button>
         {onSummarize && (
           <button
@@ -583,10 +584,7 @@ function FeedCard({
   );
 }
 
-// Simple t() shim for card (avoids prop drilling).
-function t_global(key: string): string {
-  return key; // i18n keys fall through gracefully
-}
+// (t_global removed — FeedCard now uses the real useTranslation() hook.)
 
 // ── Source Briefing Column ────────────────────────────────────────────────
 interface SourceBriefingColumnProps {

@@ -38,7 +38,7 @@ pub fn all_provider_ids() -> Vec<&'static str> {
         "openai", "openrouter", "ollama-cloud", "deepseek", "groq", "mistral",
         "together", "fireworks", "atlascloud", "cerebras", "perplexity",
         "huggingface", "xiaomi", "zai", "anthropic", "lmstudio", "atomicchat",
-        "ollama", "vllm", "llamacpp", "kilo",
+        "ollama", "vllm", "llamacpp",
     ]
 }
 

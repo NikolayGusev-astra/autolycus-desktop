@@ -80,10 +80,15 @@ pub async fn discover_models(
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10));
         if use_proxy {
-            let proxy_url = crate::config::get_model_config(
-                &dirs::home_dir().unwrap_or_default().join(".hermes"),
-                None,
-            ).proxy.resolve_url();
+            // Resolve the user's global proxy config. `resolve_url()` already
+            // honours `use_proxy == false` (returns "") and falls back to
+            // HTTP_PROXY/HTTPS_PROXY env vars, so no extra gating needed here.
+            // The previous code used `dirs::home_dir().unwrap_or_default()`
+            // which silently produced an empty path (".hermes") when HOME was
+            // unset — guard with `Some(...)` instead.
+            let proxy_url = dirs::home_dir()
+                .map(|h| crate::config::get_model_config(&h.join(".hermes"), None).proxy.resolve_url())
+                .unwrap_or_default();
             if !proxy_url.is_empty() {
                 // If the proxy URL is malformed, fall back to a direct client
                 // rather than failing the whole discovery call.

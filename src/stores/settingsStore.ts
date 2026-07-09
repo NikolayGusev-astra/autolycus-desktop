@@ -163,14 +163,23 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setActiveModel: async (provider, model, base_url) => {
     try {
+      // Preserve the user's existing proxy config. The previous code passed
+      // `proxy: null`, which Rust deserialised as `None` and caused
+      // `set_model_config` to skip writing the `proxy:` block — but the
+      // subsequent `set_yaml_block_scalars("model", ...)` could still clobber
+      // adjacent keys on some YAML layouts, and more importantly the frontend
+      // `modelConfig` state below dropped the proxy field entirely. Read the
+      // current proxy back so we round-trip it unchanged.
+      const current = get().modelConfig as any;
+      const prevProxy = current?.proxy ?? null;
       await invoke("set_model_config_cmd", {
         provider,
         model,
         baseUrl: base_url,
-        proxy: null,
+        proxy: prevProxy,
         profile: null as string | null,
       });
-      set({ modelConfig: { provider, model, base_url } });
+      set({ modelConfig: { provider, model, base_url, proxy: prevProxy } as any });
       return true;
     } catch (err) {
       console.error("Failed to set active model:", err);

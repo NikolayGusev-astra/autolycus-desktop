@@ -391,30 +391,37 @@ fn yaml_value_to_json(yaml: &yaml_rust2::Yaml) -> Result<serde_json::Value, Stri
 
 /// Per-connector / global SOCKS5 proxy settings.
 /// IPC contract matches the frontend `ProxySettings` type: { use_proxy, proxy_url }.
+/// NOTE: defaults are intentionally OFF — a desktop app must never silently route
+/// user traffic through a SOCKS5 endpoint the user did not configure. The previous
+/// default (`socks5://127.0.0.1:12334`) was a developer-machine value that broke
+/// every other user's Remote/SSH/Telegram/discovery calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxySettings {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub use_proxy: bool,
     #[serde(default)]
-    pub proxy_url: String, // socks5://host:port, дефолт socks5://127.0.0.1:12334
-}
-
-fn default_true() -> bool {
-    true
+    pub proxy_url: String,
 }
 
 impl Default for ProxySettings {
     fn default() -> Self {
         Self {
-            use_proxy: true,
-            proxy_url: "socks5://127.0.0.1:12334".to_string(),
+            use_proxy: false,
+            proxy_url: String::new(),
         }
     }
 }
 
 impl ProxySettings {
-    /// Resolve effective proxy URL: explicit setting → env HTTP_PROXY/HTTPS_PROXY → default.
+    /// Resolve effective proxy URL. Returns `""` (=> direct connection) when:
+    ///   - `use_proxy == false`, OR
+    ///   - no explicit URL is configured AND no HTTP_PROXY/HTTPS_PROXY env var is set.
+    /// Callers already gate on `use_proxy` before calling reqwest::Proxy::all(),
+    /// so the empty-string return is the safe default.
     pub fn resolve_url(&self) -> String {
+        if !self.use_proxy {
+            return String::new();
+        }
         if !self.proxy_url.is_empty() {
             return self.proxy_url.clone();
         }
@@ -423,7 +430,8 @@ impl ProxySettings {
                 return env_p;
             }
         }
-        "socks5://127.0.0.1:12334".to_string()
+        // No proxy configured and no env override => direct connection.
+        String::new()
     }
 }
 
@@ -451,14 +459,14 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
             // from `model.proxy.*` for backward compatibility.
             let mut proxy = ProxySettings::default();
             if let Some(pb) = yaml.get("proxy").and_then(|m| m.as_object()) {
-                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
                 proxy.proxy_url = pb
                     .get("proxy_url")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
             } else if let Some(pb) = model_block.get("proxy").and_then(|m| m.as_object()) {
-                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
                 proxy.proxy_url = pb
                     .get("proxy_url")
                     .and_then(|v| v.as_str())

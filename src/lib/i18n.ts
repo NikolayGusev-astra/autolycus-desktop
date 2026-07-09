@@ -582,11 +582,35 @@ const translations = {
 
 export type TranslationKey = keyof typeof translations;
 
-export function t(key: TranslationKey | string, lang?: Lang): string {
+/**
+ * Translate a key, optionally interpolating `{placeholder}` tokens.
+ *
+ * @example t("health.errors", "en", { count: 3 }) → "3 errors"
+ *
+ * The previous implementation dropped the `params` argument entirely, so
+ * `t("tasks.useAssignee", { name })` rendered the literal `"Use: {name}"`.
+ * `useTranslation` now forwards params here; this function substitutes
+ * `{key}` tokens from the params object.
+ */
+export function t(
+  key: TranslationKey | string,
+  lang?: Lang,
+  params?: Record<string, string | number>,
+): string {
   const effectiveLang = lang || 'en';
   const entry = (translations as Record<string, { en: string; ru: string }>)[key];
-  if (!entry) return key;
-  return entry[effectiveLang] || entry.en || key;
+  let result: string;
+  if (!entry) {
+    result = key;
+  } else {
+    result = entry[effectiveLang] || entry.en || key;
+  }
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      result = result.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
+    }
+  }
+  return result;
 }
 
 export type Lang = 'en' | 'ru';

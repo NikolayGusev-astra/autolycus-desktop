@@ -4,6 +4,7 @@ import type { AgentStatus } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 import { VoiceInput } from "./VoiceInput";
 import { invoke } from "@tauri-apps/api/core";
+import { useSettingsStore } from "../../stores/settingsStore";
 
 /** A user attachment. Either a browser File (will be saved on send) or a
  * media clip already saved to disk by the backend (e.g. a voice recording). */
@@ -68,6 +69,11 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useTranslation();
+  const modelConfig = useSettingsStore((s) => s.modelConfig);
+  // Round-trip the existing proxy config so selecting a model in the chat
+  // dropdown does not clobber the user's proxy settings. The previous code
+  // sent `proxy: null`, which Rust deserialised as `None` and wiped the block.
+  const prevProxy = (modelConfig as any)?.proxy ?? null;
 
   // Load saved models on mount
   useEffect(() => {
@@ -268,7 +274,21 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
                   key={m.id}
                   type="button"
                   className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs ${currentModel === m.name ? "bg-ac-brand-soft" : ""}`}
-                  onClick={() => { setCurrentModel(m.name); setShowModelDropdown(false); }}
+                  onClick={() => {
+                    // Actually persist the selection so the next message uses
+                    // this model. The previous code only updated local state
+                    // (cosmetic) — the Rust side never learned about the change.
+                    invoke("set_model_config_cmd", {
+                      provider: m.provider,
+                      model: m.model,
+                      baseUrl: m.base_url ?? "",
+                      proxy: prevProxy,
+                      profile: null,
+                    })
+                      .then(() => setCurrentModel(m.name))
+                      .catch((err) => console.error("Failed to set model:", err));
+                    setShowModelDropdown(false);
+                  }}
                 >
                   <span className="text-ac-ink">{m.name}</span>
                   <span className="text-ac-muted">{m.provider}/{m.model}</span>
