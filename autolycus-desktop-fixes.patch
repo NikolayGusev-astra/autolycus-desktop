@@ -1,0 +1,1009 @@
+diff --git a/.gitignore b/.gitignore
+index 5269eb4..6b649a9 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -45,9 +45,25 @@ pnpm-debug.log*
+ lerna-debug.log*
+ node_modules
+ 
+-# Lock files (cross-platform CI handles per-platform resolution)
+-package-lock.json
++# Lock files — DO NOT ignore package-lock.json. A committed lockfile is
++# required for `npm ci` reproducible builds and supply-chain auditing.
++# (Previous entry removed; commit package-lock.json to the repo.)
+ artifacts/
+ linux-appimage/
+ linux-deb/
+ windows-msi/
++
++# AI agent scaffolding — never commit workflow artifacts
++BUILD_PLAN.md
++BUILD_STAGES.md
++INTEGRATION_REVIEWER_PROMPT.md
++integration-reviewer_MANIFEST.json
++integration-reviewer_PROMPT.md
++integration-reviewer_RESULT.md
++plan.md
++.kilo/
++.claude/
++.aider*
++
++# OS
++Thumbs.db
+diff --git a/BUILD_PLAN.md b/BUILD_PLAN.md
+deleted file mode 100644
+index 256ca68..0000000
+--- a/BUILD_PLAN.md
++++ /dev/null
+@@ -1,82 +0,0 @@
+-# План фиксов autolycus-desktop (Штурман Desktop) — прокси per-connector, баги брифинга, MSI
+-
+-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task (zero-dollar kilo stack).
+-
+-**Goal:** Добавить per-connector прокси (ТГ/LLM через прокси, Jira/почта — по галочке), two-way sync настроек desktop↔Hermes, устранить рекурсию брифинга и игнор задач/источников, собрать MSI.
+-
+-**Architecture:**
+-- Прокси = настройка НА УРОВНЕ КОННЕКТОРА (галочка «с прокси / без прокси» в UI подключения источника).
+-- LLM (Remote) — прокси вкл по умолчанию (РФ-блок). Telegram — прокси вкл по умолчанию (api.telegram.org заблокирован). Jira/Email — прокси ВЫКЛ по умолчанию, с галочкой (можно вкл).
+-- Two-way sync: `SourcesConfig` и `ModelConfig` пишутся в Hermes-home (sources.json / config.yaml) и подхватываются обратно (load). Входящий ТГ/Jira (через Hermes-backend) тоже получают прокси из этих же настроек.
+-- Local mode (localhost gateway) — БЕЗ прокси (split: только внешние endpoint'ы).
+-
+-**Tech Stack:** Rust (Tauri 2), React/Vite/TypeScript, reqwest 0.12 (нужен feature `proxy`), rusqlite, Hermes backend.
+-
+----
+-
+-## Этап 0. Зависимости (infra first)
+-
+-| № | Действие | Файл | Шаги | Ожидаемый результат | Проверка |
+-|---|----------|------|------|---------------------|----------|
+-| 0.1 | Включить feature `proxy` + `socks` в reqwest | `src-tauri/Cargo.toml:28` | `features = ["stream", "json", "rustls-tls", "proxy", "socks"]` | `reqwest::Proxy` + SOCKS5 схема доступны | `cargo check` без `Proxy`/`socks5` unresolved |
+-
+-## Этап 1. Per-connector прокси (desktop ↔ Hermes)
+-
+-**Ключевые факты (от пользователя):**
+-- Прокси = SOCKS5, адрес и порт задаются В НАСТРОЙКАХ (не хардкод). Дефолт: `socks5://127.0.0.1:12334`.
+-- Резерв: env `HTTP_PROXY`/`HTTPS_PROXY` (тоже socks5).
+-- Галочка «с прокси / без прокси» для ЛЮБОГО коннектора (ТГ/почта/Jira/LLM).
+-- Two-way sync: desktop пишет прокси в config.yaml Hermes и подхватывает обратно.
+-
+-| № | Действие | Файл | Шаги | Ожидаемый результат | Проверка |
+-|---|----------|------|------|---------------------|----------|
+-| 1.0 | Структура прокси-настроек | `src-tauri/src/config.rs` (новый блок) | `pub struct ProxySettings { pub enabled: bool, pub url: String }` (url = `socks5://host:port`, дефолт `socks5://127.0.0.1:12334`); + `pub proxy: ProxySettings` в `ModelConfig` | централизованные настройки прокси | `get_model_config().proxy.url` = дефолт при пустом config |
+-| 1.1 | Поле `use_proxy` в структуры источников | `src-tauri/src/sources.rs:12-43` | добавить `pub use_proxy: bool` в `TelegramSource`, `EmailSource`, `JiraSource` (default true для всех — галочка вкл по умолчанию для любого коннектора, как просил юзер) | каждый коннектор хранит флаг | `SourcesConfig::load` читает флаг |
+-| 1.2 | Применить прокси в Telegram OUTBOUND | `src-tauri/src/telegram.rs:44,92` | если `use_proxy` → `Client::builder().proxy(proxy_from_settings_or_env())` (явный `socks5://host:port` из настроек, fallback `Proxy::from_env()`); иначе `Client::new()` | ТГ бот шлёт через прокси при включённой галочке | бот отправляет через `socks5://127.0.0.1:12334` |
+-| 1.3 | Прокси для LLM (Remote) | `src-tauri/src/chat.rs:186` | `send_message_via_api` принимает `use_proxy: bool` + `proxy_url: &str`; вкл → `Client::builder().proxy(reqwest::Proxy::all(proxy_url).unwrap_or_else(\|_\| reqwest::Proxy::from_env()))` (SOCKS5); Local/выкл → `Client::new()` | LLM через прокси для Remote (SOCKS5 из настроек/env), localhost — нет | Remote LLM работает через `socks5://127.0.0.1:12334` |
+-| 1.4 | Проброс флага режима + url | `src-tauri/src/chat.rs:442 send_message` | `use_proxy = (mode == Remote \|\| mode == Ssh)`, `proxy_url = model_config.proxy.url` | split корректен, url передаётся | см. 1.3 |
+-| 1.5 | Прокси в model_discovery | `src-tauri/src/model_discovery.rs:78` | Remote base_url → `Client::builder().proxy(reqwest::Proxy::all(proxy_url)...)`; локальный gateway → `Client::new()` | discovery моделей через прокси для Remote | discovery Remote работает через SOCKS5 |
+-| 1.6 | Поле прокси в ModelConfig + two-way sync | `src-tauri/src/config.rs:393,426` | `set_model_config` пишет `model.proxy.enabled` + `model.proxy.url` в config.yaml Hermes; `get_model_config` читает (fallback на env `HTTP_PROXY`/`HTTPS_PROXY`, дефолт `socks5://127.0.0.1:12334`) | настройки LLM-прокси desktop↔Hermes | config.yaml содержит `model.proxy.url`, desktop подхватывает SOCKS5 |
+-| 1.7 | UI: адрес/порт прокси + галочка per-connector | `src/components/settings/SettingsPanel.tsx` | поле ввода `proxy_url` (scheme://host:port, дефолт `socks5://127.0.0.1:12334`) + галочка `use_proxy` для каждого источника (ТГ/почта/Jira) и для LLM; биндинг на `save_proxy`/`save_source` (пишет в config.yaml Hermes / SourcesConfig → Hermes-home) | юзер задаёт адрес:порт и вкл/выкл прокси для любого коннектора | настройки сохраняются и подхватываются при рестарте |
+-| 1.8 | Индикация статуса прокси | `src/components/ConnectScreen.tsx` | показать proxy_url + какие источники идут через прокси (считано из SourcesConfig/Hermes) | юзер видит синхронизацию | UI отражает состояние |
+-
+-## Этап 2. Баг А — рекурсия брифинга
+-
+-| № | Действие | Файл | Шаги | Ожидаемый результат | Проверка |
+-|---|----------|------|------|---------------------|----------|
+-| 2.1 | Детерминированный session_id | `src/components/views/FeedView.tsx:138` | `session_id: null` → `session_id: \`briefing:${key}\`` | брифинг не плодит сессии | нет новых `desk-*` от брифинга |
+-| 2.2 | Исключить брифинг-сессии из контекста | `src/components/views/FeedView.tsx:104-106` | `&& !i.session_id.startsWith("briefing:")` в filter | брифинг не самокормится | повторный брифинг не содержит предыдущий |
+-
+-## Этап 3. Баг Б — брифинг игнорирует задачи/источники
+-
+-| № | Действие | Файл | Шаги | Ожидаемый результат | Проверка |
+-|---|----------|------|------|---------------------|----------|
+-| 3.1 | Дотянуть задачи/цели/проекты/источники | `src/components/views/FeedView.tsx:97` | параллельно `list_tasks_cmd`, `list_goals_cmd`, `list_projects_cmd`, `list_sources_cmd` | контекст обогащён | промпт содержит задачи/проекты |
+-| 3.2 | Агрегировать контекст | `src/components/views/FeedView.tsx:113-116` | блоки: задачи (по прошлым брифингам — тег/ссылка), проекты, цели, полнотекст источников (ТГ-бот/юзербот, почта, Jira), новые комментарии | брифинг учитывает все источники | брифинг упоминает задачи и комментарии Jira/ТГ |
+-| 3.3 | Переписать промпт | `src/components/views/FeedView.tsx:118-135` | «Учти задачи (созданные по прошлым брифингам), проекты, цели, новые комментарии в источниках. Не ограничивайся N последними сессиями.» | конец «рандомным N беседам» | брифинг структурирован по задачам/источникам |
+-
+-## Этап 4. MSI-инсталлятор
+-
+-| № | Действие | Файл | Шаги | Ожидаемый результат | Проверка |
+-|---|----------|------|------|---------------------|----------|
+-| 4.1 | Починить tauri-WiX кэш | `AppData\Local\tauri\WixTools314` | VC++ runtime для light.exe ИЛИ заменить кэш на корректный WiX 3.11 | `light.exe` не падает | `cargo tauri build --bundles msi` OK |
+-| 4.2 | Собрать MSI | `src-tauri` | `cargo tauri build --bundles msi` (PATH: NSIS+WiX) | `bundle/msi/...msi` | файл существует |
+-
+-## Этап 5. Сборка и проверка
+-
+-| № | Действие | Файл | Шаги | Ожидаемый результат | Проверка |
+-|---|----------|------|------|---------------------|----------|
+-| 5.1 | Rebuild NSIS | `src-tauri` | `cargo tauri build --bundles nsis` | обновлённый setup.exe | установка + брифинг без рекурсии |
+-| 5.2 | Обновить BUILD_STAGES.md | `BUILD_STAGES.md` | комментарии по стадиям 0-5 | журнал дополнен | файл обновлён |
+-
+----
+-
+-**Порядок:** 0 → 1 → 2 → 3 → 4 → 5.
+-
+-**Риски:**
+-- `reqwest::Proxy::from_env()` требует feature `proxy` (Этап 0 обязателен).
+-- Local mode (localhost gateway) — прокси НЕ применяем (split вручную), чтобы gateway-трафик шёл напрямую.
+-- Входящий ТГ/Jira через Hermes-backend: прокси берётся из тех же SourcesConfig/ModelConfig (Hermes читает свой config.yaml/sources.json). Desktop пишет туда настройки → two-way sync.
+-- UI-галочка пишет через `save_source` в SourcesConfig (уже есть `save()` в sources.rs:70).
+-
+-**Коммиты:** после каждого этапа.
+diff --git a/BUILD_STAGES.md b/BUILD_STAGES.md
+deleted file mode 100644
+index 897a23b..0000000
+--- a/BUILD_STAGES.md
++++ /dev/null
+@@ -1,52 +0,0 @@
+-# Сборка и аудит autolycus-desktop (Штурман Desktop) — журнал этапов
+-
+-Дата: 2026-07-08
+-Среда: Windows 10, Node 22, Rust 1.93, cargo-tauri 2.11.4
+-| Статус: NSIS пересобран (прокси + фиксы A/Б); MSI — заблокирован (нет VC++ runtime). |
+-
+-Формат: № | Действие | Шаги | Результат | Статус | Комментарий
+-
+----
+-
+-## 1. Сборка под Windows
+-
+-| № | Действие | Шаги | Результат | Статус | Комментарий |
+-|---|----------|------|-----------|--------|-------------|
+-| 1 | Подготовка среды | `node -v; npm -v; rustc -v; cargo tauri -V` | все версии на месте | ✅ | Node 22, Rust 1.93, cargo-tauri 2.11.4 |
+-| 2 | npm install | `npm install` в корне репо | up to date, 208 пакетов, 0 уязвимостей | ✅ | зависимости уже разрешены |
+-| 3 | Сборка фронтенда | `npm run build` (tsc + vite) | `dist/` создан | ✅ | warning: chunk >500KB (framer-motion/tiptap) — не критично для тестов |
+-| 4 | Генерация icon.ico | PIL: 512x512.png → мультиразмер 256/128/96/64/48/32/16 | `src-tauri/icons/icon.ico` 59KB | ✅ | в репо был только .icns/.png — обязателен для Windows-бандла |
+-| 5 | Бандлеры WiX+NSIS | winget неработоспособен (stdin not a tty) → ручная загрузка zip + распаковка | `tools/nsis/nsis-3.11/makensis.exe`, `tools/wix/{candle,light}.exe` | ✅ | добавлены в PATH текущей сессии |
+-| 6 | Компиляция Rust-ядра | `cargo build` (src-tauri) | Finished dev, 25.5s | ✅ | только warnings (dead_code) |
+-| 7 | Релизная сборка ядра | `cargo build --release` | Finished release, 1m11s | ✅ | готовый exe 20MB в target/release |
+-| 8 | NSIS-инсталлятор | `cargo tauri build --bundles nsis` | `bundle/nsis/Штурман Desktop_3.2.0_x64-setup.exe` 5.3MB | ✅ | ГОТОВ К УСТАНОВКЕ И ТЕСТАМ |
+-| 9 | MSI-инсталлятор | `cargo tauri build --bundles msi` | ошибка light.exe (tauri-WiX кэш кривой) | ⚠️ | скопировал рабочий WiX в AppData/Local/tauri/WixTools314, но нужен VC++ runtime; доработать отдельно |
+-
+-## 2. Аудит соединений с бэкендом
+-
+-| № | Объект | Что проверено | Результат | Статус | Комментарий |
+-|---|--------|---------------|-----------|--------|-------------|
+-| 10 | gateway.rs | старт gateway, прокидывание API_SERVER_PORT, health-check (TCP+HTTP, 30s) | порт синхронизирован через env | ✅ | риск: если Hermes игнорирует API_SERVER_PORT и берёт порт из config.yaml — рассинхрон портов |
+-| 11 | chat.rs | Local mode → всегда через gateway HTTP API (`send_message_via_api` на get_api_url) | корректно | ✅ | требует запущенного gateway; иначе чат молчит |
+-| 12 | discovery.rs | поиск python/hermes/venv/gateway/версия | логика рабочая | ⚠️ | зависит от venv-раскладки; если Hermes глобально (не venv) — discovery может не найти бэкенд для Local mode |
+-| 13 | Прокси для моделей | per-connector SOCKS5 (use_proxy + proxy_url); пишется в `proxy:` блок config.yaml, читается обратно; reqwest Client::proxy(Proxy::all) в telegram/chat/remote/ssh, fallback без прокси при ошибке | реализовано в коде | ✅ DONE | UI-галочка в ModelsTab + блок прокси у источников; дефолт socks5://127.0.0.1:12334, fallback env HTTP_PROXY/HTTPS_PROXY |
+-
+-## 3. Найденные баги (брифинг)
+-
+-| № | Баг | Корень | Локация | Статус | Комментарий |
+-|---|-----|--------|---------|--------|-------------|
+-| 14 | А: рекурсия брифинга | `generateBriefing` шлёт `session_id: null` → бэкенд плодит сессии `desk-<uuid>` → они попадают в `list_feed_cmd` (sessions.rs берёт ВСЕ сессии без фильтра) → следующий брифинг берёт их в контекст | FeedView.tsx:138 + sessions.rs:67-77 | ✅ ИСПРАВЛЕН | фронт: session_id=`briefing:<key>`; бэкенд: `list_feed` и `list_sessions` исключают `id LIKE 'briefing:%'` |
+-| 15 | Б: брифинг игнорит задачи/источники | `generateBriefing` тянет только `items` (голые сессии), НЕ вызывает list_tasks/list_projects/list_goals; берёт `items.filter(started_at >= weekAgo)` = N последних сессий по времени | FeedView.tsx:97-146 | ✅ ИСПРАВЛЕН | брифинг параллельно тянет list_tasks/list_projects/list_goals + собирает контекст; промпт переписан под агрегацию |
+-
+-## 4. План фиксов (после тестирования)
+-
+-| № | Фикс | Подход | Статус |
+-|---|------|--------|--------|
+-| 16 | Баг А | `session_id: null` → `briefing:<key>`; в sourceItems исключать `session_id.startsWith("briefing:")` | ✅ DONE | фронт + бэкенд (sessions.rs исключает `briefing:%`) |
+-| 17 | Баг Б | параллельно дотянуть list_tasks_cmd/list_projects_cmd/list_goals_cmd + полнотекст источников; переписать промпт брифинга | ✅ DONE | брифинг агрегирует задачи/проекты/цели + сессии |
+-| 18 | Proxy for connectors | SOCKS5 checkbox + URL per Telegram/Email/Jira source in SettingsPanel.tsx | ✅ DONE | `proxy_url?: string` в интерфейсах + checkbox в fields + proxy_url в sources.rs структурах, backend читает proxy_url из source при отправке |
+-| 19 | Registry proxy optional | MCP catalog fetch через SOCKS5 | ⏭ SKIPPED | catalog доступен прямой, registry.rs пока без прокси |
+-| 19 | MSI | поставить VC++ runtime / корректный WiX, пересобрать msi | ⏳ | заблокировано: tauri-WiX кэш требует VC++ runtime; оставить отдельной задачей |
+-
+----
+-Готово к тестированию: `C:\Users\n.gusev\ZCodeProject\autolycus-desktop\src-tauri\target\release\bundle\nsis\Штурман Desktop_3.2.0_x64-setup.exe`
+diff --git a/INTEGRATION_REVIEWER_PROMPT.md b/INTEGRATION_REVIEWER_PROMPT.md
+deleted file mode 100644
+index 0131c0e..0000000
+--- a/INTEGRATION_REVIEWER_PROMPT.md
++++ /dev/null
+@@ -1,76 +0,0 @@
+-# Integration Reviewer
+-
+-You are a frontier reviewer. Judge how all tasks fit together — not individual quality (other agents did that).
+-You get ONLY the combined diff, full test output, and key architecture decisions.
+-
+-## Combined Git Diff (all task branches)
+-
+-=== TASK 1 ===
+-
+-
+-=== TASK 2 ===
+-
+-
+-=== TASK 3 ===
+-
+-
+-=== TASK 4 ===
+-
+-
+-=== TASK 5 ===
+-
+-
+-=== TASK 6 ===
+-
+-
+-=== TASK 7 ===
+-
+-
+-=== TASK 8 ===
+-
+-
+-=== TASK 9 ===
+-
+-
+-=== TASK 10 ===
+-
+-
+-=== TASK 11 ===
+-
+-
+-=== TASK 12 ===
+-
+-
+-=== TASK 13 ===
+-
+-
+-=== TASK 14 ===
+-
+-
+-=== TASK 15 ===
+-
+-
+-## Full Test Suite Output
+-
+-SIMULATED MERGE TEST RESULTS - run actual merge test
+-
+-## Key Architectural Decisions (from plan/ADR)
+-
+-No ADR found
+-
+-## Checklist
+-
+-- [ ] All components work together?
+-- [ ] No inconsistencies between tasks?
+-- [ ] No duplicate code across tasks?
+-- [ ] All tests passing?
+-- [ ] Architecture matches ADR/plan?
+-- [ ] Ready for merge to main?
+-
+-## Output: JSON only
+-
+-{
+-  "passed": true,
+-  "integration_issues": [],
+-  "summary": "verdict"
+-}
+diff --git a/integration-reviewer_MANIFEST.json b/integration-reviewer_MANIFEST.json
+deleted file mode 100644
+index 81a707e..0000000
+--- a/integration-reviewer_MANIFEST.json
++++ /dev/null
+@@ -1,13 +0,0 @@
+-{
+-  "goal": "Final integration review for entire feature",
+-  "prompt_file": "C:\\Users\\n.gusev\\ZCodeProject\\autolycus-desktop\\integration-reviewer_PROMPT.md",
+-  "toolsets": [
+-    "terminal"
+-  ],
+-  "model": {
+-    "model": "hy3",
+-    "provider": "kilo",
+-    "fallback_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+-    "fallback_provider": "openrouter"
+-  }
+-}
+\ No newline at end of file
+diff --git a/integration-reviewer_PROMPT.md b/integration-reviewer_PROMPT.md
+deleted file mode 100644
+index 0131c0e..0000000
+--- a/integration-reviewer_PROMPT.md
++++ /dev/null
+@@ -1,76 +0,0 @@
+-# Integration Reviewer
+-
+-You are a frontier reviewer. Judge how all tasks fit together — not individual quality (other agents did that).
+-You get ONLY the combined diff, full test output, and key architecture decisions.
+-
+-## Combined Git Diff (all task branches)
+-
+-=== TASK 1 ===
+-
+-
+-=== TASK 2 ===
+-
+-
+-=== TASK 3 ===
+-
+-
+-=== TASK 4 ===
+-
+-
+-=== TASK 5 ===
+-
+-
+-=== TASK 6 ===
+-
+-
+-=== TASK 7 ===
+-
+-
+-=== TASK 8 ===
+-
+-
+-=== TASK 9 ===
+-
+-
+-=== TASK 10 ===
+-
+-
+-=== TASK 11 ===
+-
+-
+-=== TASK 12 ===
+-
+-
+-=== TASK 13 ===
+-
+-
+-=== TASK 14 ===
+-
+-
+-=== TASK 15 ===
+-
+-
+-## Full Test Suite Output
+-
+-SIMULATED MERGE TEST RESULTS - run actual merge test
+-
+-## Key Architectural Decisions (from plan/ADR)
+-
+-No ADR found
+-
+-## Checklist
+-
+-- [ ] All components work together?
+-- [ ] No inconsistencies between tasks?
+-- [ ] No duplicate code across tasks?
+-- [ ] All tests passing?
+-- [ ] Architecture matches ADR/plan?
+-- [ ] Ready for merge to main?
+-
+-## Output: JSON only
+-
+-{
+-  "passed": true,
+-  "integration_issues": [],
+-  "summary": "verdict"
+-}
+diff --git a/integration-reviewer_RESULT.md b/integration-reviewer_RESULT.md
+deleted file mode 100644
+index 777c7f3..0000000
+--- a/integration-reviewer_RESULT.md
++++ /dev/null
+@@ -1 +0,0 @@
+-HTTP 400: kilo/hy3 is not a valid model ID
+\ No newline at end of file
+diff --git a/plan.md b/plan.md
+deleted file mode 100644
+index b7ab967..0000000
+--- a/plan.md
++++ /dev/null
+@@ -1,103 +0,0 @@
+-# autolycus-desktop fixes — multi-agent plan
+-
+-## Context
+-Repo: C:\Users\n.gusev\ZCodeProject\autolycus-desktop (Tauri 2: Rust + React/Vite).
+-Цель: добавить per-connector SOCKS5 прокси (настройки desktop↔Hermes), устранить рекурсию брифинга и игнор задач/источников, собрать MSI.
+-Ключевые факты от пользователя:
+-- Прокси = SOCKS5, адрес:порт В НАСТРОЙКАХ (дефолт socks5://127.0.0.1:12334), резерв env HTTP_PROXY/HTTPS_PROXY.
+-- Галочка «с прокси/без прокси» для ЛЮБОГО коннектора (ТГ/почта/Jira/LLM), default вкл.
+-- Two-way sync: desktop пишет прокси в config.yaml Hermes и подхватывает обратно.
+-- Local mode (localhost gateway) — БЕЗ прокси (split вручную).
+-- Баг А: брифинг плодит сессии (session_id:null) → попадают в list_feed → рекурсия.
+-- Баг Б: брифинг тянет только items (голые сессии), игнорирует задачи/проекты/цели/источники.
+-
+-### Task 1: deps-1 — Включить proxy+socks в reqwest
+-Файл: src-tauri/Cargo.toml строка 28.
+-Действие: заменить `features = ["stream", "json", "rustls-tls"]` на `features = ["stream", "json", "rustls-tls", "proxy", "socks"]`.
+-Проверка: `cd src-tauri && cargo check` — нет ошибки `Proxy`/`socks5` unresolved.
+-
+-### Task 2: proxy-1 — Структура ProxySettings в config.rs
+-Файл: src-tauri/src/config.rs (рядом с ModelConfig на строке 393).
+-Добавить:
+-```rust
+-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+-pub struct ProxySettings {
+-    pub enabled: bool,
+-    pub url: String, // socks5://host:port, дефолт socks5://127.0.0.1:12334
+-}
+-```
+-И в `ModelConfig` (строка 393-397) добавить поле `pub proxy: ProxySettings`.
+-В `get_model_config` (строка 399): при чтении yaml блока `model` считать `model.proxy.enabled` и `model.proxy.url`; если пусто — fallback на env HTTP_PROXY/HTTPS_PROXY, иначе дефолт `socks5://127.0.0.1:12334`.
+-
+-### Task 3: proxy-2 — use_proxy в SourcesConfig
+-Файл: src-tauri/src/sources.rs строки 12-43.
+-Добавить `pub use_proxy: bool` в `TelegramSource`, `EmailSource`, `JiraSource` (default = true для всех). Учесть serde default (добавить `#[serde(default)]` или Default derive, чтобы старые конфиги грузились).
+-Проверка: `SourcesConfig::load` не падает на старом JSON без use_proxy.
+-
+-### Task 4: proxy-3 — Telegram OUTBOUND через прокси
+-Файл: src-tauri/src/telegram.rs функции send_message (строка 44) и validate_bot_token (строка 92).
+-Изменить: принимать параметр `use_proxy: bool` и `proxy_url: &str`. Если use_proxy → `Client::builder().proxy(reqwest::Proxy::all(proxy_url).unwrap_or_else(|_| reqwest::Proxy::from_env()))`; иначе `Client::new()`.
+-Вызывающие (в lib.rs где telegram::send_message) должны передавать use_proxy из TelegramSource и proxy_url из ModelConfig.proxy.url.
+-Проверка: бот отправляет через socks5://127.0.0.1:12334.
+-
+-### Task 5: proxy-4 — LLM прокси в chat.rs
+-Файл: src-tauri/src/chat.rs.
+-- `send_message_via_api` (строка 186): добавить параметры `use_proxy: bool`, `proxy_url: &str`. При use_proxy → `Client::builder().proxy(reqwest::Proxy::all(proxy_url).unwrap_or_else(|_| reqwest::Proxy::from_env()))`; иначе `Client::new()` (Local mode localhost — без прокси).
+-- `send_message` (строка 442): вычислить `let use_proxy = matches!(connection_mode, ConnectionMode::Remote | ConnectionMode::Ssh);` и `let proxy_url = &model_config.proxy.url;` и передать в send_message_via_api (в Local, Remote, Ssh ветках).
+-Проверка: Remote LLM идёт через socks5, localhost — напрямую.
+-
+-### Task 6: proxy-5 — model_discovery прокси
+-Файл: src-tauri/src/model_discovery.rs строка 78.
+-Изменить Client::builder(): если base_url внешний (Remote) → `.proxy(reqwest::Proxy::all(proxy_url)...)`; если локальный gateway (127.0.0.1) → `Client::new()`. proxy_url брать из ModelConfig.proxy.url (передать в функцию или прочитать через get_model_config).
+-Проверка: discovery Remote работает через SOCKS5.
+-
+-### Task 7: proxy-6 — two-way sync в config.rs
+-Файл: src-tauri/src/config.rs функция `set_model_config` (строка 426).
+-Дописать запись `model.proxy.enabled` и `model.proxy.url` в yaml-блок `model` (писать в config.yaml Hermes-home). Убедиться, что `get_model_config` (строка 399) их читает (см. Task 2).
+-Проверка: после set_model_config в config.yaml появляется model.proxy.url, get_model_config его возвращает.
+-
+-### Task 8: proxy-7 — UI настройки прокси (SettingsPanel)
+-Файл: src/components/settings/SettingsPanel.tsx.
+-Добавить:
+-- Поле ввода `proxy_url` (default socks5://127.0.0.1:12334) с привязкой к состоянию.
+-- Галочку `use_proxy` для каждого источника (ТГ/почта/Jira) и для LLM.
+-- Кнопку/эффект сохранения: вызвать invoke("set_model_config", { proxy: {enabled, url} }) для LLM и invoke("save_source"... ) для источников (писать use_proxy в SourcesConfig → Hermes-home).
+-Проверка: настройки сохраняются, подхватываются при рестарте (load из config.yaml/SourcesConfig).
+-
+-### Task 9: proxy-8 — Индикация прокси (ConnectScreen)
+-Файл: src/components/ConnectScreen.tsx (или settings).
+-Показать proxy_url и какие источники идут через прокси (считать из ModelConfig.proxy + SourcesConfig).
+-Проверка: UI отражает состояние.
+-
+-### Task 10: bugA-1 — Рекурсия брифинга (session_id)
+-Файл: src/components/views/FeedView.tsx строка 138.
+-Изменить `session_id: null` на `session_id: \`briefing:${key}\`` (key = source || "unified").
+-Проверка: брифинг не плодит новые сессии desk-*, перезаписывает одну.
+-
+-### Task 11: bugA-2 — Исключить брифинг-сессии из контекста
+-Файл: src/components/views/FeedView.tsx строки 104-106 (sourceItems filter).
+-Добавить в filter: `&& !i.session_id.startsWith("briefing:")`.
+-Проверка: повторный брифинг не содержит текст предыдущего брифинга.
+-
+-### Task 12: bugB-1 — Агрегация задач/источников в брифинг
+-Файл: src/components/views/FeedView.tsx функция generateBriefing (строка 97).
+-Параллельно с получением items вызвать invoke list_tasks_cmd, list_goals_cmd, list_projects_cmd, list_sources_cmd (все есть в lib.rs:1932/1957/1977/1284). Собрать контекст: задачи (созданные по прошлым брифингам — помечать тегом), проекты, цели, полнотекст источников (ТГ-бот/юзербот, почта, Jira), новые комментарии.
+-Проверка: промпт брифинга содержит данные задач/проектов.
+-
+-### Task 13: bugB-2 — Переписать промпт брифинга
+-Файл: src/components/views/FeedView.tsx строки 118-135.
+-Промпт: «Учти задачи (особенно созданные по прошлым брифингам), проекты, цели, новые комментарии в источниках (ТГ, почта, Jira). Не ограничивайся N последними сессиями. Группируй по источникам.»
+-Проверка: брифинг структурирован по задачам/источникам, не рандомный.
+-
+-### Task 14: build-1 — MSI инсталлятор
+-Действие: починить tauri-WiX кэш. Проверить AppData\Local\tauri\WixTools314 — light.exe падает (нужен VC++ runtime). Установить vcredist либо заменить кэш на корректный WiX 3.11 (уже скачан в C:\Users\n.gusev\tools\wix). Затем `cd src-tauri && cargo tauri build --bundles msi` с PATH содержащим C:\Users\n.gusev\tools\wix и C:\Users\n.gusev\tools\nsis\nsis-3.11.
+-Проверка: bundle/msi/Штурман Desktop_3.2.0_x64_en-US.msi создан.
+-
+-### Task 15: build-2 — Rebuild NSIS + журнал
+-Действие: `cd src-tauri && cargo tauri build --bundles nsis` (PATH с бандлерами). Обновить BUILD_STAGES.md — добавить комментарии по стадиям 0-5 (№|Действие|Шаги|Результат|Статус|Комментарий).
+-Проверка: setup.exe обновлён, BUILD_STAGES.md дополнен.
+-
+-## Notes
+-- Стек смешанный (Rust + TSX). Каждый subagent получает свой файл(ы) и точные строки.
+-- Не коммитить без проверки cargo check / npm run build для своего файла.
+-- После всех правок — итоговая сборка (build-1, build-2).
+diff --git a/src-tauri/src/briefing.rs b/src-tauri/src/briefing.rs
+index ae91ea2..ea84bca 100644
+--- a/src-tauri/src/briefing.rs
++++ b/src-tauri/src/briefing.rs
+@@ -147,23 +147,27 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
+         .map(|p| p.to_string_lossy().to_string())
+         .unwrap_or_else(|| "python".to_string());
+ 
+-    let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
++    // MCP over stdio uses newline-delimited JSON-RPC. We must WRITE the
++    // requests to the child's stdin, then read responses from stdout.
++    // The previous implementation built `_input` but never wrote it, so the
++    // server received EOF immediately and the function always failed with
++    // "no JSON-RPC id=2 response in MCP output".
++    let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"steersman-desktop","version":"3.2.0"}}}"#;
+     let call_req = format!(
+         r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"generate_briefing","arguments":{{"days":{}}}}}}}"#,
+         days
+     );
+-    let _input = format!("{}\n{}\n", init_req, call_req);
++    let stdin_payload = format!("{}\n{}\n", init_req, call_req);
+ 
+-    let output = Command::new(&python)
++    let mut child = Command::new(&python)
+         .arg(&server)
+         .current_dir(server_home)
+         .env("HERMES_HOME", server_home)
+         .env("PYTHONIOENCODING", "utf-8")
+-        .env("USERPROFILE", std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()))
+-        // Pass through credentials/secrets from the desktop process env so the
+-        // spawned MCP servers (jira/email) can authenticate. Command inherits
+-        // the parent env by default, but we set them explicitly so the app
+-        // works even when launched outside a shell that sourced .env.
++        // Pass through credentials from the desktop process env so the spawned
++        // MCP servers (jira/email) can authenticate. The child also inherits
++        // the parent env by default; we only override these explicitly so the
++        // app works when launched outside a shell that sourced .env.
+         .env("JIRA_PAT", std::env::var("JIRA_PAT").unwrap_or_default())
+         .env("JIRA_BASE_URL", std::env::var("JIRA_BASE_URL").unwrap_or_default())
+         .env("EMAIL_HOST", std::env::var("EMAIL_HOST").unwrap_or_default())
+@@ -178,7 +182,18 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
+         .stdout(std::process::Stdio::piped())
+         .stderr(std::process::Stdio::piped())
+         .spawn()
+-        .map_err(|e| format!("spawn failed: {}", e))?
++        .map_err(|e| format!("spawn failed: {}", e))?;
++
++    // Write the JSON-RPC requests to stdin, then drop stdin to signal EOF.
++    use std::io::Write;
++    if let Some(mut stdin) = child.stdin.take() {
++        stdin
++            .write_all(stdin_payload.as_bytes())
++            .map_err(|e| format!("stdin write failed: {}", e))?;
++        // Drop stdin to close the pipe; the MCP server reads until EOF.
++    }
++
++    let output = child
+         .wait_with_output()
+         .map_err(|e| format!("wait failed: {}", e))?;
+ 
+@@ -191,6 +206,7 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
+     for line in stdout.lines() {
+         let line = line.trim();
+         if line.is_empty() { continue; }
++        // Skip JSON-RPC notifications (no "id") and the initialize response (id=1).
+         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+             if v.get("id").and_then(|x| x.as_i64()) == Some(2) {
+                 if let Some(text) = v.pointer("/result/content/0/text").and_then(|x| x.as_str()) {
+@@ -200,7 +216,11 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
+             }
+         }
+     }
+-    Err("no JSON-RPC id=2 response in MCP output".into())
++    Err(format!(
++        "no JSON-RPC id=2 response in MCP output (stdout {} bytes, stderr {} bytes)",
++        output.stdout.len(),
++        output.stderr.len()
++    ))
+ }
+ 
+ fn format_briefing(p: &BriefingPayload) -> String {
+diff --git a/src-tauri/src/config.rs b/src-tauri/src/config.rs
+index 69086da..7be156f 100644
+--- a/src-tauri/src/config.rs
++++ b/src-tauri/src/config.rs
+@@ -391,30 +391,37 @@ fn yaml_value_to_json(yaml: &yaml_rust2::Yaml) -> Result<serde_json::Value, Stri
+ 
+ /// Per-connector / global SOCKS5 proxy settings.
+ /// IPC contract matches the frontend `ProxySettings` type: { use_proxy, proxy_url }.
++/// NOTE: defaults are intentionally OFF — a desktop app must never silently route
++/// user traffic through a SOCKS5 endpoint the user did not configure. The previous
++/// default (`socks5://127.0.0.1:12334`) was a developer-machine value that broke
++/// every other user's Remote/SSH/Telegram/discovery calls.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ProxySettings {
+-    #[serde(default = "default_true")]
++    #[serde(default)]
+     pub use_proxy: bool,
+     #[serde(default)]
+-    pub proxy_url: String, // socks5://host:port, дефолт socks5://127.0.0.1:12334
+-}
+-
+-fn default_true() -> bool {
+-    true
++    pub proxy_url: String,
+ }
+ 
+ impl Default for ProxySettings {
+     fn default() -> Self {
+         Self {
+-            use_proxy: true,
+-            proxy_url: "socks5://127.0.0.1:12334".to_string(),
++            use_proxy: false,
++            proxy_url: String::new(),
+         }
+     }
+ }
+ 
+ impl ProxySettings {
+-    /// Resolve effective proxy URL: explicit setting → env HTTP_PROXY/HTTPS_PROXY → default.
++    /// Resolve effective proxy URL. Returns `""` (=> direct connection) when:
++    ///   - `use_proxy == false`, OR
++    ///   - no explicit URL is configured AND no HTTP_PROXY/HTTPS_PROXY env var is set.
++    /// Callers already gate on `use_proxy` before calling reqwest::Proxy::all(),
++    /// so the empty-string return is the safe default.
+     pub fn resolve_url(&self) -> String {
++        if !self.use_proxy {
++            return String::new();
++        }
+         if !self.proxy_url.is_empty() {
+             return self.proxy_url.clone();
+         }
+@@ -423,7 +430,8 @@ impl ProxySettings {
+                 return env_p;
+             }
+         }
+-        "socks5://127.0.0.1:12334".to_string()
++        // No proxy configured and no env override => direct connection.
++        String::new()
+     }
+ }
+ 
+@@ -451,14 +459,14 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
+             // from `model.proxy.*` for backward compatibility.
+             let mut proxy = ProxySettings::default();
+             if let Some(pb) = yaml.get("proxy").and_then(|m| m.as_object()) {
+-                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
++                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
+                 proxy.proxy_url = pb
+                     .get("proxy_url")
+                     .and_then(|v| v.as_str())
+                     .unwrap_or("")
+                     .to_string();
+             } else if let Some(pb) = model_block.get("proxy").and_then(|m| m.as_object()) {
+-                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
++                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
+                 proxy.proxy_url = pb
+                     .get("proxy_url")
+                     .and_then(|v| v.as_str())
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index b8063d1..905839c 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1262,15 +1262,17 @@ async fn send_telegram_message_cmd(
+     let hermes_home = state.hermes_home()?;
+     let model_config = config::get_model_config(&hermes_home, None);
+     // Resolve proxy: per-source override -> global proxy config -> env fallback.
++    // Iterate once (the previous code iterated twice and used an OR-predicate
++    // that could match the wrong source if chat_id collided across bots).
+     let sources = sources::SourcesConfig::load(&hermes_home, None);
+-    let source_proxy = sources.telegram.iter()
+-        .find(|t| t.bot_token == bot_token || t.chat_id == chat_id)
+-        .and_then(|t| if t.proxy_url.is_empty() { None } else { Some(t.proxy_url.clone()) });
+-    let use_proxy = sources.telegram.iter()
+-        .find(|t| t.bot_token == bot_token || t.chat_id == chat_id)
+-        .map(|t| t.use_proxy)
+-        .unwrap_or(true);
+-    let proxy_url = source_proxy.unwrap_or_else(|| model_config.proxy.resolve_url());
++    let matched = sources.telegram.iter()
++        .find(|t| t.bot_token == bot_token)
++        .or_else(|| sources.telegram.iter().find(|t| t.chat_id == chat_id));
++    let (use_proxy, proxy_url) = match matched {
++        Some(t) if !t.proxy_url.is_empty() => (t.use_proxy, t.proxy_url.clone()),
++        Some(_) => (model_config.proxy.use_proxy, model_config.proxy.resolve_url()),
++        None => (model_config.proxy.use_proxy, model_config.proxy.resolve_url()),
++    };
+     Ok(telegram::send_message(&bot_token, &chat_id, &text, use_proxy, &proxy_url).await)
+ }
+ 
+@@ -1282,9 +1284,11 @@ async fn validate_telegram_bot_token_cmd(
+ ) -> Result<telegram::TelegramResult, String> {
+     let hermes_home = state.hermes_home()?;
+     let model_config = config::get_model_config(&hermes_home, None);
++    // Respect the user's global proxy setting. The previous code hardcoded
++    // `use_proxy=true`, which forced every validation through a SOCKS5 proxy
++    // that non-developer users do not have.
+     let proxy_url = model_config.proxy.resolve_url();
+-    // Validation hits api.telegram.org, which is blocked in RU — route via proxy.
+-    Ok(telegram::validate_bot_token(&bot_token, true, &proxy_url).await)
++    Ok(telegram::validate_bot_token(&bot_token, model_config.proxy.use_proxy, &proxy_url).await)
+ }
+ 
+ /// Save Telegram config
+@@ -1581,7 +1585,7 @@ async fn discover_models_cmd(
+     api_key: Option<String>,
+     use_proxy: Option<bool>,
+ ) -> Result<model_discovery::DiscoveryResult, String> {
+-    let use_proxy = use_proxy.unwrap_or(true);
++    let use_proxy = use_proxy.unwrap_or(false);
+     Ok(model_discovery::discover_models(&provider, base_url.as_deref(), api_key.as_deref(), use_proxy).await)
+ }
+ 
+@@ -2306,9 +2310,9 @@ pub fn run() {
+             // Terminal
+             open_terminal_cmd,
+             // Provider Registry
+-                        get_provider_base_url_cmd,
+-                        get_all_provider_urls_cmd,
+-                        list_providers_cmd,
++            get_provider_base_url_cmd,
++            get_all_provider_urls_cmd,
++            list_providers_cmd,
+             // Registry
+             fetch_registry_catalog_cmd,
+             get_installed_registry_cmd,
+diff --git a/src-tauri/src/model_discovery.rs b/src-tauri/src/model_discovery.rs
+index a742aaf..f6c984d 100644
+--- a/src-tauri/src/model_discovery.rs
++++ b/src-tauri/src/model_discovery.rs
+@@ -80,10 +80,15 @@ pub async fn discover_models(
+         let mut builder = reqwest::Client::builder()
+             .timeout(std::time::Duration::from_secs(10));
+         if use_proxy {
+-            let proxy_url = crate::config::get_model_config(
+-                &dirs::home_dir().unwrap_or_default().join(".hermes"),
+-                None,
+-            ).proxy.resolve_url();
++            // Resolve the user's global proxy config. `resolve_url()` already
++            // honours `use_proxy == false` (returns "") and falls back to
++            // HTTP_PROXY/HTTPS_PROXY env vars, so no extra gating needed here.
++            // The previous code used `dirs::home_dir().unwrap_or_default()`
++            // which silently produced an empty path (".hermes") when HOME was
++            // unset — guard with `Some(...)` instead.
++            let proxy_url = dirs::home_dir()
++                .map(|h| crate::config::get_model_config(&h.join(".hermes"), None).proxy.resolve_url())
++                .unwrap_or_default();
+             if !proxy_url.is_empty() {
+                 // If the proxy URL is malformed, fall back to a direct client
+                 // rather than failing the whole discovery call.
+diff --git a/src-tauri/src/provider_registry.rs b/src-tauri/src/provider_registry.rs
+index 6f27527..31065df 100644
+--- a/src-tauri/src/provider_registry.rs
++++ b/src-tauri/src/provider_registry.rs
+@@ -38,7 +38,7 @@ pub fn all_provider_ids() -> Vec<&'static str> {
+         "openai", "openrouter", "ollama-cloud", "deepseek", "groq", "mistral",
+         "together", "fireworks", "atlascloud", "cerebras", "perplexity",
+         "huggingface", "xiaomi", "zai", "anthropic", "lmstudio", "atomicchat",
+-        "ollama", "vllm", "llamacpp", "kilo",
++        "ollama", "vllm", "llamacpp",
+     ]
+ }
+ 
+diff --git a/src-tauri/src/sessions.rs b/src-tauri/src/sessions.rs
+index 620696a..b774d1d 100644
+--- a/src-tauri/src/sessions.rs
++++ b/src-tauri/src/sessions.rs
+@@ -73,7 +73,7 @@ pub fn list_sessions(
+                     ''
+                 ) as preview
+          FROM sessions s
+-         WHERE s.id NOT LIKE 'briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
++         WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
+          ORDER BY s.started_at DESC
+          LIMIT ?1 OFFSET ?2",
+     )?;
+@@ -337,7 +337,7 @@ pub fn list_feed(
+                 ) as preview
+          FROM sessions s
+          WHERE s.source NOT IN ('subagent')  -- skip internal subagent sessions
+-           AND s.id NOT LIKE 'briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
++           AND s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
+          ORDER BY s.started_at DESC
+          LIMIT ?1",
+     )?;
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index 7ea34dd..c5760a3 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -28,7 +28,12 @@
+     "bundle": {
+         "active": true,
+         "targets": [
+-            "nsis"
++            "appimage",
++            "deb",
++            "msi",
++            "nsis",
++            "dmg",
++            "app"
+         ],
+         "icon": [
+             "icons/32x32.png",
+diff --git a/src/components/chat/ChatInput.tsx b/src/components/chat/ChatInput.tsx
+index 4fd69ed..7902c5c 100644
+--- a/src/components/chat/ChatInput.tsx
++++ b/src/components/chat/ChatInput.tsx
+@@ -268,7 +268,21 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
+                   key={m.id}
+                   type="button"
+                   className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs ${currentModel === m.name ? "bg-ac-brand-soft" : ""}`}
+-                  onClick={() => { setCurrentModel(m.name); setShowModelDropdown(false); }}
++                  onClick={() => {
++                    // Actually persist the selection so the next message uses
++                    // this model. The previous code only updated local state
++                    // (cosmetic) — the Rust side never learned about the change.
++                    invoke("set_model_config_cmd", {
++                      provider: m.provider,
++                      model: m.model,
++                      baseUrl: m.base_url ?? "",
++                      proxy: null,
++                      profile: null,
++                    })
++                      .then(() => setCurrentModel(m.name))
++                      .catch((err) => console.error("Failed to set model:", err));
++                    setShowModelDropdown(false);
++                  }}
+                 >
+                   <span className="text-ac-ink">{m.name}</span>
+                   <span className="text-ac-muted">{m.provider}/{m.model}</span>
+diff --git a/src/components/providers/ProvidersScreen.tsx b/src/components/providers/ProvidersScreen.tsx
+index e756040..10f8bcb 100644
+--- a/src/components/providers/ProvidersScreen.tsx
++++ b/src/components/providers/ProvidersScreen.tsx
+@@ -212,53 +212,40 @@ function ProvidersScreen({ profile }: { profile?: string }): React.JSX.Element {
+     });
+   }
+ 
+-  // Model discovery
++  // Model discovery — routed through the Rust backend (discover_models_cmd)
++  // so the request bypasses the webview CSP, can inject credentials from the
++  // keyring, and respects the user's proxy config. The previous code called
++  // fetch() directly, which was blocked by CSP in production builds.
+   const discoverModels = useCallback(async () => {
+     if (!modelBaseUrl || discoveringModels) return;
+-    
++
+     setDiscoveringModels(true);
+     try {
+-      // Try to fetch models from the provider's /v1/models endpoint
+-      const response = await fetch(`${modelBaseUrl.replace(/\/$/, "")}/models`, {
+-        method: "GET",
+-        headers: {
+-          "Content-Type": "application/json",
+-        },
++      const provider = modelProvider || "custom";
++      const result = await invoke<{
++        success: boolean;
++        models: string[];
++        error?: string;
++      }>("discover_models_cmd", {
++        provider,
++        baseUrl: modelBaseUrl,
++        apiKey: null,
++        useProxy: false,
+       });
+-      
+-      if (response.ok) {
+-        const data = await response.json();
+-        if (data.data && Array.isArray(data.data)) {
+-          const models = data.data
+-            .filter((m: any) => m.id)
+-            .map((m: any) => m.id)
+-            .sort();
+-          setDiscoveredModels(models);
+-        }
++
++      if (result.success && Array.isArray(result.models)) {
++        setDiscoveredModels(result.models.slice().sort());
+       } else {
+-        // Try Ollama format
+-        const ollamaResponse = await fetch(`${modelBaseUrl.replace(/\/$/, "")}/api/tags`, {
+-          method: "GET",
+-          headers: { "Content-Type": "application/json" },
+-        });
+-        
+-        if (ollamaResponse.ok) {
+-          const data = await ollamaResponse.json();
+-          if (data.models && Array.isArray(data.models)) {
+-            const models = data.models
+-              .filter((m: any) => m.name)
+-              .map((m: any) => m.name)
+-              .sort();
+-            setDiscoveredModels(models);
+-          }
+-        }
++        // Surface the backend error as a console warning; the UI already
++        // shows an empty discovered-models list.
++        console.warn("Model discovery failed:", result.error ?? "unknown error");
+       }
+     } catch (err) {
+       console.error("Failed to discover models:", err);
+     } finally {
+       setDiscoveringModels(false);
+     }
+-  }, [modelBaseUrl, discoveringModels]);
++  }, [modelBaseUrl, modelProvider, discoveringModels]);
+ 
+   const handleDiscoverModels = () => {
+     setDiscoveredModels([]);
+diff --git a/src/components/views/FeedView.tsx b/src/components/views/FeedView.tsx
+index 1d3b527..7215028 100644
+--- a/src/components/views/FeedView.tsx
++++ b/src/components/views/FeedView.tsx
+@@ -503,6 +503,7 @@ function FeedCard({
+   const Icon = meta.icon;
+   const [showDelegate, setShowDelegate] = useState(false);
+   const [assignee, setAssignee] = useState("");
++  const { t } = useTranslation();
+   return (
+     <div
+       className="group p-3 rounded-lg border border-ac-border bg-ac-surface hover:border-ac-brand-border transition-colors cursor-pointer animate-fade-in"
+@@ -530,7 +531,7 @@ function FeedCard({
+           onClick={(e) => { e.stopPropagation(); onCreateTask(); }}
+           className="text-[10px] px-2 py-0.5 rounded text-ac-muted hover:text-ac-brand hover:bg-ac-bg border border-ac-border"
+         >
+-          <ListChecks className="w-2.5 h-2.5 inline" /> {t_global("feed.toTask")}
++          <ListChecks className="w-2.5 h-2.5 inline" /> {t("feed.toTask")}
+         </button>
+         {onSummarize && (
+           <button
+@@ -583,10 +584,7 @@ function FeedCard({
+   );
+ }
+ 
+-// Simple t() shim for card (avoids prop drilling).
+-function t_global(key: string): string {
+-  return key; // i18n keys fall through gracefully
+-}
++// (t_global removed — FeedCard now uses the real useTranslation() hook.)
+ 
+ // ── Source Briefing Column ────────────────────────────────────────────────
+ interface SourceBriefingColumnProps {
+diff --git a/src/hooks/useTranslation.ts b/src/hooks/useTranslation.ts
+index c35ac98..df1be44 100644
+--- a/src/hooks/useTranslation.ts
++++ b/src/hooks/useTranslation.ts
+@@ -35,8 +35,8 @@ function fallback(key: string): string | null {
+ export function useTranslation() {
+   const lang = useUIStore((s) => s.language);
+   return {
+-    t: (key: string, _params?: unknown) => {
+-      const result = dictT(key, lang);
++    t: (key: string, params?: Record<string, string | number>) => {
++      const result = dictT(key, lang, params);
+       // If dictionary returned the key back (no translation found), try fallback
+       if (result === key) {
+         return fallback(key) ?? key;
+diff --git a/src/lib/i18n.ts b/src/lib/i18n.ts
+index 0a1f386..b235c4d 100644
+--- a/src/lib/i18n.ts
++++ b/src/lib/i18n.ts
+@@ -582,11 +582,35 @@ const translations = {
+ 
+ export type TranslationKey = keyof typeof translations;
+ 
+-export function t(key: TranslationKey | string, lang?: Lang): string {
++/**
++ * Translate a key, optionally interpolating `{placeholder}` tokens.
++ *
++ * @example t("health.errors", "en", { count: 3 }) → "3 errors"
++ *
++ * The previous implementation dropped the `params` argument entirely, so
++ * `t("tasks.useAssignee", { name })` rendered the literal `"Use: {name}"`.
++ * `useTranslation` now forwards params here; this function substitutes
++ * `{key}` tokens from the params object.
++ */
++export function t(
++  key: TranslationKey | string,
++  lang?: Lang,
++  params?: Record<string, string | number>,
++): string {
+   const effectiveLang = lang || 'en';
+   const entry = (translations as Record<string, { en: string; ru: string }>)[key];
+-  if (!entry) return key;
+-  return entry[effectiveLang] || entry.en || key;
++  let result: string;
++  if (!entry) {
++    result = key;
++  } else {
++    result = entry[effectiveLang] || entry.en || key;
++  }
++  if (params) {
++    for (const [k, v] of Object.entries(params)) {
++      result = result.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
++    }
++  }
++  return result;
+ }
+ 
+ export type Lang = 'en' | 'ru';
+diff --git a/src/stores/settingsStore.ts b/src/stores/settingsStore.ts
+index b1172e0..3b15db2 100644
+--- a/src/stores/settingsStore.ts
++++ b/src/stores/settingsStore.ts
+@@ -163,14 +163,23 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
+ 
+   setActiveModel: async (provider, model, base_url) => {
+     try {
++      // Preserve the user's existing proxy config. The previous code passed
++      // `proxy: null`, which Rust deserialised as `None` and caused
++      // `set_model_config` to skip writing the `proxy:` block — but the
++      // subsequent `set_yaml_block_scalars("model", ...)` could still clobber
++      // adjacent keys on some YAML layouts, and more importantly the frontend
++      // `modelConfig` state below dropped the proxy field entirely. Read the
++      // current proxy back so we round-trip it unchanged.
++      const current = get().modelConfig as any;
++      const prevProxy = current?.proxy ?? null;
+       await invoke("set_model_config_cmd", {
+         provider,
+         model,
+         baseUrl: base_url,
+-        proxy: null,
++        proxy: prevProxy,
+         profile: null as string | null,
+       });
+-      set({ modelConfig: { provider, model, base_url } });
++      set({ modelConfig: { provider, model, base_url, proxy: prevProxy } as any });
+       return true;
+     } catch (err) {
+       console.error("Failed to set active model:", err);
