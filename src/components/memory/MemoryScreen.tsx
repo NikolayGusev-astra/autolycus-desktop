@@ -145,7 +145,7 @@ export function MemoryScreen() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader className="w-5 h-5 text-ac-amber animate-spin" />
+        <Loader className="w-5 h-5 text-ac-brand animate-spin" />
       </div>
     );
   }
@@ -155,8 +155,8 @@ export function MemoryScreen() {
       <div className="flex-1 overflow-y-auto">
         {/* Header */}
         <div className="px-4 py-3 border-b border-ac-border">
-          <h2 className="text-sm font-semibold text-ac-ivory flex items-center gap-2">
-            <Brain className="w-4 h-4 text-ac-amber" />
+          <h2 className="text-sm font-semibold text-ac-ink flex items-center gap-2">
+            <Brain className="w-4 h-4 text-ac-brand" />
             Memory
           </h2>
         </div>
@@ -165,23 +165,23 @@ export function MemoryScreen() {
         <div className="grid grid-cols-2 gap-3 px-4 py-3">
           <div className="bg-ac-surface rounded-lg p-3 border border-ac-border">
             <div className="flex items-center gap-2 mb-1">
-              <BarChart3 className="w-3.5 h-3.5 text-ac-amber" />
-              <span className="text-[10px] text-ac-stone uppercase tracking-wider">
+              <BarChart3 className="w-3.5 h-3.5 text-ac-brand" />
+              <span className="text-[10px] text-ac-muted uppercase tracking-wider">
                 Sessions
               </span>
             </div>
-            <p className="text-lg font-semibold text-ac-ivory">
+            <p className="text-lg font-semibold text-ac-ink">
               {memory?.stats.total_sessions ?? 0}
             </p>
           </div>
           <div className="bg-ac-surface rounded-lg p-3 border border-ac-border">
             <div className="flex items-center gap-2 mb-1">
               <FileText className="w-3.5 h-3.5 text-ac-blue" />
-              <span className="text-[10px] text-ac-stone uppercase tracking-wider">
+              <span className="text-[10px] text-ac-muted uppercase tracking-wider">
                 Messages
               </span>
             </div>
-            <p className="text-lg font-semibold text-ac-ivory">
+            <p className="text-lg font-semibold text-ac-ink">
               {memory?.stats.total_messages ?? 0}
             </p>
           </div>
@@ -189,7 +189,7 @@ export function MemoryScreen() {
 
         {/* Capacity bar */}
         <div className="px-4 pb-3">
-          <div className="flex items-center justify-between text-[10px] text-ac-stone mb-1">
+          <div className="flex items-center justify-between text-[10px] text-ac-muted mb-1">
             <span>Memory capacity</span>
             <span>
               {capacityUsed.toLocaleString()} /{" "}
@@ -203,7 +203,7 @@ export function MemoryScreen() {
                   ? "bg-ac-red"
                   : capacityPercent > 70
                   ? "bg-ac-yellow"
-                  : "bg-ac-amber"
+                  : "bg-ac-brand"
               }`}
               style={{ width: `${capacityPercent}%` }}
             />
@@ -212,7 +212,7 @@ export function MemoryScreen() {
 
         {/* Memory entries */}
         <div className="px-4 pb-3">
-          <h3 className="text-xs font-medium text-ac-stone uppercase tracking-wider mb-2">
+          <h3 className="text-xs font-medium text-ac-muted uppercase tracking-wider mb-2">
             Memory Entries
           </h3>
 
@@ -238,7 +238,7 @@ export function MemoryScreen() {
           {/* Entry list */}
           <div className="space-y-1">
             {memoryEntries.length === 0 ? (
-              <p className="text-xs text-ac-stone/50 italic py-2">
+              <p className="text-xs text-ac-muted/50 italic py-2">
                 No memory entries yet
               </p>
             ) : (
@@ -267,14 +267,14 @@ export function MemoryScreen() {
                       </button>
                       <button
                         onClick={() => setEditIndex(null)}
-                        className="text-ac-stone hover:text-ac-ivory p-0.5"
+                        className="text-ac-muted hover:text-ac-ink p-0.5"
                       >
                         <X className="w-3 h-3" />
                       </button>
                     </div>
                   ) : (
                     <>
-                      <span className="flex-1 text-xs text-ac-ivory/80 leading-relaxed">
+                      <span className="flex-1 text-xs text-ac-ink/80 leading-relaxed">
                         {entry.replace(/^-\s*/, "")}
                       </span>
                       <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -285,13 +285,13 @@ export function MemoryScreen() {
                               entry.replace(/^-\s*/, "")
                             );
                           }}
-                          className="text-ac-stone hover:text-ac-blue p-0.5"
+                          className="text-ac-muted hover:text-ac-blue p-0.5"
                         >
                           <Edit3 className="w-3 h-3" />
                         </button>
                         <button
                           onClick={() => handleRemoveEntry(i)}
-                          className="text-ac-stone hover:text-ac-red p-0.5"
+                          className="text-ac-muted hover:text-ac-red p-0.5"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
@@ -306,7 +306,7 @@ export function MemoryScreen() {
 
         {/* User profile */}
         <div className="px-4 pb-4">
-          <h3 className="text-xs font-medium text-ac-stone uppercase tracking-wider mb-2 flex items-center gap-2">
+          <h3 className="text-xs font-medium text-ac-muted uppercase tracking-wider mb-2 flex items-center gap-2">
             <User className="w-3 h-3" />
             User Profile (user.md)
           </h3>
@@ -339,7 +339,7 @@ export function MemoryScreen() {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-stone/50 flex justify-between">
+      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-muted/50 flex justify-between">
         <span>
           Last modified:{" "}
           {memory?.memory.last_modified
@@ -348,7 +348,7 @@ export function MemoryScreen() {
         </span>
         <button
           onClick={loadMemory}
-          className="text-ac-stone hover:text-ac-amber transition-colors"
+          className="text-ac-muted hover:text-ac-brand transition-colors"
           title="Refresh"
         >
           <RefreshCw className="w-3 h-3" />

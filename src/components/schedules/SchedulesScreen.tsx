@@ -142,8 +142,8 @@ export function SchedulesScreen() {
       <div className="flex-1 overflow-y-auto">
         {/* Header */}
         <div className="px-4 py-3 border-b border-ac-border">
-          <h2 className="text-sm font-semibold text-ac-ivory flex items-center gap-2">
-            <Timer className="w-4 h-4 text-ac-amber" />
+          <h2 className="text-sm font-semibold text-ac-ink flex items-center gap-2">
+            <Timer className="w-4 h-4 text-ac-brand" />
             Schedules
           </h2>
         </div>
@@ -182,8 +182,8 @@ export function SchedulesScreen() {
                     onClick={() => setNewSchedule(preset.value)}
                     className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
                       newSchedule === preset.value
-                        ? "border-ac-amber bg-ac-amber/10 text-ac-amber"
-                        : "border-ac-border text-ac-stone hover:border-ac-amber/50"
+                        ? "border-ac-brand bg-ac-brand/10 text-ac-brand"
+                        : "border-ac-border text-ac-muted hover:border-ac-brand/50"
                     }`}
                   >
                     {preset.label}
@@ -229,10 +229,10 @@ export function SchedulesScreen() {
         <div className="px-4 py-3">
           {loading ? (
             <div className="flex items-center justify-center h-32">
-              <Loader className="w-5 h-5 text-ac-amber animate-spin" />
+              <Loader className="w-5 h-5 text-ac-brand animate-spin" />
             </div>
           ) : jobs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-32 text-ac-stone text-sm">
+            <div className="flex flex-col items-center justify-center h-32 text-ac-muted text-sm">
               <Timer className="w-8 h-8 mb-2 opacity-30" />
               <p>No schedules configured</p>
               <p className="text-[10px] mt-1">Create one using the button above</p>
@@ -251,30 +251,30 @@ export function SchedulesScreen() {
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-medium text-ac-ivory">
+                          <span className="text-xs font-medium text-ac-ink">
                             {job.name}
                           </span>
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded-full ${
                               isActive
                                 ? "bg-ac-green/10 text-ac-green"
-                                : "bg-ac-stone/10 text-ac-stone"
+                                : "bg-ac-muted/10 text-ac-muted"
                             }`}
                           >
                             {statusLabel}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2 text-[10px] text-ac-stone">
+                        <div className="flex items-center gap-2 text-[10px] text-ac-muted">
                           <Clock className="w-3 h-3" />
                           <code className="font-mono">{job.schedule}</code>
                         </div>
                         {job.prompt && (
-                          <p className="text-[10px] text-ac-stone/70 mt-1 line-clamp-2">
+                          <p className="text-[10px] text-ac-muted/70 mt-1 line-clamp-2">
                             {job.prompt}
                           </p>
                         )}
                         {job.last_run_at && (
-                          <p className="text-[10px] text-ac-stone/50 mt-1">
+                          <p className="text-[10px] text-ac-muted/50 mt-1">
                             Last run:{" "}
                             {new Date(job.last_run_at).toLocaleString()}
                             {job.last_status &&
@@ -292,7 +292,7 @@ export function SchedulesScreen() {
                         {isActive ? (
                           <button
                             onClick={() => handlePause(job.id)}
-                            className="text-ac-stone hover:text-ac-yellow p-1 rounded transition-colors"
+                            className="text-ac-muted hover:text-ac-yellow p-1 rounded transition-colors"
                             title="Pause"
                           >
                             <Pause className="w-3.5 h-3.5" />
@@ -300,7 +300,7 @@ export function SchedulesScreen() {
                         ) : (
                           <button
                             onClick={() => handleResume(job.id)}
-                            className="text-ac-stone hover:text-ac-green p-1 rounded transition-colors"
+                            className="text-ac-muted hover:text-ac-green p-1 rounded transition-colors"
                             title="Resume"
                           >
                             <Play className="w-3.5 h-3.5" />
@@ -308,14 +308,14 @@ export function SchedulesScreen() {
                         )}
                         <button
                           onClick={() => handleTrigger(job.id)}
-                          className="text-ac-stone hover:text-ac-amber p-1 rounded transition-colors"
+                          className="text-ac-muted hover:text-ac-brand p-1 rounded transition-colors"
                           title="Trigger now"
                         >
                           <Zap className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={() => handleRemove(job.id)}
-                          className="text-ac-stone hover:text-ac-red p-1 rounded transition-colors"
+                          className="text-ac-muted hover:text-ac-red p-1 rounded transition-colors"
                           title="Remove"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -331,11 +331,11 @@ export function SchedulesScreen() {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-stone/50 flex justify-between items-center">
+      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-muted/50 flex justify-between items-center">
         <span>{jobs.length} schedules</span>
         <button
           onClick={loadJobs}
-          className="text-ac-stone hover:text-ac-amber transition-colors"
+          className="text-ac-muted hover:text-ac-brand transition-colors"
           title="Refresh"
         >
           <RefreshCw className="w-3 h-3" />

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect, type KeyboardEvent } from "react";
-import { Send, Paperclip, X, Mic, ChevronDown, Cpu, Brain } from "lucide-react";
+import { Send, Paperclip, X, Mic, ChevronDown, Cpu, Brain, Square, Shield } from "lucide-react";
 import type { AgentStatus } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 import { VoiceInput } from "./VoiceInput";
@@ -20,9 +20,15 @@ export interface Attachment {
 
 interface ChatInputProps {
   onSend: (message: string, attachments?: Attachment[]) => void;
+  /** Stop the current generation (abort SSE stream). */
+  onStop?: () => void;
   disabled?: boolean;
   agentStatus?: AgentStatus;
 }
+
+/// Reasoning effort levels (GPT-5.6 guide practice 2).
+const REASONING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
+type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
 const STATUS_PLACEHOLDER_KEY: Record<AgentStatus, string> = {
   idle: "chat_placeholder_idle",
@@ -56,16 +62,25 @@ const SLASH_COMMANDS: { cmd: string; label: string; desc: string }[] = [
   { cmd: "/cost", label: "/cost", desc: "Стоимость сессии" },
 ];
 
-export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, disabled, agentStatus = "idle" }: ChatInputProps) {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);
   const [currentModel, setCurrentModel] = useState<string>("");
-  const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningLevel | null>(null);
+  const [showReasoningMenu, setShowReasoningMenu] = useState(false);
+  const [autonomyPolicy, setAutonomyPolicy] = useState<string | null>(null);
+  const [showAutonomyMenu, setShowAutonomyMenu] = useState(false);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [savedModels, setSavedModels] = useState<any[]>([]);
+  const [activeModelCaps, setActiveModelCaps] = useState<{
+    supports_reasoning?: boolean;
+    supports_vision?: boolean;
+    supports_tools?: boolean;
+    context_length?: number;
+  }>({});
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useTranslation();
@@ -75,7 +90,7 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
   // sent `proxy: null`, which Rust deserialised as `None` and wiped the block.
   const prevProxy = (modelConfig as any)?.proxy ?? null;
 
-  // Load saved models on mount
+  // Load saved models on mount + read the active model's steer settings
   useEffect(() => {
     invoke<any[]>("list_models_cmd")
       .then((models) => {
@@ -86,9 +101,32 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
     invoke<any>("get_model_config_cmd", { profile: null })
       .then((config) => {
         if (config?.model) setCurrentModel(`${config.provider}/${config.model}`);
+        // Read steer settings from config so toggles reflect persisted state.
+        if (config?.reasoning_effort) {
+          setReasoningEffort(config.reasoning_effort as ReasoningLevel);
+        }
+        if (config?.autonomy_policy) {
+          setAutonomyPolicy(config.autonomy_policy as string);
+        }
       })
       .catch(() => {});
   }, []);
+
+  // When the active model changes (via dropdown), update capability flags so
+  // the reasoning toggle only shows for models that support it.
+  useEffect(() => {
+    const match = savedModels.find(
+      (m) => `${m.provider}/${m.model}` === currentModel
+    );
+    if (match) {
+      setActiveModelCaps({
+        supports_reasoning: match.supports_reasoning ?? false,
+        supports_vision: match.supports_vision ?? false,
+        supports_tools: match.supports_tools ?? true,
+        context_length: match.context_length,
+      });
+    }
+  }, [currentModel, savedModels]);
 
   // Slash menu: show when the input starts with "/".
   const slashOpen = text.startsWith("/") && !text.includes(" ");
@@ -195,7 +233,7 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
 
   return (
     <div
-      className={`flex flex-col gap-2 px-4 py-3 border-t border-ac-border ${isDragging ? "bg-ac-glow" : ""}`}
+      className={`flex flex-col gap-2 px-4 py-3 border-t border-ac-border ${isDragging ? "bg-ac-brand-soft" : ""}`}
       onDrop={handleDrop}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -238,6 +276,7 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
           onClick={() => fileInputRef.current?.click()}
           disabled={isBlocked}
           title={t("chat.attach_file") || "Прикрепить файл"}
+          aria-label={t("chat.attach_file") || "Attach file"}
           className="p-2 rounded-lg hover:bg-ac-surface transition-colors disabled:opacity-30 text-ac-muted"
         >
           <Paperclip className="w-4 h-4" />
@@ -262,6 +301,7 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
             onClick={() => setShowModelDropdown(!showModelDropdown)}
             className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-ac-muted hover:text-ac-brand border border-ac-border rounded-md"
             title={t("chat.selectModel") || "Выбрать модель"}
+            aria-label={t("chat.selectModel") || "Select model"}
           >
             <Cpu className="w-3 h-3" />
             <span className="max-w-24 truncate">{currentModel || t("chat.selectModel") || "Модель"}</span>
@@ -276,14 +316,18 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
                   className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs ${currentModel === m.name ? "bg-ac-brand-soft" : ""}`}
                   onClick={() => {
                     // Actually persist the selection so the next message uses
-                    // this model. The previous code only updated local state
-                    // (cosmetic) — the Rust side never learned about the change.
+                    // this model. Round-trip proxy + steer settings.
                     invoke("set_model_config_cmd", {
                       provider: m.provider,
                       model: m.model,
                       baseUrl: m.base_url ?? "",
                       proxy: prevProxy,
                       profile: null,
+                      reasoningEffort: reasoningEffort,
+                      verbosity: (modelConfig as any)?.verbosity ?? null,
+                      autonomyPolicy: autonomyPolicy,
+                      promptCache: (modelConfig as any)?.prompt_cache ?? null,
+                      reasoningContext: (modelConfig as any)?.reasoning_context ?? null,
                     })
                       .then(() => setCurrentModel(m.name))
                       .catch((err) => console.error("Failed to set model:", err));
@@ -301,17 +345,121 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
           )}
         </div>
 
-        {/* Reasoning mode toggle */}
-        <button
-          onClick={() => setReasoningEnabled(!reasoningEnabled)}
-          className={`flex items-center gap-1 px-2 py-1.5 text-[10px] border rounded-md ${
-            reasoningEnabled ? "bg-ac-brand/10 text-ac-brand border-ac-brand/30" : "text-ac-muted border-ac-border"
-          }`}
-          title={t("chat.reasoningMode") || "Режим рассуждений"}
-        >
-          <Brain className="w-3 h-3" />
-          {t("chat.reasoning") || "Reasoning"}
-        </button>
+        {/* Reasoning effort steer — only shown if the active model supports it.
+            Dropdown with levels: none/low/medium/high/xhigh/max (practice 2).
+            Writes to config so it persists across sessions and is sent in the
+            chat request body by the Rust backend. */}
+        {activeModelCaps.supports_reasoning && (
+          <div className="relative">
+            <button
+              onClick={() => setShowReasoningMenu(!showReasoningMenu)}
+              className={`flex items-center gap-1 px-2 py-1.5 text-[10px] border rounded-md ${
+                reasoningEffort && reasoningEffort !== "none"
+                  ? "bg-ac-brand/10 text-ac-brand border-ac-brand/30"
+                  : "text-ac-muted border-ac-border"
+              }`}
+              title={t("chat.reasoningMode") || "Уровень рассуждений"}
+            >
+              <Brain className="w-3 h-3" />
+              {reasoningEffort || "auto"}
+              <ChevronDown className="w-3 h-3" />
+            </button>
+            {showReasoningMenu && (
+              <div className="absolute bottom-full left-0 mb-1 w-32 rounded-lg border border-ac-border bg-ac-surface shadow-lg overflow-hidden z-20">
+                {REASONING_LEVELS.map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => {
+                      setReasoningEffort(level);
+                      setShowReasoningMenu(false);
+                      // Persist to config. Round-trip all steer fields so changing
+                      // one doesn't clobber the others (same fix as proxy).
+                      invoke("set_model_config_cmd", {
+                        provider: (modelConfig as any)?.provider ?? "",
+                        model: (modelConfig as any)?.model ?? "",
+                        baseUrl: (modelConfig as any)?.base_url ?? "",
+                        proxy: prevProxy,
+                        profile: null,
+                        reasoningEffort: level,
+                        verbosity: (modelConfig as any)?.verbosity ?? null,
+                        autonomyPolicy: autonomyPolicy,
+                        promptCache: (modelConfig as any)?.prompt_cache ?? null,
+                        reasoningContext: (modelConfig as any)?.reasoning_context ?? null,
+                      }).catch((err) =>
+                        console.error("Failed to set reasoning effort:", err)
+                      );
+                    }}
+                    className={`w-full px-3 py-1.5 text-left text-xs hover:bg-ac-surface-2 ${
+                      reasoningEffort === level ? "text-ac-brand font-medium" : "text-ac-ink"
+                    }`}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Autonomy policy steer — practice 3. Compact policy beats long
+            "how to behave" text. Three modes: readonly / local / confirm-external.
+            Injected as a short system message by the Rust backend. */}
+        <div className="relative">
+          <button
+            onClick={() => setShowAutonomyMenu(!showAutonomyMenu)}
+            className={`flex items-center gap-1 px-2 py-1.5 text-[10px] border rounded-md ${
+              autonomyPolicy && autonomyPolicy !== "readonly"
+                ? "bg-ac-brand/10 text-ac-brand border-ac-brand/30"
+                : "text-ac-muted border-ac-border"
+            }`}
+            title="Границы автономии"
+          >
+            <Shield className="w-3 h-3" />
+            {autonomyPolicy === "readonly" ? "read" :
+             autonomyPolicy === "local" ? "local" :
+             autonomyPolicy === "confirm-external" ? "confirm" : "auto"}
+            <ChevronDown className="w-3 h-3" />
+          </button>
+          {showAutonomyMenu && (
+            <div className="absolute bottom-full left-0 mb-1 w-48 rounded-lg border border-ac-border bg-ac-surface shadow-lg overflow-hidden z-20">
+              {([
+                { val: null, label: "Auto (default)" },
+                { val: "readonly", label: "Read-only: report only" },
+                { val: "local", label: "Local: act + check" },
+                { val: "confirm-external", label: "Confirm external" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.label}
+                  type="button"
+                  onClick={() => {
+                    setAutonomyPolicy(opt.val);
+                    setShowAutonomyMenu(false);
+                    invoke("set_model_config_cmd", {
+                      provider: (modelConfig as any)?.provider ?? "",
+                      model: (modelConfig as any)?.model ?? "",
+                      baseUrl: (modelConfig as any)?.base_url ?? "",
+                      proxy: prevProxy,
+                      profile: null,
+                      reasoningEffort: reasoningEffort,
+                      verbosity: (modelConfig as any)?.verbosity ?? null,
+                      autonomyPolicy: opt.val,
+                      promptCache: (modelConfig as any)?.prompt_cache ?? null,
+                      reasoningContext: (modelConfig as any)?.reasoning_context ?? null,
+                    }).catch((err) =>
+                      console.error("Failed to set autonomy policy:", err)
+                    );
+                  }}
+                  className={`w-full px-3 py-1.5 text-left text-xs hover:bg-ac-surface-2 ${
+                    autonomyPolicy === opt.val ? "text-ac-brand font-medium" : "text-ac-ink"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="flex-1 relative">
           {slashMatches.length > 0 && (
@@ -346,10 +494,25 @@ export function ChatInput({ onSend, disabled, agentStatus = "idle" }: ChatInputP
         <button
           onClick={handleSend}
           disabled={(!text.trim() && attachments.length === 0) || isBlocked}
+          aria-label={t("chat.send") || "Send message"}
           className="ac-btn px-4 py-2 text-sm disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <Send className="w-4 h-4" />
         </button>
+
+        {/* Stop button — shown when the agent is actively generating. Aborts
+            the current SSE stream so the user doesn't have to wait or kill the
+            app. Replaces the old "input fully locked during generation" UX. */}
+        {isBlocked && onStop && (
+          <button
+            onClick={onStop}
+            className="px-4 py-2 text-sm rounded-lg border border-ac-red/40 text-ac-red hover:bg-ac-red/10 transition-colors"
+            title={t("chat.stop") || "Остановить генерацию"}
+            aria-label={t("chat.stop") || "Stop generation"}
+          >
+            <Square className="w-4 h-4" />
+          </button>
+        )}
       </div>
     </div>
   );

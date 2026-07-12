@@ -175,12 +175,12 @@ export function KanbanBoard() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <svg className="w-12 h-12 text-ac-stone mx-auto mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="w-12 h-12 text-ac-muted mx-auto mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 2L2 7l10 5 10-5-10-5z" />
             <path d="M2 17l10 5 10-5" />
             <path d="M2 12l10 5 10-5" />
           </svg>
-          <p className="text-ac-stone mb-4">{t("no_boards")}</p>
+          <p className="text-ac-muted mb-4">{t("no_boards")}</p>
           <button onClick={handleCreateBoard} className="ac-btn px-4 py-2 text-sm">
             {t("create_board")}
           </button>
@@ -219,7 +219,7 @@ export function KanbanBoard() {
 
       {/* Add task form */}
       {showAddTask && (
-        <div className="flex gap-2 px-4 py-2 border-b border-ac-border bg-ac-pitch/50">
+        <div className="flex gap-2 px-4 py-2 border-b border-ac-border bg-ac-bg/50">
           <input
             type="text"
             value={newTaskTitle}
@@ -232,7 +232,7 @@ export function KanbanBoard() {
           <button onClick={handleAddTask} className="ac-btn px-3 py-1 text-xs">
             {t("task_add")}
           </button>
-          <button onClick={() => setShowAddTask(false)} className="px-3 py-1 text-xs text-ac-stone">
+          <button onClick={() => setShowAddTask(false)} className="px-3 py-1 text-xs text-ac-muted">
             {t("task_cancel")}
           </button>
         </div>
@@ -241,7 +241,7 @@ export function KanbanBoard() {
       {/* Columns */}
       {loading ? (
         <div className="flex items-center justify-center h-full">
-          <span className="text-ac-stone text-sm">{t("loading")}</span>
+          <span className="text-ac-muted text-sm">{t("loading")}</span>
         </div>
       ) : boardView ? (
         <DndContext
@@ -262,8 +262,8 @@ export function KanbanBoard() {
           </div>
           <DragOverlay>
             {activeTask ? (
-              <div className="w-52 bg-ac-pitch border border-ac-brand rounded p-2 text-xs shadow-lg">
-                <span className="text-ac-ivory font-medium leading-tight">{activeTask.title}</span>
+              <div className="w-52 bg-ac-bg border border-ac-brand rounded p-2 text-xs shadow-lg">
+                <span className="text-ac-ink font-medium leading-tight">{activeTask.title}</span>
               </div>
             ) : null}
           </DragOverlay>
@@ -290,8 +290,8 @@ function KanbanColumnView({
   return (
     <div className="flex-shrink-0 w-56 flex flex-col">
       <div className={`flex items-center justify-between mb-2 border-l-2 ${colorClass} pl-2`}>
-        <span className="text-xs font-medium text-ac-ivory">{label}</span>
-        <span className="text-[10px] text-ac-stone">{column.tasks.length}</span>
+        <span className="text-xs font-medium text-ac-ink">{label}</span>
+        <span className="text-[10px] text-ac-muted">{column.tasks.length}</span>
       </div>
 
       <div
@@ -334,22 +334,22 @@ function KanbanCardView({
       style={style}
       {...attributes}
       {...listeners}
-      className="bg-ac-pitch/50 border border-ac-border rounded p-2 text-xs cursor-grab active:cursor-grabbing touch-none"
+      className="bg-ac-bg/50 border border-ac-border rounded p-2 text-xs cursor-grab active:cursor-grabbing touch-none"
     >
       <div className="flex items-start justify-between gap-1">
-        <span className="text-ac-ivory font-medium leading-tight">{task.title}</span>
+        <span className="text-ac-ink font-medium leading-tight">{task.title}</span>
         <button
           onClick={() => onDeleteTask(task.id)}
-          className="text-ac-stone hover:text-ac-red"
+          className="text-ac-muted hover:text-ac-red"
         >
           <Trash className="w-3 h-3" />
         </button>
       </div>
       {task.body && (
-        <p className="text-ac-stone mt-1 line-clamp-2">{task.body}</p>
+        <p className="text-ac-muted mt-1 line-clamp-2">{task.body}</p>
       )}
       {task.assignee && (
-        <p className="text-ac-stone mt-1 text-[10px]">👤 {task.assignee}</p>
+        <p className="text-ac-muted mt-1 text-[10px]">👤 {task.assignee}</p>
       )}
     </div>
   );

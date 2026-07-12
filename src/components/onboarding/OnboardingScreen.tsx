@@ -28,9 +28,7 @@ import { useTranslation } from "../../hooks/useTranslation";
 type Phase =
   | "choice" // remote vs install
   | "install" // (install path) running installer
-  | "provider" // pick provider
-  | "apiKey" // enter key
-  | "soul" // persona + name
+  | "setup" // unified: provider + key + soul on one screen
   | "done";
 
 interface OnboardingScreenProps {
@@ -67,28 +65,26 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
 
   const needsKey = PROVIDERS.setup.find((s) => s.id === selectedProvider)?.needsKey ?? false;
 
-  // Steps shown in the progress rail depend on the chosen path.
+  // Steps: choice → (install if needed) → unified setup → done.
+  // Previously this was 4-5 separate screens (provider → apiKey → soul each
+  // sequential). Now it's one combined form so first-run is faster.
   const steps: { id: Phase; label: string }[] =
     path === "install"
       ? [
           { id: "install", label: t("onb.install") },
-          { id: "provider", label: t("onb.provider") },
-          { id: "apiKey", label: t("onb.apiKey") },
-          { id: "soul", label: t("onb.soul") },
+          { id: "setup", label: t("onb.setup") || "Setup" },
           { id: "done", label: t("onb.done") },
         ]
       : [
-          { id: "provider", label: t("onb.provider") },
-          { id: "apiKey", label: t("onb.apiKey") },
-          { id: "soul", label: t("onb.soul") },
+          { id: "setup", label: t("onb.setup") || "Setup" },
           { id: "done", label: t("onb.done") },
         ];
 
   const currentIndex = steps.findIndex((s) => s.id === phase);
 
-  // Load personalities once we reach the soul step.
+  // Load personalities once we reach the setup step.
   useEffect(() => {
-    if (phase !== "soul") return;
+    if (phase !== "setup") return;
     invoke<Personality[]>("get_personalities_cmd")
       .then((ps) => {
         setPersonalities(ps);
@@ -124,7 +120,7 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
       );
       unlisten();
       if (result.success) {
-        setPhase("provider");
+        setPhase("setup");
       } else {
         setInstallError(result.error || t("onb.installFailed"));
       }
@@ -136,10 +132,14 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
     }
   };
 
-  // ── Save provider key ────────────────────────────────────────────────────
-  const saveKeyAndContinue = async () => {
+  // ── Unified save: provider + key + soul all at once ──────────────────────
+  // Replaces the old 3-step wizard (provider → apiKey → soul). Saves the
+  // provider key, writes soul.md, sets personality, then advances to done.
+  const saveUnified = async () => {
     setSaving(true);
+    setInstallError(null);
     try {
+      // 1. Save provider + API key
       const prov = PROVIDERS.setup.find((s) => s.id === selectedProvider);
       const envKey = prov?.envKey || "";
       if (envKey && apiKey) {
@@ -147,22 +147,11 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
           envKey,
           apiKey,
           provider: prov?.configProvider || selectedProvider,
-          model: "", // agent picks a sensible default per provider
+          model: "",
           baseUrl: prov?.baseUrl || "",
         });
       }
-      setPhase("soul");
-    } catch (err) {
-      setInstallError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // ── Save soul ────────────────────────────────────────────────────────────
-  const saveSoul = async () => {
-    try {
-      // Compose a soul.md from the onboarding answers.
+      // 2. Write soul.md + set personality
       const provDesc =
         personalities.find((p) => p.id === chosenPersonality)?.description ||
         "You are a helpful, friendly AI assistant.";
@@ -183,8 +172,11 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
       setPhase("done");
     } catch (err) {
       setInstallError(String(err));
+    } finally {
+      setSaving(false);
     }
   };
+
 
   return (
     <div className="fixed inset-0 bg-ac-bg flex items-center justify-center p-6">
@@ -224,8 +216,8 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
                   desc={t("onb.remoteDesc")}
                   onClick={() => {
                     setPath("remote");
-                    // Remote: go straight to provider/key, no local install.
-                    setPhase("provider");
+                    // Remote: go straight to unified setup, no local install.
+                    setPhase("setup");
                   }}
                 />
                 <ChoiceCard
@@ -270,7 +262,7 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
                 <button
                   className="ac-btn px-4 py-2 text-sm flex items-center gap-1"
                   disabled={installing}
-                  onClick={() => setPhase("provider")}
+                  onClick={() => setPhase("setup")}
                 >
                   {t("onb.continue")}
                   <ChevronRight className="w-4 h-4" />
@@ -279,15 +271,27 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
             </div>
           )}
 
-          {/* ── Provider ───────────────────────────────────────────────── */}
-          {phase === "provider" && (
+          {/* ── Unified Setup: provider + key + soul on one screen ──────── */}
+          {/* Replaces the old 3-step wizard (provider → apiKey → soul). */}
+          {phase === "setup" && (
             <div>
-              <h2 className="text-lg font-semibold text-ac-ink mb-4">{t("onb.chooseProvider")}</h2>
-              <div className="space-y-2 max-h-64 overflow-y-auto">
+              <h2 className="text-lg font-semibold text-ac-ink mb-1 flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-ac-brand" />
+                {t("onb.setup") || "Setup"}
+              </h2>
+              <p className="text-sm text-ac-muted mb-4">
+                Configure your AI assistant in one step.
+              </p>
+
+              {/* Provider selection */}
+              <label className="text-xs font-medium text-ac-muted block mb-1.5">
+                {t("onb.chooseProvider")}
+              </label>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto mb-4">
                 {PROVIDERS.setup.map((p) => (
                   <button
                     key={p.id}
-                    className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                    className={`w-full text-left p-2 rounded-lg border transition-colors ${
                       selectedProvider === p.id
                         ? "border-ac-brand bg-ac-brand/10"
                         : "border-ac-border hover:border-ac-muted"
@@ -295,23 +299,75 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
                     onClick={() => setSelectedProvider(p.id)}
                   >
                     <div className="flex items-center justify-between">
-                      <div>
-                        <span className="font-medium text-sm text-ac-ink">{p.name}</span>
-                        {p.tag && (
-                          <span className="ml-2 text-xs bg-ac-brand/20 text-ac-brand px-2 py-0.5 rounded">
-                            {p.tag}
-                          </span>
-                        )}
-                        <p className="text-xs text-ac-muted mt-1">{p.desc}</p>
-                      </div>
+                      <span className="font-medium text-sm text-ac-ink">{p.name}</span>
                       {selectedProvider === p.id && (
-                        <CheckCircle2 className="w-5 h-5 text-ac-brand" />
+                        <CheckCircle2 className="w-4 h-4 text-ac-brand" />
                       )}
                     </div>
+                    <p className="text-xs text-ac-muted mt-0.5">{p.desc}</p>
                   </button>
                 ))}
               </div>
-              <div className="flex justify-between mt-6">
+
+              {/* API Key (only if provider needs one) */}
+              {needsKey && (
+                <div className="mb-4">
+                  <label className="text-xs font-medium text-ac-muted block mb-1.5">
+                    {t("onb.enterKey")}
+                  </label>
+                  <input
+                    type="password"
+                    className="ac-input w-full px-3 py-2"
+                    placeholder={
+                      PROVIDERS.setup.find((s) => s.id === selectedProvider)?.placeholder ||
+                      t("onb.keyPlaceholder")
+                    }
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {/* Persona + name */}
+              <div className="border-t border-ac-border pt-3 mb-4">
+                <label className="text-xs font-medium text-ac-muted block mb-1.5">
+                  {t("onb.persona")}
+                </label>
+                <select
+                  className="ac-input w-full mb-3 px-3 py-2"
+                  value={chosenPersonality}
+                  onChange={(e) => setChosenPersonality(e.target.value)}
+                >
+                  {personalities.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.id}
+                    </option>
+                  ))}
+                </select>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-ac-muted block mb-1">{t("onb.agentName")}</label>
+                    <input
+                      className="ac-input w-full px-3 py-2"
+                      value={agentName}
+                      onChange={(e) => setAgentName(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-ac-muted block mb-1">{t("onb.company")}</label>
+                    <input
+                      className="ac-input w-full px-3 py-2"
+                      placeholder={t("onb.companyPlaceholder")}
+                      value={company}
+                      onChange={(e) => setCompany(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {installError && <p className="text-xs text-ac-red mb-3">{installError}</p>}
+
+              <div className="flex justify-between">
                 <button
                   className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md hover:text-ac-ink"
                   onClick={() => (path === "install" ? setPhase("install") : setPhase("choice"))}
@@ -321,111 +377,10 @@ export function OnboardingScreen({ onDone, onConnected }: OnboardingScreenProps)
                 </button>
                 <button
                   className="ac-btn px-4 py-2 text-sm flex items-center gap-1"
-                  disabled={!selectedProvider}
-                  onClick={() => setPhase(needsKey ? "apiKey" : "soul")}
+                  disabled={!selectedProvider || (needsKey && !apiKey.trim()) || saving}
+                  onClick={() => void saveUnified()}
                 >
-                  {t("onb.next")}
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── API Key ────────────────────────────────────────────────── */}
-          {phase === "apiKey" && (
-            <div>
-              <h2 className="text-lg font-semibold text-ac-ink mb-2">
-                {t("onb.enterKey")}
-              </h2>
-              <p className="text-sm text-ac-muted mb-4">
-                {PROVIDERS.setup.find((s) => s.id === selectedProvider)?.name}
-              </p>
-              <input
-                type="password"
-                className="ac-input w-full mb-2 px-3 py-2"
-                placeholder={
-                  PROVIDERS.setup.find((s) => s.id === selectedProvider)?.placeholder ||
-                  t("onb.keyPlaceholder")
-                }
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-              />
-              {installError && <p className="text-xs text-ac-red mt-1">{installError}</p>}
-              <div className="flex justify-between mt-6">
-                <button
-                  className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md hover:text-ac-ink"
-                  onClick={() => setPhase("provider")}
-                >
-                  <ChevronLeft className="w-4 h-4 inline mr-1" />
-                  {t("btn.back")}
-                </button>
-                <button
-                  className="ac-btn px-4 py-2 text-sm flex items-center gap-1"
-                  disabled={!apiKey.trim() || saving}
-                  onClick={() => void saveKeyAndContinue()}
-                >
-                  {saving ? t("onb.saving") : t("onb.next")}
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── Soul ───────────────────────────────────────────────────── */}
-          {phase === "soul" && (
-            <div>
-              <h2 className="text-lg font-semibold text-ac-ink mb-1 flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-ac-brand" />
-                {t("onb.soulTitle")}
-              </h2>
-              <p className="text-sm text-ac-muted mb-4">{t("onb.soulDesc")}</p>
-
-              <label className="text-xs text-ac-muted block mb-1">{t("onb.persona")}</label>
-              <select
-                className="ac-input w-full mb-3 px-3 py-2"
-                value={chosenPersonality}
-                onChange={(e) => setChosenPersonality(e.target.value)}
-              >
-                {personalities.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.id}
-                  </option>
-                ))}
-              </select>
-
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                  <label className="text-xs text-ac-muted block mb-1">{t("onb.agentName")}</label>
-                  <input
-                    className="ac-input w-full px-3 py-2"
-                    value={agentName}
-                    onChange={(e) => setAgentName(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-ac-muted block mb-1">{t("onb.company")}</label>
-                  <input
-                    className="ac-input w-full px-3 py-2"
-                    placeholder={t("onb.companyPlaceholder")}
-                    value={company}
-                    onChange={(e) => setCompany(e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-between mt-6">
-                <button
-                  className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md hover:text-ac-ink"
-                  onClick={() => setPhase(needsKey ? "apiKey" : "provider")}
-                >
-                  <ChevronLeft className="w-4 h-4 inline mr-1" />
-                  {t("btn.back")}
-                </button>
-                <button
-                  className="ac-btn px-4 py-2 text-sm flex items-center gap-1"
-                  onClick={() => void saveSoul()}
-                >
-                  {t("onb.finish")}
+                  {saving ? t("onb.saving") : t("onb.finish")}
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>

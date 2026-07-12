@@ -109,8 +109,8 @@ export function SkillsScreen() {
       <div className="flex-1 overflow-y-auto">
         {/* Header */}
         <div className="px-4 py-3 border-b border-ac-border">
-          <h2 className="text-sm font-semibold text-ac-ivory flex items-center gap-2">
-            <Puzzle className="w-4 h-4 text-ac-amber" />
+          <h2 className="text-sm font-semibold text-ac-ink flex items-center gap-2">
+            <Puzzle className="w-4 h-4 text-ac-brand" />
             Skills
           </h2>
         </div>
@@ -145,10 +145,10 @@ export function SkillsScreen() {
         <div className="px-4 py-3">
           {loading ? (
             <div className="flex items-center justify-center h-32">
-              <Loader className="w-5 h-5 text-ac-amber animate-spin" />
+              <Loader className="w-5 h-5 text-ac-brand animate-spin" />
             </div>
           ) : skills.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-32 text-ac-stone text-sm">
+            <div className="flex flex-col items-center justify-center h-32 text-ac-muted text-sm">
               <Puzzle className="w-8 h-8 mb-2 opacity-30" />
               <p>No skills installed</p>
               <p className="text-[10px] mt-1">Install a skill using the field above</p>
@@ -161,7 +161,7 @@ export function SkillsScreen() {
               if (catSkills.length === 0) return null;
               return (
                 <div key={cat} className="mb-4">
-                  <h3 className="text-[10px] font-medium text-ac-stone uppercase tracking-wider mb-2">
+                  <h3 className="text-[10px] font-medium text-ac-muted uppercase tracking-wider mb-2">
                     {cat}
                   </h3>
                   <div className="space-y-1">
@@ -170,17 +170,17 @@ export function SkillsScreen() {
                         <div className="group flex items-start gap-2 py-2 px-3 rounded-lg bg-ac-surface/30 border border-ac-border/50 hover:bg-ac-surface/60 transition-colors">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
-                              <span className="text-xs font-medium text-ac-ivory">
+                              <span className="text-xs font-medium text-ac-ink">
                                 {skill.name}
                               </span>
                               {skill.category && (
-                                <span className="text-[10px] px-1.5 py-0.5 bg-ac-amber/10 text-ac-amber rounded">
+                                <span className="text-[10px] px-1.5 py-0.5 bg-ac-brand/10 text-ac-brand rounded">
                                   {skill.category}
                                 </span>
                               )}
                             </div>
                             {skill.description && (
-                              <p className="text-[11px] text-ac-stone mt-0.5 line-clamp-2">
+                              <p className="text-[11px] text-ac-muted mt-0.5 line-clamp-2">
                                 {skill.description}
                               </p>
                             )}
@@ -188,7 +188,7 @@ export function SkillsScreen() {
                           <div className="flex gap-1 shrink-0">
                             <button
                               onClick={() => handleViewSkill(skill)}
-                              className="text-ac-stone hover:text-ac-amber p-1 rounded transition-colors"
+                              className="text-ac-muted hover:text-ac-brand p-1 rounded transition-colors"
                               title={
                                 selectedSkill === skill.name
                                   ? "Hide content"
@@ -203,7 +203,7 @@ export function SkillsScreen() {
                             </button>
                             <button
                               onClick={() => handleUninstall(skill.name)}
-                              className="text-ac-stone hover:text-ac-red p-1 rounded transition-colors"
+                              className="text-ac-muted hover:text-ac-red p-1 rounded transition-colors"
                               title="Uninstall"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -213,16 +213,16 @@ export function SkillsScreen() {
 
                         {/* Expanded content */}
                         {selectedSkill === skill.name && (
-                          <div className="mt-1 mb-2 ml-2 pl-3 border-l-2 border-ac-amber/30">
+                          <div className="mt-1 mb-2 ml-2 pl-3 border-l-2 border-ac-brand/30">
                             {contentLoading ? (
                               <div className="flex items-center gap-2 py-2">
-                                <Loader className="w-3 h-3 text-ac-amber animate-spin" />
-                                <span className="text-xs text-ac-stone">
+                                <Loader className="w-3 h-3 text-ac-brand animate-spin" />
+                                <span className="text-xs text-ac-muted">
                                   Loading...
                                 </span>
                               </div>
                             ) : (
-                              <pre className="text-[11px] text-ac-ivory/70 font-mono whitespace-pre-wrap p-2 bg-ac-surface/50 rounded max-h-48 overflow-y-auto">
+                              <pre className="text-[11px] text-ac-ink/70 font-mono whitespace-pre-wrap p-2 bg-ac-surface/50 rounded max-h-48 overflow-y-auto">
                                 {skillContent}
                               </pre>
                             )}
@@ -239,11 +239,11 @@ export function SkillsScreen() {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-stone/50 flex justify-between items-center">
+      <div className="px-4 py-2 border-t border-ac-border text-[10px] text-ac-muted/50 flex justify-between items-center">
         <span>{skills.length} skills installed</span>
         <button
           onClick={loadSkills}
-          className="text-ac-stone hover:text-ac-amber transition-colors"
+          className="text-ac-muted hover:text-ac-brand transition-colors"
           title="Refresh"
         >
           <RefreshCw className="w-3 h-3" />

@@ -1,26 +1,24 @@
 // src/components/views/KanbanView.tsx
 // Visual Kanban board: 3 columns (To Do / In Progress / Done) with tasks
 // movable between columns via drag-and-drop using dnd-kit.
+//
+// Uses useDraggable + useDroppable (not SortableContext) because this is a
+// cross-column board, not a reorderable list. SortableContext fights kanban
+// DnD because it tries to reorder within a single column's list context.
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronLeft, Loader, GripVertical } from "lucide-react";
 import {
   DndContext,
-  closestCenter,
-  KeyboardSensor,
   PointerSensor,
+  KeyboardSensor,
   useSensor,
   useSensors,
   DragEndEvent,
   useDroppable,
+  useDraggable,
 } from "@dnd-kit/core";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-  useSortable,
-} from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useTranslation } from "../../hooks/useTranslation";
 
@@ -38,10 +36,15 @@ interface Project { id: number; name: string; color: string; }
 
 const PRIO_DOT: Record<number, string> = { 1: "#f44", 2: "#f80", 3: "#fa0", 4: "#8a8", 5: "#888" };
 const COLUMNS = ["todo", "in_progress", "done"] as const;
-const COL_LABELS: Record<string, { ru: string; en: string; color: string }> = {
-  todo: { ru: "К выполнению", en: "To Do", color: "#6b7280" },
-  in_progress: { ru: "В работе", en: "In Progress", color: "#f59e0b" },
-  done: { ru: "Готово", en: "Done", color: "#22c55e" },
+const COL_COLORS: Record<string, string> = {
+  todo: "#6b7280",
+  in_progress: "#f59e0b",
+  done: "#22c55e",
+};
+const COL_LABEL_KEYS: Record<string, string> = {
+  todo: "kanban.todo",
+  in_progress: "kanban.in_progress",
+  done: "kanban.done",
 };
 
 function KanbanTaskCard({
@@ -53,19 +56,20 @@ function KanbanTaskCard({
   projectName?: string;
   projectColor?: string;
 }) {
+  // useDraggable (not useSortable): we want free-form drag between columns,
+  // not within-list reordering. The draggable id is the task id.
   const {
     attributes,
     listeners,
     setNodeRef,
     transform,
-    transition,
     isDragging,
-  } = useSortable({ id: task.id });
+  } = useDraggable({ id: task.id });
 
   const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.4 : 1,
+    zIndex: isDragging ? 50 : undefined,
   };
 
   return (
@@ -119,45 +123,44 @@ function KanbanColumn({
   tasks: Task[];
   projectMap: Map<number, { name: string; color: string }>;
 }) {
-  const meta = COL_LABELS[columnId];
+  const color = COL_COLORS[columnId] || "#888";
+  const labelKey = COL_LABEL_KEYS[columnId] || columnId;
+  const { t } = useTranslation();
   const { setNodeRef, isOver } = useDroppable({ id: columnId });
 
   return (
     <div
       ref={setNodeRef}
-      className={`w-72 shrink-0 flex flex-col ${isOver ? "bg-ac-brand/5" : ""}`}
+      className={`w-72 shrink-0 flex flex-col rounded-lg transition-colors ${
+        isOver ? "bg-ac-brand/5 ring-2 ring-ac-brand/20" : ""
+      }`}
     >
       {/* Column header */}
-      <div className="flex items-center gap-2 mb-3 px-2">
-        <span className="w-2.5 h-2.5 rounded-full" style={{ background: meta.color }} />
-        <span className="text-sm font-medium text-ac-ink">{meta.ru}</span>
+      <div className="flex items-center gap-2 mb-3 px-2 pt-2">
+        <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
+        <span className="text-sm font-medium text-ac-ink">{t(labelKey)}</span>
         <span className="text-xs text-ac-faint ml-auto bg-ac-surface px-1.5 py-0.5 rounded-full">
           {tasks.length}
         </span>
       </div>
 
-      {/* Sortable tasks */}
-      <SortableContext
-        items={tasks.map((t) => t.id)}
-        strategy={verticalListSortingStrategy}
-      >
-        <div className="flex-1 space-y-2 overflow-y-auto min-h-[200px]">
-          {tasks.map((task) => {
-            const project = task.project_id ? projectMap.get(task.project_id) : undefined;
-            return (
-              <KanbanTaskCard
-                key={task.id}
-                task={task}
-                projectName={project?.name}
-                projectColor={project?.color}
-              />
-            );
-          })}
-          {tasks.length === 0 && (
-            <p className="text-xs text-ac-faint text-center py-4">—</p>
-          )}
-        </div>
-      </SortableContext>
+      {/* Tasks — each is a draggable, column is the droppable target */}
+      <div className="flex-1 space-y-2 overflow-y-auto min-h-[200px] px-1 pb-2">
+        {tasks.map((task) => {
+          const project = task.project_id ? projectMap.get(task.project_id) : undefined;
+          return (
+            <KanbanTaskCard
+              key={task.id}
+              task={task}
+              projectName={project?.name}
+              projectColor={project?.color}
+            />
+          );
+        })}
+        {tasks.length === 0 && (
+          <p className="text-xs text-ac-faint text-center py-4">—</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -181,7 +184,18 @@ export function KanbanView({
       activationConstraint: { distance: 8 },
     }),
     useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
+      coordinateGetter: (event, { currentCoordinates }) => {
+        // Simple keyboard coordinate getter for accessibility.
+        if (!currentCoordinates) return undefined;
+        const delta = 25;
+        switch (event.code) {
+          case "ArrowRight": return { ...currentCoordinates, x: currentCoordinates.x + delta };
+          case "ArrowLeft": return { ...currentCoordinates, x: currentCoordinates.x - delta };
+          case "ArrowDown": return { ...currentCoordinates, y: currentCoordinates.y + delta };
+          case "ArrowUp": return { ...currentCoordinates, y: currentCoordinates.y - delta };
+          default: return undefined;
+        }
+      },
     })
   );
 
@@ -221,11 +235,21 @@ export function KanbanView({
     if (!over) return;
 
     const activeId = Number(active.id);
-    const overId = over.id as string;
+    const overId = String(over.id);
 
-    // overId is the column id (todo, in_progress, done)
-    if (COLUMNS.includes(overId as typeof COLUMNS[number])) {
+    // Dropped on a column directly (empty area or column header).
+    if ((COLUMNS as readonly string[]).includes(overId)) {
       moveTask(activeId, overId);
+      return;
+    }
+
+    // Dropped on a task card — resolve which column that task is in.
+    const overTaskId = Number(overId);
+    if (!isNaN(overTaskId) && overTaskId !== activeId) {
+      const overTask = tasks.find((tk) => tk.id === overTaskId);
+      if (overTask) {
+        moveTask(activeId, overTask.status);
+      }
     }
   };
 
@@ -266,7 +290,19 @@ export function KanbanView({
       <div className="flex-1 flex gap-4 overflow-x-auto p-6">
         <DndContext
           sensors={sensors}
-          collisionDetection={closestCenter}
+          collisionDetection={({ collisionRect, droppableRects }) => {
+            // Find the droppable (column) that has the greatest intersection
+            // with the dragged item. This ensures dropping a card anywhere in
+            // a column's area targets that column, even if over a child card.
+            let best: { id: string; ratio: number } | null = null;
+            for (const [id, rect] of droppableRects) {
+              const overlap = getIntersectionRatio(collisionRect, rect);
+              if (overlap > 0 && (!best || overlap > best.ratio)) {
+                best = { id: String(id), ratio: overlap };
+              }
+            }
+            return best ? [{ id: best.id, data: {} }] : [];
+          }}
           onDragEnd={handleDragEnd}
         >
           {COLUMNS.map((col) => (
@@ -281,6 +317,19 @@ export function KanbanView({
       </div>
     </div>
   );
+}
+
+/** Compute how much of the dragged rect overlaps a droppable rect (0..1). */
+function getIntersectionRatio(
+  a: { left: number; top: number; right: number; bottom: number },
+  b: { left: number; top: number; right: number; bottom: number }
+): number {
+  const overlapW = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+  const overlapH = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+  const overlapArea = overlapW * overlapH;
+  if (overlapArea === 0) return 0;
+  const aArea = (a.right - a.left) * (a.bottom - a.top);
+  return aArea > 0 ? overlapArea / aArea : 0;
 }
 
 export default KanbanView;

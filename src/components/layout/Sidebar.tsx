@@ -1,16 +1,14 @@
 // src/components/layout/Sidebar.tsx
-// shturman.ai-style navigation: icon + label, collapsible, 8 work sections.
+// shturman.ai-style navigation: icon + label, collapsible, 4 sections.
+// Tasks/Kanban/Goals/Projects/Protocols/Stats are consolidated inside the
+// "Работа" view (WorkView) with internal sub-tabs.
 // Active item: pale-red tint (bg-ac-brand-soft) + brand text. A "Самодиагностика"
 // (self-diagnosis) button sits in the footer, like the reference.
 
 import {
   LayoutDashboard,
   MessageSquare,
-  SquareCheckBig,
-  Target,
-  FolderOpen,
-  ChartColumn,
-  FileText,
+  Briefcase,
   Settings as SettingsIcon,
   Zap,
   PanelLeftClose,
@@ -22,12 +20,7 @@ import { useTranslation } from "../../hooks/useTranslation";
 export type ViewId =
   | "dashboard"
   | "chat"
-  | "tasks"
-  | "kanban"
-  | "goals"
-  | "projects"
-  | "stats"
-  | "protocols"
+  | "work"
   | "settings";
 
 interface SidebarProps {
@@ -44,29 +37,47 @@ export function Sidebar({ activeView, onViewChange, onSelfDiagnosis }: SidebarPr
   const items: { id: ViewId; icon: typeof LayoutDashboard; label: string }[] = [
     { id: "dashboard", icon: LayoutDashboard, label: t("feed.title") },
     { id: "chat", icon: MessageSquare, label: t("nav.assistant") },
-    { id: "tasks", icon: SquareCheckBig, label: t("nav.tasks") },
-    { id: "kanban", icon: LayoutDashboard, label: t("kanban.title") },
-    { id: "goals", icon: Target, label: t("nav.goals") },
-    { id: "projects", icon: FolderOpen, label: t("nav.projects") },
-    { id: "stats", icon: ChartColumn, label: t("nav.stats") },
-    { id: "protocols", icon: FileText, label: t("nav.protocols") },
+    { id: "work", icon: Briefcase, label: t("nav.work") },
     { id: "settings", icon: SettingsIcon, label: t("nav.settings") },
   ];
 
-  // Collapsed (icons-only) form factor.
+  // Collapsed (icons-only) form factor. Each icon navigates to its view.
   if (!sidebarOpen) {
     return (
-      <button
-        onClick={toggleSidebar}
-        className="w-12 shrink-0 border-r border-ac-border bg-ac-bg flex flex-col items-center justify-start py-3 text-ac-muted hover:text-ac-brand"
-        title={t("sidebar_expand")}
-        aria-label={t("sidebar_expand")}
-      >
-        <Compass className="w-5 h-5 text-ac-brand mb-4 mt-1" />
-        {items.map((it) => (
-          <it.icon key={it.id} className="w-5 h-5 my-2.5" />
-        ))}
-      </button>
+      <div className="w-12 shrink-0 border-r border-ac-border bg-ac-surface flex flex-col items-center justify-start py-3 text-ac-muted">
+        <button
+          onClick={toggleSidebar}
+          className="mb-3"
+          title={t("sidebar_expand")}
+          aria-label={t("sidebar_expand")}
+        >
+          <Compass className="w-5 h-5 text-ac-brand" />
+        </button>
+        {items.map((it) => {
+          const active = activeView === it.id;
+          return (
+            <button
+              key={it.id}
+              onClick={() => onViewChange(it.id)}
+              title={it.label}
+              className={`my-1.5 p-2 rounded-md transition-colors ${
+                active
+                  ? "bg-ac-brand-soft text-ac-brand"
+                  : "text-ac-muted hover:bg-ac-surface-2 hover:text-ac-ink"
+              }`}
+            >
+              <it.icon className="w-5 h-5" />
+            </button>
+          );
+        })}
+        <button
+          onClick={toggleSidebar}
+          className="mt-auto"
+          title={t("sidebar_expand")}
+        >
+          <PanelLeftClose className="w-4 h-4 rotate-180" />
+        </button>
+      </div>
     );
   }
 
@@ -87,10 +98,12 @@ export function Sidebar({ activeView, onViewChange, onSelfDiagnosis }: SidebarPr
             <button
               key={it.id}
               onClick={() => onViewChange(it.id)}
+              aria-current={active ? "page" : undefined}
+              aria-label={it.label}
               className={`flex items-center gap-3 w-full rounded-md px-3 py-2 text-sm font-medium transition-colors ${
                 active
-                  ? "bg-ac-brand-soft text-ac-brand"
-                  : "text-ac-muted hover:bg-ac-surface-2 hover:text-ac-ink"
+                  ? "bg-ac-brand-soft text-ac-brand border-l-2 border-ac-brand"
+                  : "text-ac-muted hover:bg-ac-surface-2 hover:text-ac-ink border-l-2 border-transparent"
               }`}
             >
               <it.icon className="w-[18px] h-[18px]" style={{ strokeWidth: 2 }} />

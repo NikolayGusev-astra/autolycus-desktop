@@ -42,12 +42,12 @@ export function ApprovalCard({
     CLASS_LABELS[request.commandClass] || request.commandClass;
 
   return (
-    <div className="px-4 py-3 border-t border-ac-border bg-ac-pitch/50 backdrop-blur-sm">
+    <div className="px-4 py-3 border-t border-ac-border bg-ac-bg/50 backdrop-blur-sm">
       <div className="max-w-2xl mx-auto">
         {/* Header */}
         <div className="flex items-center gap-2 mb-2">
-          <Shield className="w-4 h-4 text-ac-amber flex-shrink-0" />
-          <span className="text-sm font-semibold text-ac-ivory">
+          <Shield className="w-4 h-4 text-ac-brand flex-shrink-0" />
+          <span className="text-sm font-semibold text-ac-ink">
             {t("approval.title")}
           </span>
           <span
@@ -58,7 +58,7 @@ export function ApprovalCard({
         </div>
 
         {/* Description */}
-        <p className="text-sm text-ac-stone mb-2">{request.action}</p>
+        <p className="text-sm text-ac-muted mb-2">{request.action}</p>
 
         {/* Tool info */}
         <div className="ac-tool mb-3">
@@ -66,7 +66,7 @@ export function ApprovalCard({
             <span className="ac-badge ac-badge-yellow">{request.toolName}</span>
           </div>
           {request.toolInput && (
-            <pre className="text-[11px] text-ac-stone whitespace-pre-wrap mt-1 overflow-x-auto max-h-32 overflow-y-auto">
+            <pre className="text-[11px] text-ac-muted whitespace-pre-wrap mt-1 overflow-x-auto max-h-32 overflow-y-auto">
               {request.toolInput}
             </pre>
           )}
@@ -76,7 +76,7 @@ export function ApprovalCard({
         <div className="flex gap-2 justify-end">
           <button
             onClick={onDeny}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-border text-ac-stone hover:text-ac-ivory hover:border-ac-stone transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-border text-ac-muted hover:text-ac-ink hover:border-ac-muted transition-colors"
           >
             <X className="w-3 h-3" />
             {t("approval.deny")}
@@ -90,7 +90,7 @@ export function ApprovalCard({
           </button>
           <button
             onClick={onApproveAlways}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-amber/30 text-ac-amber hover:bg-ac-amber/10 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-brand/30 text-ac-brand hover:bg-ac-brand/10 transition-colors"
           >
             <RefreshCw className="w-3 h-3" />
             {t("approval.approveAlways")}

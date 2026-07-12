@@ -32,6 +32,8 @@ import {
   Monitor,
   Mail,
   CheckSquare,
+  Briefcase,
+  Shuffle,
   Plus,
   Trash2,
   Edit3,
@@ -318,7 +320,7 @@ function SoulTab() {
         </button>
       </div>
       {status && (
-        <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>
+        <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>
       )}
     </div>
   );
@@ -545,11 +547,11 @@ function TelegramTab() {
       </div>
 
       {status && (
-        <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
+        <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>
           {status}
         </p>
       )}
-      {saved && <p className="text-xs text-green-400">{t("saved")}</p>}
+      {saved && <p className="text-xs text-ac-green">{t("saved")}</p>}
     </div>
   );
 }
@@ -568,7 +570,7 @@ function ModelsTab() {
   const [addStatus, setAddStatus] = useState("");
   // Proxy settings (SOCKS5) — applied to model API calls (Remote/Ssh modes)
   const [proxyEnabled, setProxyEnabled] = useState(true);
-  const [proxyUrl, setProxyUrl] = useState("socks5://127.0.0.1:12334");
+  const [proxyUrl, setProxyUrl] = useState("http://127.0.0.1:8080");
   const [proxyStatus, setProxyStatus] = useState("");
   // Available models from gateway /v1/models
   const [apiModels, setApiModels] = useState<string[]>([]);
@@ -586,7 +588,7 @@ function ModelsTab() {
   useEffect(() => {
     if (modelConfig?.proxy) {
       setProxyEnabled(modelConfig.proxy.use_proxy);
-      setProxyUrl(modelConfig.proxy.proxy_url || "socks5://127.0.0.1:12334");
+      setProxyUrl(modelConfig.proxy.proxy_url || "http://127.0.0.1:8080");
     }
   }, [modelConfig]);
 
@@ -698,7 +700,7 @@ function ModelsTab() {
               {t("save_model")}
             </button>
             {addStatus && (
-              <p className={`text-xs ${addStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
+              <p className={`text-xs ${addStatus.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>
                 {addStatus}
               </p>
             )}
@@ -784,7 +786,7 @@ function ModelsTab() {
         )}
 
         {addStatus && !showAddForm && (
-          <p className={`text-xs mt-2 ${addStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
+          <p className={`text-xs mt-2 ${addStatus.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>
             {addStatus}
           </p>
         )}
@@ -810,7 +812,7 @@ function ModelsTab() {
             value={proxyUrl}
             disabled={!proxyEnabled}
             onChange={(e) => setProxyUrl(e.target.value)}
-            placeholder="socks5://127.0.0.1:12334"
+            placeholder="http://127.0.0.1:8080"
             className="ac-input w-full px-3 py-2 text-sm font-mono mb-2"
           />
           <div className="flex items-center gap-2">
@@ -818,10 +820,97 @@ function ModelsTab() {
               {t("proxy.save") || "Save proxy"}
             </button>
             {proxyStatus && (
-              <span className={`text-xs ${proxyStatus.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{proxyStatus}</span>
+              <span className={`text-xs ${proxyStatus.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{proxyStatus}</span>
             )}
           </div>
         </div>
+
+        {/* Multi-model routing (practice 1): assign models to task types
+            so routine work runs on cheaper models and complex analysis on
+            flagship ones. */}
+        <ModelRoutingSection models={models} />
+      </div>
+    </div>
+  );
+}
+
+/// Compact multi-model routing editor: lets the user assign a model per task
+/// type (routine / complex / vision). Based on GPT-5.6 guide practice 1 —
+/// "different models for different request types reduce cost without quality loss."
+function ModelRoutingSection({ models }: { models: any[] }) {
+  const { t } = useTranslation();
+  const [routing, setRouting] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState("");
+
+  // Load current routing from model config.
+  useEffect(() => {
+    invoke<any>("get_model_config_cmd", { profile: null })
+      .then((config) => {
+        if (config?.model_routing) {
+          setRouting(config.model_routing);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const TASK_TYPES = [
+    { key: "routine", label: t("routing.routine") },
+    { key: "complex", label: t("routing.complex") },
+    { key: "vision", label: t("routing.vision") },
+  ];
+
+  const handleSave = async () => {
+    // Only save non-empty entries.
+    const filtered: Record<string, string> = {};
+    for (const [k, v] of Object.entries(routing)) {
+      if (v.trim()) filtered[k] = v.trim();
+    }
+    try {
+      await invoke("set_model_routing_cmd", { routing: filtered, profile: null });
+      setStatus("✓ " + t("routing.saved"));
+      setTimeout(() => setStatus(""), 2000);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  return (
+    <div className="mt-4 p-3 rounded-lg border border-ac-border bg-ac-surface">
+      <div className="flex items-center gap-2 mb-2">
+        <Shuffle className="w-3.5 h-3.5 text-ac-brand" />
+        <label className="text-xs font-medium text-ac-ink">
+          {t("routing.title")}
+        </label>
+      </div>
+      <p className="text-[11px] text-ac-muted mb-3">
+        {t("routing.hint")}
+      </p>
+      {TASK_TYPES.map((tt) => (
+        <div key={tt.key} className="mb-2">
+          <label className="text-[11px] text-ac-muted block mb-0.5">{tt.label}</label>
+          <select
+            value={routing[tt.key] || ""}
+            onChange={(e) => setRouting((r) => ({ ...r, [tt.key]: e.target.value }))}
+            className="ac-input w-full px-2 py-1.5 text-xs"
+          >
+            <option value="">— {t("routing.default")} —</option>
+            {models.map((m: any) => (
+              <option key={m.id} value={m.model}>
+                {m.name} ({m.provider}/{m.model})
+              </option>
+            ))}
+          </select>
+        </div>
+      ))}
+      <div className="flex items-center gap-2 mt-2">
+        <button onClick={handleSave} className="ac-btn px-3 py-1.5 text-xs">
+          {t("routing.save")}
+        </button>
+        {status && (
+          <span className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>
+            {status}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -861,7 +950,7 @@ function TerminalTab() {
       </button>
 
       {status && (
-        <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>
+        <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>
           {status}
         </p>
       )}
@@ -985,7 +1074,7 @@ function CredentialsTab() {
           {t("settings.credentialsSave")}
         </button>
         {status && (
-          <p className={`text-xs mt-2 ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>
+          <p className={`text-xs mt-2 ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>
         )}
       </div>
     </div>
@@ -1043,7 +1132,7 @@ function HermesSectionTab({ section, fields }: { section: string; fields: { key:
           </div>
         </div>
       ))}
-      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>}
     </div>
   );
 }
@@ -1070,6 +1159,8 @@ interface EmailSource {
   smtp_host: string;
   smtp_port: number;
   imap_host: string;
+  imap_port?: number;
+  use_ssl?: boolean;
   enabled: boolean;
   use_proxy?: boolean;
   proxy_url?: string;
@@ -1085,15 +1176,25 @@ interface JiraSource {
   use_proxy?: boolean;
   proxy_url?: string;
 }
+interface BitrixSource {
+  id: string;
+  name: string;
+  webhook_url: string;
+  user_id: string;
+  enabled: boolean;
+  use_proxy?: boolean;
+  proxy_url?: string;
+}
 interface SourcesConfig {
   telegram: TelegramSource[];
   email: EmailSource[];
   jira: JiraSource[];
+  bitrix: BitrixSource[];
 }
 
 function SourcesTab() {
   const { t } = useTranslation();
-  const [config, setConfig] = useState<SourcesConfig>({ telegram: [], email: [], jira: [] });
+  const [config, setConfig] = useState<SourcesConfig>({ telegram: [], email: [], jira: [], bitrix: [] });
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -1134,7 +1235,7 @@ function SourcesTab() {
     }
   };
 
-  const updateTelegram = async (source: TelegramSource | EmailSource | JiraSource) => {
+  const updateTelegram = async (source: TelegramSource | EmailSource | JiraSource | BitrixSource) => {
     try {
       await invoke("update_telegram_source_cmd", { id: source.id, source, profile: null });
       const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
@@ -1176,7 +1277,7 @@ function SourcesTab() {
     }
   };
 
-  const updateEmail = async (source: TelegramSource | EmailSource | JiraSource) => {
+  const updateEmail = async (source: TelegramSource | EmailSource | JiraSource | BitrixSource) => {
     try {
       await invoke("update_email_source_cmd", { id: source.id, source, profile: null });
       const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
@@ -1217,7 +1318,7 @@ function SourcesTab() {
     }
   };
 
-  const updateJira = async (source: TelegramSource | EmailSource | JiraSource) => {
+  const updateJira = async (source: TelegramSource | EmailSource | JiraSource | BitrixSource) => {
     try {
       await invoke("update_jira_source_cmd", { id: source.id, source, profile: null });
       const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
@@ -1237,10 +1338,49 @@ function SourcesTab() {
     }
   };
 
+  // --- Bitrix ---
+  const addBitrix = async () => {
+    const newSource: BitrixSource = {
+      id: crypto.randomUUID(),
+      name: `Bitrix ${config.bitrix.length + 1}`,
+      webhook_url: "",
+      user_id: "",
+      enabled: true,
+      use_proxy: true,
+    };
+    try {
+      await invoke("add_bitrix_source_cmd", { source: newSource, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const updateBitrix = async (source: TelegramSource | EmailSource | JiraSource | BitrixSource) => {
+    try {
+      await invoke("update_bitrix_source_cmd", { id: source.id, source, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
+  const removeBitrix = async (id: string) => {
+    try {
+      await invoke("remove_bitrix_source_cmd", { id, profile: null });
+      const result = await invoke<SourcesConfig>("list_sources_cmd", { profile: null });
+      setConfig(result);
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
+
   const SourceCard = ({ source, type, onUpdate, onRemove, isActive }: {
-    source: TelegramSource | EmailSource | JiraSource;
-    type: "telegram" | "email" | "jira";
-    onUpdate: (s: TelegramSource | EmailSource | JiraSource) => void;
+    source: TelegramSource | EmailSource | JiraSource | BitrixSource;
+    type: "telegram" | "email" | "jira" | "bitrix";
+    onUpdate: (s: TelegramSource | EmailSource | JiraSource | BitrixSource) => void;
     onRemove: (id: string) => void;
     isActive: boolean;
   }) => {
@@ -1252,39 +1392,49 @@ function SourcesTab() {
     };
 
     const fields = type === "telegram" ? [
-          { key: "name", label: "Name", type: "text" as const },
-          { key: "bot_token", label: "Bot Token", type: "password" as const, placeholder: "123456:ABC-DEF..." },
-          { key: "chat_id", label: "Chat ID", type: "text" as const, placeholder: "-1001234567890" },
-          { key: "allowed_users", label: "Allowed Users", type: "text" as const, placeholder: "user_id1, user_id2" },
-          { key: "home_channel", label: "Home Channel", type: "text" as const, placeholder: "-1001234567890" },
-          { key: "enabled", label: "Enabled", type: "checkbox" as const },
-          { key: "use_proxy", label: "Use Proxy (SOCKS5)", type: "checkbox" as const },
-          { key: "proxy_url", label: "Proxy URL (optional)", type: "text" as const, placeholder: "socks5://127.0.0.1:12334" },
+          { key: "name", label: t("sources.name"), type: "text" as const },
+          { key: "bot_token", label: t("sources.botToken"), type: "password" as const, placeholder: "123456:ABC-DEF..." },
+          { key: "chat_id", label: t("sources.chatId"), type: "text" as const, placeholder: "-1001234567890" },
+          { key: "allowed_users", label: t("sources.allowedUsers"), type: "text" as const, placeholder: "user_id1, user_id2" },
+          { key: "home_channel", label: t("sources.homeChannel"), type: "text" as const, placeholder: "-1001234567890" },
+          { key: "enabled", label: t("sources.enabled"), type: "checkbox" as const },
+          { key: "use_proxy", label: t("sources.useProxy"), type: "checkbox" as const },
+          { key: "proxy_url", label: t("sources.proxyUrl"), type: "text" as const, placeholder: "http://127.0.0.1:8080" },
         ] : type === "email" ? [
-          { key: "name", label: "Name", type: "text" as const },
-          { key: "address", label: "Email Address", type: "text" as const, placeholder: "you@example.com" },
-          { key: "password", label: "Password", type: "password" as const, placeholder: "app password" },
-          { key: "smtp_host", label: "SMTP Host", type: "text" as const, placeholder: "smtp.gmail.com" },
-          { key: "smtp_port", label: "SMTP Port", type: "number" as const },
-          { key: "imap_host", label: "IMAP Host", type: "text" as const, placeholder: "imap.gmail.com" },
-          { key: "enabled", label: "Enabled", type: "checkbox" as const },
-          { key: "use_proxy", label: "Use Proxy (SOCKS5)", type: "checkbox" as const },
-          { key: "proxy_url", label: "Proxy URL (optional)", type: "text" as const, placeholder: "socks5://127.0.0.1:12334" },
+          { key: "name", label: t("sources.name"), type: "text" as const },
+          { key: "address", label: t("sources.emailAddress"), type: "text" as const, placeholder: "you@example.com" },
+          { key: "password", label: t("sources.password"), type: "password" as const, placeholder: "app password" },
+          { key: "smtp_host", label: t("sources.smtpHost"), type: "text" as const, placeholder: "smtp.gmail.com" },
+          { key: "smtp_port", label: t("sources.smtpPort"), type: "number" as const },
+          { key: "imap_host", label: t("sources.imapHost"), type: "text" as const, placeholder: "imap.gmail.com" },
+          { key: "imap_port", label: t("sources.imapPort"), type: "number" as const },
+          { key: "use_ssl", label: t("sources.useSsl"), type: "checkbox" as const },
+          { key: "enabled", label: t("sources.enabled"), type: "checkbox" as const },
+          { key: "use_proxy", label: t("sources.useProxy"), type: "checkbox" as const },
+          { key: "proxy_url", label: t("sources.proxyUrl"), type: "text" as const, placeholder: "http://127.0.0.1:8080" },
+        ] : type === "jira" ? [
+          { key: "name", label: t("sources.name"), type: "text" as const },
+          { key: "url", label: t("sources.jiraUrl"), type: "text" as const, placeholder: "https://company.atlassian.net" },
+          { key: "username", label: t("sources.username"), type: "text" as const },
+          { key: "api_token", label: t("sources.apiToken"), type: "password" as const, placeholder: "API token" },
+          { key: "project_key", label: t("sources.projectKey"), type: "text" as const, placeholder: "PROJ" },
+          { key: "enabled", label: t("sources.enabled"), type: "checkbox" as const },
+          { key: "use_proxy", label: t("sources.useProxy"), type: "checkbox" as const },
+          { key: "proxy_url", label: t("sources.proxyUrl"), type: "text" as const, placeholder: "http://127.0.0.1:8080" },
         ] : [
-          { key: "name", label: "Name", type: "text" as const },
-          { key: "url", label: "Jira URL", type: "text" as const, placeholder: "https://company.atlassian.net" },
-          { key: "username", label: "Username", type: "text" as const },
-          { key: "api_token", label: "API Token", type: "password" as const, placeholder: "API token" },
-          { key: "project_key", label: "Project Key", type: "text" as const, placeholder: "PROJ" },
-          { key: "enabled", label: "Enabled", type: "checkbox" as const },
-          { key: "use_proxy", label: "Use Proxy (SOCKS5)", type: "checkbox" as const },
-          { key: "proxy_url", label: "Proxy URL (optional)", type: "text" as const, placeholder: "socks5://127.0.0.1:12334" },
+          { key: "name", label: t("sources.name"), type: "text" as const },
+          { key: "webhook_url", label: t("sources.webhookUrl"), type: "text" as const, placeholder: "https://company.bitrix24.ru/rest/1/xxxxx/" },
+          { key: "user_id", label: t("sources.userId"), type: "text" as const, placeholder: "1" },
+          { key: "enabled", label: t("sources.enabled"), type: "checkbox" as const },
+          { key: "use_proxy", label: t("sources.useProxy"), type: "checkbox" as const },
+          { key: "proxy_url", label: t("sources.proxyUrl"), type: "text" as const, placeholder: "http://127.0.0.1:8080" },
         ];
 
     const icon = type === "telegram" ? <Send className="w-4 h-4 text-[#0088cc]" /> :
                 type === "email" ? <Mail className="w-4 h-4 text-[#ea4335]" /> :
-                <CheckSquare className="w-4 h-4 text-[#0052cc]" />;
-    const typeLabel = type === "telegram" ? "Telegram" : type === "email" ? "Email" : "Jira";
+                type === "jira" ? <CheckSquare className="w-4 h-4 text-[#0052cc]" /> :
+                <Briefcase className="w-4 h-4 text-[#2c3e50]" />;
+    const typeLabel = type === "telegram" ? "Telegram" : type === "email" ? "Email" : type === "jira" ? "Jira" : "Bitrix";
 
     return (
       <div className="border border-ac-border rounded-lg overflow-hidden">
@@ -1366,7 +1516,7 @@ function SourcesTab() {
           </button>
         </div>
         {config.telegram.length === 0 ? (
-          <p className="text-sm text-ac-muted ml-7 py-4">No Telegram bots configured. Click + to add one.</p>
+          <p className="text-sm text-ac-muted ml-7 py-4">{t("sources.noTelegram")}</p>
         ) : (
           <>
           <div className="space-y-2 ml-7">
@@ -1402,7 +1552,7 @@ function SourcesTab() {
           </button>
         </div>
         {config.email.length === 0 ? (
-          <p className="text-sm text-ac-muted ml-7 py-4">No email accounts configured. Click + to add one.</p>
+          <p className="text-sm text-ac-muted ml-7 py-4">{t("sources.noEmail")}</p>
         ) : (
           <>
           <div className="space-y-2 ml-7">
@@ -1438,7 +1588,7 @@ function SourcesTab() {
           </button>
         </div>
         {config.jira.length === 0 ? (
-          <p className="text-sm text-ac-muted ml-7 py-4">No Jira instances configured. Click + to add one.</p>
+          <p className="text-sm text-ac-muted ml-7 py-4">{t("sources.noJira")}</p>
         ) : (
           <>
           <div className="space-y-2 ml-7">
@@ -1457,20 +1607,44 @@ function SourcesTab() {
         )}
       </div>
 
-      {/* Apply to .env button */}
-      <div className="border-t border-ac-border pt-4">
-        <button
-          onClick={() => invoke("apply_sources_to_env_cmd", { profile: null }).then(() => {
-            setStatus("✓ Applied to Hermes .env");
-            setTimeout(() => setStatus(""), 2000);
-          }).catch((e: any) => setStatus("✗ " + String(e)))}
-          className="ac-btn px-4 py-2 text-sm flex items-center gap-2"
-        >
-          <Zap className="w-4 h-4" /> Apply to Hermes .env (for backwards compatibility)
-        </button>
+      {/* ── Bitrix connectors ─────────────────────────────────────────── */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Briefcase className="w-4 h-4 text-[#2c3e50]" />
+            <span className="text-sm font-medium text-ac-ink">Bitrix Instances</span>
+          </div>
+          <button onClick={addBitrix} className="ac-btn px-3 py-1.5 text-xs flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> {t("add_model")}
+          </button>
+        </div>
+        {config.bitrix.length === 0 ? (
+          <p className="text-sm text-ac-muted ml-7 py-4">{t("sources.noBitrix")}</p>
+        ) : (
+          <div className="space-y-2 ml-7">
+            {config.bitrix.map((src, i) => (
+              <SourceCard
+                key={src.id}
+                source={src}
+                type="bitrix"
+                isActive={src.enabled && i === config.bitrix.findIndex((s) => s.enabled)}
+                onUpdate={updateBitrix}
+                onRemove={removeBitrix}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+      {/* Note: sources auto-apply to Hermes .env on save — no manual button needed. */}
+      <div className="border-t border-ac-border pt-3">
+        <p className="text-xs text-ac-muted flex items-center gap-1.5">
+          <Zap className="w-3.5 h-3.5" />
+          {t("sources.autoApplied")}
+        </p>
+      </div>
+
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>}
     </div>
   );
 }
@@ -1585,7 +1759,7 @@ function SkillsTab() {
         </div>
       )}
 
-      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>}
     </div>
   );
 }
@@ -1774,7 +1948,7 @@ function CronTab() {
         </div>
       )}
 
-      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>}
     </div>
   );
 }
@@ -1999,7 +2173,7 @@ function McpTab() {
         </div>
       )}
 
-      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-green-400" : "text-ac-red"}`}>{status}</p>}
+      {status && <p className={`text-xs ${status.startsWith("✓") ? "text-ac-green" : "text-ac-red"}`}>{status}</p>}
     </div>
   );
 }
@@ -2009,26 +2183,68 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const { t } = useTranslation();
 
-  const tabs: { id: SettingsTab; label: string; icon: typeof Sun }[] = [
-    { id: "general", label: t("settings_general"), icon: Sun },
-    { id: "appearance", label: t("settings.appearance"), icon: Palette },
-    { id: "soul", label: t("settings.soul"), icon: Sparkles },
-    { id: "sources", label: t("sources.title"), icon: Send },
-    { id: "connection", label: t("settings_connection"), icon: Globe },
-    { id: "models", label: t("settings_models"), icon: Cpu },
-    { id: "providers", label: t("settings.providers"), icon: KeyRound },
-    { id: "credentials", label: t("settings.credentials"), icon: KeyRound },
-    { id: "agent", label: t("settings.agent"), icon: Cpu },
-    { id: "tts", label: "TTS", icon: Send },
-    { id: "gateway", label: t("settings.gateway"), icon: Bot },
-    { id: "tools", label: t("settings.tools"), icon: Wrench },
-    { id: "skills", label: t("settings.skills"), icon: BookOpen },
-    { id: "cron", label: t("settings.cron"), icon: Clock },
-    { id: "mcp", label: t("settings.mcp"), icon: Server },
-    { id: "telegram", label: t("settings_telegram"), icon: Send },
-    { id: "terminal", label: t("settings_terminal"), icon: TermIcon },
-    { id: "diagnose", label: t("settings.diagnose"), icon: Stethoscope },
-    { id: "about", label: t("settings.about"), icon: Info },
+  // Grouped tabs: 19 flat tabs → 6 logical sections so the user isn't
+  // overwhelmed. Each group renders as a labeled section in the rail.
+  const tabGroups: {
+    label: string;
+    icon: typeof Sun;
+    tabs: { id: SettingsTab; label: string; icon: typeof Sun }[];
+  }[] = [
+    {
+      label: t("settings_general") || "General",
+      icon: Sun,
+      tabs: [
+        { id: "general", label: t("settings_general"), icon: Sun },
+        { id: "appearance", label: t("settings.appearance"), icon: Palette },
+        { id: "soul", label: t("settings.soul"), icon: Sparkles },
+        { id: "about", label: t("settings.about"), icon: Info },
+      ],
+    },
+    {
+      label: t("settings_connection") || "Connection",
+      icon: Globe,
+      tabs: [
+        { id: "connection", label: t("settings_connection"), icon: Globe },
+        { id: "gateway", label: t("settings.gateway"), icon: Bot },
+      ],
+    },
+    {
+      label: t("sources.title") || "Sources",
+      icon: Send,
+      tabs: [
+        { id: "sources", label: t("sources.title"), icon: Send },
+        { id: "telegram", label: t("settings_telegram"), icon: Send },
+      ],
+    },
+    {
+      label: t("settings_models") || "Models & Keys",
+      icon: Cpu,
+      tabs: [
+        { id: "models", label: t("settings_models"), icon: Cpu },
+        { id: "providers", label: t("settings.providers"), icon: KeyRound },
+        { id: "credentials", label: t("settings.credentials"), icon: KeyRound },
+        { id: "agent", label: t("settings.agent"), icon: Cpu },
+        { id: "tts", label: "TTS", icon: Send },
+      ],
+    },
+    {
+      label: t("settings.tools") || "Tools & Skills",
+      icon: Wrench,
+      tabs: [
+        { id: "tools", label: t("settings.tools"), icon: Wrench },
+        { id: "skills", label: t("settings.skills"), icon: BookOpen },
+        { id: "cron", label: t("settings.cron"), icon: Clock },
+        { id: "mcp", label: t("settings.mcp"), icon: Server },
+      ],
+    },
+    {
+      label: t("settings.diagnose") || "Diagnostics",
+      icon: Stethoscope,
+      tabs: [
+        { id: "diagnose", label: t("settings.diagnose"), icon: Stethoscope },
+        { id: "terminal", label: t("settings_terminal"), icon: TermIcon },
+      ],
+    },
   ];
 
   return (
@@ -2044,24 +2260,32 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        {/* Two-column layout: a left tab rail (so all 11 tabs fit without
-            horizontal scrolling) + the active panel on the right. */}
+        {/* Two-column layout: a left tab rail with 6 grouped sections + the
+            active panel on the right. */}
         <div className="flex gap-4 flex-1 min-h-0">
-          {/* Tab rail */}
-          <nav className="w-40 shrink-0 border-r border-ac-border pr-2 overflow-y-auto">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`w-full flex items-center gap-2 px-2.5 py-2 text-xs rounded-md mb-0.5 transition-colors text-left ${
-                  activeTab === tab.id
-                    ? "bg-ac-brand/10 text-ac-brand"
-                    : "text-ac-muted hover:text-ac-ink hover:bg-ac-surface"
-                }`}
-              >
-                <tab.icon className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{tab.label}</span>
-              </button>
+          {/* Tab rail — grouped */}
+          <nav className="w-44 shrink-0 border-r border-ac-border pr-2 overflow-y-auto">
+            {tabGroups.map((group) => (
+              <div key={group.label} className="mb-2">
+                <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ac-faint">
+                  <group.icon className="w-3 h-3" />
+                  {group.label}
+                </div>
+                {group.tabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-xs rounded-md mb-0.5 transition-colors text-left ${
+                      activeTab === tab.id
+                        ? "bg-ac-brand/10 text-ac-brand"
+                        : "text-ac-muted hover:text-ac-ink hover:bg-ac-surface"
+                    }`}
+                  >
+                    <tab.icon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{tab.label}</span>
+                  </button>
+                ))}
+              </div>
             ))}
           </nav>
 
@@ -2079,14 +2303,14 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             {activeTab === "credentials" && <CredentialsTab />}
             {activeTab === "agent" && (
               <HermesSectionTab section="agent" fields={[
-                { key: "max_turns", label: "Max turns", type: "number" },
-                { key: "reasoning_effort", label: "Reasoning effort" },
-                { key: "verbose", label: "Verbose" },
+                { key: "max_turns", label: t("agent.maxTurns"), type: "number" },
+                { key: "reasoning_effort", label: t("agent.reasoningEffort") },
+                { key: "verbose", label: t("agent.verbose") },
               ]} />
             )}
             {activeTab === "tts" && (
               <HermesSectionTab section="tts" fields={[
-                { key: "provider", label: "TTS Provider" },
+                { key: "provider", label: t("agent.ttsProvider") },
               ]} />
             )}
             {activeTab === "gateway" && (

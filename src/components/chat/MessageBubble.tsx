@@ -3,6 +3,7 @@ import { Copy, RefreshCw, Check, User, Mic, FileText, Link as LinkIcon, ListChec
 import { invoke } from "@tauri-apps/api/core";
 import { AgentMarkdown } from "../AgentMarkdown";
 import { useTranslation } from "../../hooks/useTranslation";
+import { useUIStore } from "../../stores/uiStore";
 import type { MessageAttachment } from "../../lib/types";
 
 interface Message {
@@ -89,18 +90,32 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
       {/* Avatar */}
       <div
         className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${
-          isUser ? "bg-ac-amber/20" : "bg-ac-surface border border-ac-border"
+          isUser ? "bg-ac-brand/20" : "bg-ac-surface border border-ac-border"
         }`}
+        aria-hidden="true"
       >
         {isUser ? (
-          <User className="w-4 h-4 text-ac-amber" />
+          <User className="w-4 h-4 text-ac-brand" />
         ) : (
-          <span className="text-xs font-display font-bold text-ac-amber">Ш</span>
+          <span className="text-xs font-display font-bold text-ac-brand">Ш</span>
         )}
       </div>
 
       {/* Content */}
       <div className={`flex flex-col gap-1 max-w-[80%] ${isUser ? "items-end" : "items-start"}`}>
+        {/* Sender name + timestamp */}
+        <div className={`flex items-center gap-2 text-[10px] text-ac-faint ${isUser ? "flex-row-reverse" : ""}`}>
+          <span className="font-medium text-ac-muted">{isUser ? t("chat.you") || "Вы" : "Штурман"}</span>
+          {message.timestamp && (
+            <span>
+              {new Date(message.timestamp).toLocaleTimeString(
+                useUIStore.getState().language === "ru" ? "ru-RU" : "en-US",
+                { hour: "2-digit", minute: "2-digit" }
+              )}
+            </span>
+          )}
+        </div>
+
         {/* Attachment previews (above the text) */}
         {message.attachments && message.attachments.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-1">
@@ -113,8 +128,8 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
         <div
           className={`rounded-lg px-4 py-2 text-sm ${
             isUser
-              ? "bg-ac-amber/15 text-ac-ivory"
-              : "bg-ac-surface text-ac-ivory border border-ac-border"
+              ? "bg-ac-brand/15 text-ac-ink"
+              : "bg-ac-surface text-ac-ink border border-ac-border"
           }`}
         >
           {isUser ? (
@@ -125,17 +140,18 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
             <AgentMarkdown>{message.content}</AgentMarkdown>
           )}
           {message.isStreaming && (
-            <span className="inline-block w-2 h-4 bg-ac-amber/60 animate-pulse ml-1" />
+            <span className="inline-block w-2 h-4 bg-ac-brand/60 animate-pulse ml-1" />
           )}
         </div>
 
-        {/* Action buttons — visible on hover */}
+        {/* Action buttons — visible on hover AND focus-within (a11y) */}
         {!message.isStreaming && message.content && (
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
             <button
               onClick={handleCopy}
               title={t("btn.copy") || "Копировать"}
-              className="p-1 rounded hover:bg-ac-surface text-ac-stone hover:text-ac-ivory transition-colors"
+              aria-label={t("btn.copy") || "Copy message"}
+              className="p-1 rounded hover:bg-ac-surface text-ac-muted hover:text-ac-ink transition-colors"
             >
               {copied ? <Check className="w-3 h-3 text-ac-green" /> : <Copy className="w-3 h-3" />}
             </button>
@@ -164,7 +180,7 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
                   }
                 }}
                 title={t("tasks.extract") || "Извлечь задачи"}
-                className="p-1 rounded hover:bg-ac-surface text-ac-stone hover:text-ac-ivory transition-colors"
+                className="p-1 rounded hover:bg-ac-surface text-ac-muted hover:text-ac-ink transition-colors"
               >
                 <ListChecks className="w-3 h-3" />
               </button>
@@ -173,7 +189,7 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
               <button
                 onClick={onRegenerate}
                 title={t("btn.regenerate") || "Перегенерировать"}
-                className="p-1 rounded hover:bg-ac-surface text-ac-stone hover:text-ac-ivory transition-colors"
+                className="p-1 rounded hover:bg-ac-surface text-ac-muted hover:text-ac-ink transition-colors"
               >
                 <RefreshCw className="w-3 h-3" />
               </button>

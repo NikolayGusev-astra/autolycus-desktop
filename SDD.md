@@ -1,9 +1,9 @@
 # Штурман Desktop — Спецификация разработки (SDD)
 ## Единый документ: требования, архитектура, состояние, план доработок
 
-**Версия документа:** 1.2  
+**Версия документа:** 2.0  
 **Версия приложения:** 3.2.0  
-**Дата:** 2026-07-08
+**Дата:** 2026-07-12
 
 ---
 
@@ -270,34 +270,105 @@ soul.md (Hermes)            — agent persona text
 
 ---
 
-## 7. ТЕХНИЧЕСКИЙ ДОЛГ (актуально на 2026-07-08)
+## 7. ТЕХНИЧЕСКИЙ ДОЛГ (актуально на 2026-07-12)
 
-> Предыдущая редакция §7 (6 пунктов) устарела — все перечисленные пункты уже
-> решены или не актуальны. Ниже — актуальное состояние по результатам аудита кода.
+> **Полная ревизия.** Предыдущие §7.1/7.2 устарели. Этот раздел — результат
+> полного аудита порта против ground truth из исходников `fathah/hermes-desktop`
+> (оригинал) и `NousResearch/hermes-agent` (upstream). См. **ADR-002** и
+> **ADR-003** для зафиксированных контрактов. Все 21 расхождение ниже найдены
+> сверкой кода порта с исходниками, а не брутфорсом.
 
-### 7.1. Закрытые (проверено в коде)
-- `connectionStore.fetchGatewayStatus` — корректно использует `bool`
-  (connectionStore.ts:122-138), не объект. ✅
-- `groupMessages` — был no-op passthrough в MessageList; **удалён** в аудите. ✅
-- `detect_instances` — существует и используется (ConnectScreen.tsx:96,
-  lib.rs:185). Не legacy. ✅
-- `DashboardView.tsx` — удалён, висячих импортов нет (grep чист). ✅
-- CSS `@import` — порядок корректен (globals.css: fonts перед tailwindcss). ✅
-- Self-diagnosis modal — подключён (App.tsx:357, StatsView → add_self_check_cmd). ✅
+### 7.0. Источники ground truth
 
-### 7.2. Открытые (требуют работы)
-1. **Документация/бренд рассинхрон.** Репозиторий GitHub — `autolycus-desktop`,
-   но продукт внутри — «Steersman / Штурман Desktop». Деплой по ссылке брендирован
-   «Autolycus Desktop» + «Built with Next.js + shadcn/ui» (фактический стек —
-   Tauri 2 + React 19 + Vite). Каноничное имя (решено): **Steersman / Штурман**;
-   внешний landing править отдельно при наличии доступа.
-2. **cargo warnings** — число не подтверждено (сборка Rust недоступна в CI-среде
-   аудита). Требуется `cargo check` + `clippy` и чистка unused-предупреждений.
-3. **Целостность Tauri-команд** — сверить `#[tauri::command]` (lib.rs) с вызовами
-   `invoke(...)` во фронте; убедиться, что все `invoke` типизированы в
-   `src/lib/types.ts`.
-4. **Миграции БД** — добавление полей (напр. `assignee` в tasks, см. §4 P1.1)
-   требует механизма миграций `kanban-desktop.db`.
+| Источник | Что покрыто |
+|----------|-------------|
+| `fathah/hermes-desktop` (оригинал Electron) | Chat transport (3 варианта), session ID, auth, gateway spawn, IPC, SSE |
+| `NousResearch/hermes-agent` (upstream) | API endpoints, auth, config.yaml schema, MCP env whitelist, proxy chain |
+| Локальная установка `AppData/Local/hermes` | Реальная конфигурация, .env, logs ошибок, state.db |
+
+### 7.1. КРИТИЧЕСКИЕ расхождения (ломают core-функционал)
+
+| # | Зона | Оригинал | Наш порт | Файл:строка |
+|---|------|----------|----------|-------------|
+| 1 | **Session ID в body** | `session_id` body-field при resume, формат `desk-<ts>-<uuid4>` | Вычисляется `_sid`, **выбрасывается** (underscore=unused) | `chat.rs:231` |
+| 2 | **X-Hermes-Session-Id header** | На каждом authed-запросе | **Никогда не отправляется** (grep: 0) | `chat.rs:263-270` |
+| 3 | **API_SERVER_ENABLED** | `=true` в env gateway | **Не устанавливается** | `gateway.rs:183-188` |
+| 4 | **.env bridge** | Все ключи `.env` → в process env gateway | Только HERMES_HOME + PORT | `gateway.rs:180-215` |
+| 5 | **reasoning_effort формат** | Top-level строка `"reasoning_effort":"medium"` | Вложенный объект `reasoning:{effort,context}` | `chat.rs:244-249` |
+
+**Эффект:** чат либо не работает (403 от upstream без прокси), либо теряет
+контекст между сообщениями (session_id потерян).
+
+### 7.2. ВЫСОКИЕ расхождения (значительная дивергенция)
+
+| # | Зона | Оригинал | Наш порт | Файл:строка |
+|---|------|----------|----------|-------------|
+| 6 | **Runs transport** | `POST /v1/runs` + SSE (PREFERRED, capability-detected) | Только `/v1/chat/completions` | `chat.rs:177-322` |
+| 7 | **Профиль** | `--profile <name>` CLI flag | `HERMES_PROFILE_HOME` env (недокументирован) | `gateway.rs:191-194` |
+| 8 | **Health check** | Poll HTTP `/health` | TCP connect только | `gateway.rs:260-281` |
+| 9 | **Content-Length** | Явный header (middleware требует) | Не отправляется | `chat.rs:263-266` |
+| 10 | **ALL_PROXY** | Проверяет HTTPS_PROXY→HTTP_PROXY→**ALL_PROXY** | ALL_PROXY **не проверяется** | `config.rs:494-514` |
+
+**Эффект:** теряются tool events и reasoning stream; профили могут не
+активироваться; gateway может быть "half-started" при запросе.
+
+### 7.3. СРЕДНИЕ расхождения (неправильное место/формат)
+
+| # | Зона | Оригинал | Наш порт | Файл:строка |
+|---|------|----------|----------|-------------|
+| 11 | **MCP store** | config.yaml `mcp_servers` блок | `servers.json` (JSON, другой путь) | `mcp.rs:75-80` |
+| 12 | **MCP креды** | config.yaml `mcp_servers.<name>.env:` блок | `.env` (вырезается `_build_safe_env` whitelist) | `sources.rs:223-278` |
+| 13 | **Proxy config keys** | Нет в upstream (`network:{force_ipv4}` без proxy) | `500-network.proxy`, top-level `proxy:`, `model.proxy` | `config.rs:468-493` |
+| 14 | **cwd gateway** | `HERMES_REPO` (source checkout) | Не установлен | `gateway.rs:165` |
+| 15 | **pythonw.exe** | `pythonw.exe` (no console) на Windows | Bare `python` + CREATE_NO_WINDOW | `gateway.rs:171` |
+| 16 | **Briefing env** | Стандартный MCP `env:` блок | Hand-curated список (хак) | `briefing.rs:178-200` |
+
+**Эффект:** MCP-серверы не получают креды → брифинг показывает 0; proxy может
+не найтись (fork-ключи не существуют в upstream); относительные пути gateway
+резолвятся от неправильного cwd.
+
+### 7.4. НИЗКИЕ расхождения (косметика/минорное)
+
+| # | Зона | Оригинал | Наш порт | Файл:строка |
+|---|------|----------|----------|-------------|
+| 17 | **SID format** | `desk-<timestamp>-<uuid4>` | `desk-<uuid4>` (без timestamp) | `chat.rs:233` |
+| 18 | **Proxy injection** | Inherits process.env (явной инъекции нет) | Явная инъекция HTTP_PROXY/HTTPS_PROXY | `gateway.rs:196-215` |
+| 19 | **Config write** | `hermes config set` CLI | Line-based YAML edit (хрупкий) | `config.rs:857-942` |
+| 20 | **Gateway stop** | (N/A) | `child.kill()` без graceful shutdown | `gateway.rs:354-358` |
+| 21 | **config_health.rs** | (N/A — desktop-only) | Stale: проверяет `sessions.db` (реально `state.db`), порт 8000 | `config_health.rs:77-85,136-144` |
+
+### 7.5. Dead/stub code
+
+| Компонент | Файл | Статус |
+|-----------|------|--------|
+| `send_message_via_gateway` (WS transport) | `chat.rs:326-379` | Никогда не вызывается |
+| `check_gateway_health` (HTTP /health) | `gateway.rs:393` | Определена, не используется в startup |
+| `test_mcp_server`, `list_mcp_catalog` | `mcp.rs:233-275` | Stubs с hardcoded данными |
+
+### 7.6. Мёртвый/устаревший config_health.rs
+
+`config_health.rs` проверяет `sessions.db` (реальное имя `state.db`),
+хардкодит порт 8000 (реальный 8642), проверяет `venv/` (реальный путь
+`hermes-agent/venv/`). Модуль — leftover от ранней итерации порта и
+генерирует false-positive ошибки на реальных установках.
+
+### 7.7. Ранее закрытые пункты (из §7.1 редакции 2026-07-08)
+
+- `connectionStore.fetchGatewayStatus` — корректно `bool` ✅
+- `groupMessages` — удалён ✅
+- `detect_instances` — существует, используется ✅
+- `DashboardView.tsx` — удалён, висячих импортов нет ✅
+- CSS `@import` — порядок корректен ✅
+- Self-diagnosis modal — подключён ✅
+
+### 7.8. План устранения (приоритизированный)
+
+| Приоритет | Пункты | Объём | Эффект |
+|-----------|--------|-------|--------|
+| **P0** | #1-5 (критические) | ~2ч | Чат + сессии + reasoning заработают |
+| **P1** | #6-10 (высокие) | ~4ч | Tool events + профили + health |
+| **P2** | #11-16 (средние) | ~3ч | MCP креды + proxy + cwd |
+| **P3** | #17-21 (низкие) | ~1ч | Косметика + cleanup |
 
 ---
 
@@ -309,3 +380,7 @@ soul.md (Hermes)            — agent persona text
 3. **Override architecture** — каждое AI-действие с human-override.
 4. **Connector abstraction** — единый интерфейс для всех источников (IMAP/TG/RSS).
 5. **Bidirectional sync** — изменения в десктопе → Hermes и обратно.
+6. **MCP env-block contract** — креды в `config.yaml mcp_servers.<name>.env:`,
+   не в `.env` (см. ADR-002, `_build_safe_env` whitelist).
+7. **Capability detection** — `GET /v1/capabilities` перед выбором transport
+   (Runs vs Chat Completions).

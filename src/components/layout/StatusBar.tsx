@@ -21,8 +21,8 @@ export function StatusBar() {
   }, [gatewayVersion, setGatewayVersion]);
 
   return (
-    <footer className="px-5 py-1 flex items-center justify-between border-t border-ac-border bg-ac-pitch text-[11px] text-ac-stone">
-      <span>Штурман Desktop{gatewayVersion ? ` v${gatewayVersion}` : ""}</span>
+    <footer className="px-5 py-1 flex items-center justify-between border-t border-ac-border bg-ac-bg text-[11px] text-ac-muted">
+      <span>{t("app.name")} Desktop{gatewayVersion ? ` v${gatewayVersion}` : ""}</span>
       <div className="flex items-center gap-3">
         {pipelineStatus.model && (
           <span className="opacity-60">{pipelineStatus.model}</span>
@@ -37,7 +37,7 @@ export function StatusBar() {
             ${pipelineStatus.costUsd.toFixed(4)}
           </span>
         )}
-        <span className={`opacity-60 ${connected ? "text-green-400" : "text-red-400"}`}>
+        <span className={`opacity-60 ${connected ? "text-ac-green" : "text-ac-red"}`}>
           {connected ? t("status.connected") : t("status.disconnected")}
         </span>
       </div>

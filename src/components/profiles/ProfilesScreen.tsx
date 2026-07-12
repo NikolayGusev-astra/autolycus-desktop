@@ -73,13 +73,13 @@ function CreateProfileDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="bg-ac-bg border border-ac-border rounded-xl p-5 w-full max-w-sm shadow-2xl">
-        <h3 className="text-sm font-semibold text-ac-ivory mb-4">
+        <h3 className="text-sm font-semibold text-ac-ink mb-4">
           {t("create_profile_title")}
         </h3>
 
         <div className="space-y-3">
           <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">
+            <label className="text-[11px] text-ac-muted mb-1 block">
               {t("profile_name_label")}
             </label>
             <input
@@ -101,9 +101,9 @@ function CreateProfileDialog({
               type="checkbox"
               checked={clone}
               onChange={(e) => setClone(e.target.checked)}
-              className="accent-ac-amber"
+              className="accent-ac-brand"
             />
-            <span className="text-xs text-ac-stone">
+            <span className="text-xs text-ac-muted">
               {t("clone_settings")}
             </span>
           </label>
@@ -207,7 +207,7 @@ function ModelConfigSection({
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 text-xs text-ac-stone py-2">
+      <div className="flex items-center gap-2 text-xs text-ac-muted py-2">
         <Loader className="w-3 h-3 animate-spin" />
         {t("loading_content")}
       </div>
@@ -218,12 +218,12 @@ function ModelConfigSection({
     <div className="border border-ac-border rounded-lg p-3 space-y-3">
       <div className="flex items-center justify-between">
         <label className="ac-section-title text-xs flex items-center gap-1.5">
-          <Cpu className="w-3.5 h-3.5 text-ac-amber" />
+          <Cpu className="w-3.5 h-3.5 text-ac-brand" />
           {t("active_model_config")}
         </label>
         <button
           onClick={() => setEditMode(!editMode)}
-          className="text-[11px] text-ac-amber hover:text-ac-amber/80 flex items-center gap-1"
+          className="text-[11px] text-ac-brand hover:text-ac-brand/80 flex items-center gap-1"
         >
           <Settings2 className="w-3 h-3" />
           {editMode ? t("cancel") : t("change")}
@@ -233,7 +233,7 @@ function ModelConfigSection({
       {editMode ? (
         <div className="space-y-2.5">
           <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("provider_label")}</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">{t("provider_label")}</label>
             <select
               value={editProvider}
               onChange={(e) => setEditProvider(e.target.value)}
@@ -247,7 +247,7 @@ function ModelConfigSection({
             </select>
           </div>
           <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("model_label")}</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">{t("model_label")}</label>
             <input
               type="text"
               value={editModel}
@@ -257,7 +257,7 @@ function ModelConfigSection({
             />
           </div>
           <div>
-            <label className="text-[11px] text-ac-stone mb-1 block">{t("base_url_label")}</label>
+            <label className="text-[11px] text-ac-muted mb-1 block">{t("base_url_label")}</label>
             <input
               type="text"
               value={editBaseUrl}
@@ -288,24 +288,24 @@ function ModelConfigSection({
       ) : config ? (
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm">
-            <span className="text-ac-ivory font-medium">
+            <span className="text-ac-ink font-medium">
               {config.provider || "—"}
             </span>
             {config.model && (
               <>
-                <span className="text-ac-stone/50">/</span>
-                <span className="text-ac-ivory font-mono">{config.model}</span>
+                <span className="text-ac-muted/50">/</span>
+                <span className="text-ac-ink font-mono">{config.model}</span>
               </>
             )}
           </div>
           {config.base_url && (
-            <p className="text-[11px] text-ac-stone font-mono truncate">
+            <p className="text-[11px] text-ac-muted font-mono truncate">
               {config.base_url}
             </p>
           )}
         </div>
       ) : (
-        <p className="text-xs text-ac-stone">{t("no_model_configured")}</p>
+        <p className="text-xs text-ac-muted">{t("no_model_configured")}</p>
       )}
     </div>
   );
@@ -371,8 +371,8 @@ export function ProfilesScreen() {
     <div className="flex h-full flex-col">
       {/* Header */}
       <div className="px-4 py-3 border-b border-ac-border flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-ac-ivory flex items-center gap-2">
-          <User className="w-4 h-4 text-ac-amber" />
+        <h2 className="text-sm font-semibold text-ac-ink flex items-center gap-2">
+          <User className="w-4 h-4 text-ac-brand" />
           {t("profiles_title")}
         </h2>
         <button
@@ -388,10 +388,10 @@ export function ProfilesScreen() {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {loading ? (
           <div className="flex items-center justify-center h-32">
-            <Loader className="w-5 h-5 text-ac-amber animate-spin" />
+            <Loader className="w-5 h-5 text-ac-brand animate-spin" />
           </div>
         ) : profiles.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-32 text-ac-stone text-sm">
+          <div className="flex flex-col items-center justify-center h-32 text-ac-muted text-sm">
             <User className="w-8 h-8 mb-2 opacity-30" />
             <p>{t("no_profiles")}</p>
           </div>
@@ -406,15 +406,15 @@ export function ProfilesScreen() {
                   key={profile.name}
                   className={`relative rounded-lg border px-4 py-3 transition-colors ${
                     profile.is_active
-                      ? "bg-ac-amber/5 border-ac-amber/40"
+                      ? "bg-ac-brand/5 border-ac-brand/40"
                       : "bg-ac-bg border-ac-border hover:border-ac-border/70"
                   }`}
                 >
                   {/* Delete confirm overlay */}
                   {deleteConfirm === profile.name && (
-                   <div className="absolute inset-0 z-10 bg-ac-pitch/90 rounded-lg flex items-center justify-center">
+                   <div className="absolute inset-0 z-10 bg-ac-bg/90 rounded-lg flex items-center justify-center">
                      <div className="text-center px-4">
-                       <p className="text-xs text-ac-ivory mb-3">
+                       <p className="text-xs text-ac-ink mb-3">
                           {t("delete_confirm").replace("{name}", profile.name)}
                        </p>
                         <div className="flex justify-center gap-2">
@@ -439,23 +439,23 @@ export function ProfilesScreen() {
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-ac-ivory">
+                        <span className="text-sm font-medium text-ac-ink">
                           {profile.name}
                         </span>
                         {profile.is_default && (
-                          <span className="text-[10px] px-1.5 py-0.5 bg-ac-stone/20 text-ac-stone rounded">
+                          <span className="text-[10px] px-1.5 py-0.5 bg-ac-muted/20 text-ac-muted rounded">
                             {t("default_badge")}
                           </span>
                         )}
                         {profile.is_active && (
-                          <span className="text-[10px] px-1.5 py-0.5 bg-ac-amber/20 text-ac-amber rounded flex items-center gap-1">
+                          <span className="text-[10px] px-1.5 py-0.5 bg-ac-brand/20 text-ac-brand rounded flex items-center gap-1">
                             <CheckCircle2 className="w-2.5 h-2.5" />
                             {t("active_badge")}
                           </span>
                         )}
                       </div>
 
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 text-[11px] text-ac-stone">
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 text-[11px] text-ac-muted">
                         {profile.provider && (
                           <span className="flex items-center gap-1">
                             <Globe className="w-3 h-3" />
@@ -498,7 +498,7 @@ export function ProfilesScreen() {
                       {canActivate && (
                         <button
                           onClick={() => handleActivate(profile.name)}
-                          className="text-[11px] text-ac-amber hover:text-ac-amber/80 px-2 py-1"
+                          className="text-[11px] text-ac-brand hover:text-ac-brand/80 px-2 py-1"
                           title={t("activate_profile")}
                         >
                           {t("activate")}
@@ -507,7 +507,7 @@ export function ProfilesScreen() {
                       {canDelete && (
                         <button
                           onClick={() => setDeleteConfirm(profile.name)}
-                          className="text-[11px] text-ac-stone hover:text-ac-red px-2 py-1"
+                          className="text-[11px] text-ac-muted hover:text-ac-red px-2 py-1"
                           title={t("delete_profile")}
                         >
                           <Trash2 className="w-3.5 h-3.5" />

@@ -162,35 +162,99 @@ pub fn start_gateway(
         .parent() // bin/ or Scripts/
         .map(|dir| dir.join(if cfg!(windows) { "hermes.exe" } else { "hermes" }));
 
+    // ── Build gateway command (ADR-003: spawn контракт) ───────────────────
+    // Windows: prefer pythonw.exe (no console). Fallback: bare python + CREATE_NO_WINDOW.
+    #[cfg(windows)]
+    let python_for_gateway = {
+        let pythonw = python_path.with_file_name("pythonw.exe");
+        if pythonw.exists() { pythonw } else { python_path.clone() }
+    };
+    #[cfg(not(windows))]
+    let python_for_gateway = python_path.clone();
+
     let mut cmd = if let Some(launcher) = hermes_launcher.as_ref().filter(|p| p.exists()) {
         let mut c = Command::new(launcher);
         c.arg("gateway");
         c
     } else {
         // Fallback: invoke the CLI module directly with the interpreter.
-        let mut c = Command::new(&python_path);
+        let mut c = Command::new(&python_for_gateway);
         c.arg("-m").arg("hermes_cli.main").arg("gateway");
         c
     };
+
+    // Profile: pass via --profile CLI flag (ADR-003: NOT HERMES_PROFILE_HOME env).
+    // The original fathah/hermes-desktop uses the CLI flag to activate the
+    // Hermes Agent profile loader.
+    if let Some(p) = profile {
+        if p != "default" && !p.is_empty() {
+            cmd.arg("--profile").arg(p);
+        }
+    }
+
+    // cwd: set to HERMES_REPO (ADR-003 #14). Gateway and its dependencies
+    // resolve relative paths (config, mcp servers, skills) from cwd.
+    if let Some(repo) = &repo_path {
+        cmd.current_dir(repo);
+    }
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Set environment
+    // ── Environment (ADR-003: full inheritance + bridge) ──────────────────
+    // The original inherits process.env fully, then adds specific keys on top.
+    // We do NOT call env_clear() — we inherit, then override/augment.
     if let Some(repo) = &repo_path {
         cmd.env("HERMES_PYTHON_SRC_ROOT", repo);
     }
     cmd.env("HERMES_HOME", hermes_home);
     cmd.env("PYTHONUNBUFFERED", "1");
+    // API_SERVER_ENABLED: enables the HTTP API server in the gateway (ADR-003 #3).
+    // Without this, the gateway may start but not expose /v1/chat/completions.
+    cmd.env("API_SERVER_ENABLED", "true");
     // The gateway reads its listen port from this env var (falls back to the
     // value in config.yaml, default 8642). We set it explicitly so the port
     // we allocated matches the one we health-check.
     cmd.env("API_SERVER_PORT", port.to_string());
 
-    // Profile-specific env
-    let profile_home_path = profile_home(hermes_home, profile);
-    if profile_home_path != *hermes_home {
-        cmd.env("HERMES_PROFILE_HOME", &profile_home_path);
+    // ── .env bridge (ADR-003 #4): inject ALL .env keys into gateway env ───
+    // The original bridges every key from readEnv(profile) so the gateway's
+    // os.getenv sees provider keys, API_SERVER_KEY, etc. even if it doesn't
+    // self-load .env. We read from profile_home, then hermes_home as fallback.
+    let env_map = crate::config::read_env(hermes_home, profile);
+    for (key, value) in &env_map {
+        // Don't override keys we already set explicitly above.
+        if key != "HERMES_HOME" && key != "PYTHONUNBUFFERED" && key != "API_SERVER_PORT" {
+            cmd.env(key, value);
+        }
+    }
+    // Bridge API_SERVER_KEY explicitly so the gateway's auth check finds it
+    // regardless of where it was configured (config.yaml, .env, or keyring).
+    let api_server_key = crate::config::get_api_server_key(hermes_home, profile);
+    if let Some(key) = &api_server_key {
+        if !key.is_empty() {
+            cmd.env("API_SERVER_KEY", key);
+        }
+    }
+
+    // ── Proxy (ADR-003: env chain, not config.yaml keys) ──────────────────
+    // Upstream Hermes Agent reads HTTPS_PROXY → HTTP_PROXY → ALL_PROXY.
+    // We resolve from all sources and inject into the gateway child env so
+    // its HTTP client (httpx/requests) routes through the proxy.
+    let proxy_url = crate::config::resolve_effective_proxy(hermes_home, profile);
+
+    if !proxy_url.is_empty() {
+        cmd.env("HTTP_PROXY", &proxy_url);
+        cmd.env("HTTPS_PROXY", &proxy_url);
+        cmd.env("ALL_PROXY", &proxy_url);
+        // Lowercase variants — some tools (curl, pip, httpx) read these.
+        cmd.env("http_proxy", &proxy_url);
+        cmd.env("https_proxy", &proxy_url);
+        cmd.env("all_proxy", &proxy_url);
+        eprintln!("[gateway] proxy enabled: {}", proxy_url);
+    } else {
+        eprintln!("[gateway] no proxy detected (direct or TUN mode)");
     }
 
     // Windows: suppress the console window that would otherwise pop up and
@@ -233,31 +297,39 @@ pub fn start_gateway(
         }
     });
 
-    // Wait for the gateway HTTP server to become reachable (up to 30s). We
-    // probe TCP first (cheap, no runtime) then confirm with /health via a
-    // blocking reqwest blocking client on a short-lived thread.
+    // Wait for the gateway HTTP server to become ready (ADR-003 #8).
+    // TCP accept ≠ HTTP ready — the listener can be bound while Python is
+    // still importing modules. The original polls GET /health for 200.
+    // We do a raw HTTP GET via std::net (no extra crate dependency) — send
+    // a minimal HTTP/1.0 request, check for "200" in the response status line.
     let mut ready = false;
     let deadline = Instant::now() + Duration::from_secs(30);
+    let addr_str = format!("127.0.0.1:{}", port);
     while Instant::now() < deadline {
-        // Cheap TCP probe — mirrors discovery's check_gateway_status.
-        let addr = format!("127.0.0.1:{}", port);
-        if let Ok(parsed) = addr.parse() {
-            if std::net::TcpStream::connect_timeout(&parsed, Duration::from_millis(300)).is_ok() {
-                ready = true;
-                break;
-            }
-        }
         // Bail early if the child already exited.
         match child.try_wait() {
             Ok(Some(_status)) => break, // process died
             _ => {}
         }
-        thread::sleep(Duration::from_millis(300));
+        // Probe /health via raw TCP + HTTP/1.0 GET (the real readiness signal).
+        if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+                use std::io::{Read, Write};
+                let _ = stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+                let mut buf = [0u8; 64];
+                if let Ok(n) = stream.read(&mut buf) {
+                    let resp = String::from_utf8_lossy(&buf[..n]);
+                    // Check for "HTTP/1.0 200" or "HTTP/1.1 200" in status line
+                    if resp.starts_with("HTTP/") && resp.contains(" 200 ") {
+                        ready = true;
+                        break;
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
     }
-    // If TCP is up, give the HTTP layer a brief moment to bind handlers.
-    if ready {
-        thread::sleep(Duration::from_millis(400));
-    }
+    eprintln!("[gateway:{}] ready={} (health poll)", profile_key, ready);
 
     // Store process
     {

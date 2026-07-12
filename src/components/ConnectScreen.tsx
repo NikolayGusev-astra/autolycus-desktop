@@ -130,7 +130,7 @@ function LocalConnect({ onStartLocal, connecting, starting, error }: {
                     ? "border-ac-border/30 text-ac-muted/30 cursor-not-allowed"
                     : selectedIdx === idx
                     ? "border-ac-brand/30 bg-ac-brand/8 text-ac-brand"
-                    : "border-ac-border text-ac-muted hover:border-ac-stone/30"
+                    : "border-ac-border text-ac-muted hover:border-ac-muted/30"
                 }`}
               >
                 {inst.exists ? <Check className="w-3 h-3 text-green-500 shrink-0" /> : <X className="w-3 h-3 text-ac-muted/30 shrink-0" />}

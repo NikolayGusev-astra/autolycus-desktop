@@ -159,28 +159,55 @@ fn call_smart_briefing_mcp(hermes_home: &Path, days: i64) -> Result<BriefingPayl
     );
     let stdin_payload = format!("{}\n{}\n", init_req, call_req);
 
-    let mut child = Command::new(&python)
-        .arg(&server)
+    // ── Credentials: inherit ALL .env keys (ADR-003 principle: full inheritance) ─
+    // The briefing MCP server spawns email/jira MCP servers as its own children
+    // via subprocess.run — those children inherit os.environ. Hermes Agent's
+    // _build_safe_env() strips non-whitelisted vars, so the briefing server
+    // itself was launched without EMAIL_*/JIRA_* creds. We fix this by passing
+    // the COMPLETE .env contents into the briefing server's environment, so
+    // both the briefing server AND its email/jira children get credentials.
+    let mut env_map = crate::config::read_env(server_home, None);
+    // hermes_home .env overrides server_home .env (has the complete credential set).
+    for (k, v) in crate::config::read_env(hermes_home, None) {
+        env_map.insert(k, v);
+    }
+    // Ensure EMAIL_ADDRESS is set even if only EMAIL_USER exists (mcp-email-life
+    // reads EMAIL_ADDRESS at line 52).
+    if !env_map.contains_key("EMAIL_ADDRESS") {
+        if let Some(user) = env_map.get("EMAIL_USER") {
+            env_map.insert("EMAIL_ADDRESS".to_string(), user.clone());
+        }
+    }
+
+    // Propagate proxy to the MCP child processes.
+    let briefing_proxy = crate::config::resolve_effective_proxy(hermes_home, None);
+    if !briefing_proxy.is_empty() {
+        env_map.insert("HTTP_PROXY".to_string(), briefing_proxy.clone());
+        env_map.insert("HTTPS_PROXY".to_string(), briefing_proxy.clone());
+        env_map.insert("ALL_PROXY".to_string(), briefing_proxy.clone());
+        env_map.insert("http_proxy".to_string(), briefing_proxy.clone());
+        env_map.insert("https_proxy".to_string(), briefing_proxy.clone());
+        env_map.insert("all_proxy".to_string(), briefing_proxy);
+    }
+
+    let mut cmd = Command::new(&python);
+    cmd.arg(&server)
         .current_dir(server_home)
         .env("HERMES_HOME", server_home)
-        .env("PYTHONIOENCODING", "utf-8")
-        // Pass through credentials from the desktop process env so the spawned
-        // MCP servers (jira/email) can authenticate. The child also inherits
-        // the parent env by default; we only override these explicitly so the
-        // app works when launched outside a shell that sourced .env.
-        .env("JIRA_PAT", std::env::var("JIRA_PAT").unwrap_or_default())
-        .env("JIRA_BASE_URL", std::env::var("JIRA_BASE_URL").unwrap_or_default())
-        .env("EMAIL_HOST", std::env::var("EMAIL_HOST").unwrap_or_default())
-        .env("EMAIL_USER", std::env::var("EMAIL_USER").unwrap_or_default())
-        .env("EMAIL_PASSWORD", std::env::var("EMAIL_PASSWORD").unwrap_or_default())
-        .env("EMAIL_IMAP_HOST", std::env::var("EMAIL_IMAP_HOST").unwrap_or_default())
-        .env("EMAIL_IMAP_PORT", std::env::var("EMAIL_IMAP_PORT").unwrap_or_default())
-        .env("EMAIL_SMTP_HOST", std::env::var("EMAIL_SMTP_HOST").unwrap_or_default())
-        .env("EMAIL_SMTP_PORT", std::env::var("EMAIL_SMTP_PORT").unwrap_or_default())
-        .env("EMAIL_USE_SSL", std::env::var("EMAIL_USE_SSL").unwrap_or_default())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .env("PYTHONIOENCODING", "utf-8");
+
+    // Inject ALL .env keys into the child environment. This is the key fix:
+    // instead of a hand-curated allowlist that always missed something, we
+    // pass everything so whatever the MCP servers need is available.
+    for (key, value) in &env_map {
+        cmd.env(key, value);
+    }
+
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn failed: {}", e))?;
 
@@ -385,4 +412,72 @@ pub fn generate_smart_briefing(
         json: payload,
         formatted,
     })
+}
+
+/// A cached briefing read back from state.db. The dashboard calls this on mount
+/// instead of auto-firing an LLM/MCP call. If the briefing is fresh enough
+/// (within `max_age_secs`), the dashboard shows it directly; otherwise it shows
+/// a "stale" indicator with a manual refresh button.
+#[derive(Debug, Clone, Serialize)]
+pub struct CachedBriefing {
+    /// The formatted briefing text (assistant message), or null if no briefing exists yet.
+    pub text: Option<String>,
+    /// Unix timestamp (seconds) when the briefing was generated, or null.
+    pub generated_at: Option<f64>,
+    /// True if the briefing is older than `max_age_secs` or doesn't exist.
+    pub stale: bool,
+    /// Human-readable title (session title).
+    pub title: Option<String>,
+}
+
+/// Read the most recent cached briefing for a profile from state.db.
+/// `max_age_secs` controls staleness — 1800 = 30 min.
+pub fn get_cached_briefing(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    max_age_secs: f64,
+) -> CachedBriefing {
+    let profile_key = profile.unwrap_or("default");
+    let session_id = format!("smart_briefing:{}", profile_key);
+
+    let db_path = state_db_path(hermes_home, profile);
+    if !db_path.exists() {
+        return CachedBriefing { text: None, generated_at: None, stale: true, title: None };
+    }
+
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return CachedBriefing { text: None, generated_at: None, stale: true, title: None },
+    };
+
+    // Read the session row for started_at + title.
+    let (started_at, title): (f64, Option<String>) = match conn.query_row(
+        "SELECT started_at, title FROM sessions WHERE id = ?1",
+        params![session_id],
+        |r| Ok((r.get::<_, f64>(0)?, r.get::<_, Option<String>>(1)?)),
+    ) {
+        Ok(v) => v,
+        Err(_) => return CachedBriefing { text: None, generated_at: None, stale: true, title: None },
+    };
+
+    // Read the assistant message (the formatted briefing text).
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT content FROM messages WHERE session_id = ?1 AND role = 'assistant'
+             ORDER BY timestamp DESC LIMIT 1",
+            params![session_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+
+    let now = now_ts();
+    let age = now - started_at;
+    let stale = age > max_age_secs || text.is_none();
+
+    CachedBriefing {
+        text,
+        generated_at: Some(started_at),
+        stale,
+        title,
+    }
 }

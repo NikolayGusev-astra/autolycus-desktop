@@ -274,3 +274,80 @@ pub fn install_mcp_catalog_entry(
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
     Ok((true, None, Some("installed".to_string()), None))
 }
+
+/// Sync MCP credentials into config.yaml mcp_servers.<name>.env: blocks
+/// (ADR-002 §MCP env whitelist).
+///
+/// Hermes Agent's `_build_safe_env()` strips ALL non-whitelisted env vars when
+/// launching MCP servers. Credentials written to `.env` DON'T reach MCP servers.
+/// They MUST be in `config.yaml mcp_servers.<name>.env:` block — that's the only
+/// way Hermes injects them into the child process.
+///
+/// This function reads source credentials (email/jira) and writes them as
+/// `env:` blocks under the corresponding `mcp_servers` entries in config.yaml.
+/// Called automatically after source add/update/remove (alongside .env write).
+pub fn sync_mcp_env_blocks(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Result<(), String> {
+    let sources = crate::sources::SourcesConfig::load(hermes_home, profile);
+
+    // Build env maps for email and jira MCP servers from SourcesConfig.
+    let mut email_env: HashMap<String, String> = HashMap::new();
+    if let Some(email) = sources.email.iter().find(|s| s.enabled) {
+        email_env.insert("EMAIL_ADDRESS".to_string(), email.address.clone());
+        email_env.insert("EMAIL_USER".to_string(), email.address.clone());
+        email_env.insert("EMAIL_PASSWORD".to_string(), email.password.clone());
+        email_env.insert("EMAIL_IMAP_HOST".to_string(), email.imap_host.clone());
+        email_env.insert("EMAIL_IMAP_PORT".to_string(), email.imap_port.to_string());
+        email_env.insert("EMAIL_SMTP_HOST".to_string(), email.smtp_host.clone());
+        email_env.insert("EMAIL_SMTP_PORT".to_string(), email.smtp_port.to_string());
+        email_env.insert(
+            "EMAIL_USE_SSL".to_string(),
+            if email.use_ssl { "true".to_string() } else { "false".to_string() },
+        );
+        email_env.insert("EMAIL_HOST".to_string(), email.smtp_host.clone());
+    }
+
+    let mut jira_env: HashMap<String, String> = HashMap::new();
+    if let Some(jira) = sources.jira.iter().find(|s| s.enabled) {
+        jira_env.insert("JIRA_PAT".to_string(), jira.api_token.clone());
+        jira_env.insert("JIRA_BASE_URL".to_string(), jira.url.clone());
+        if !jira.username.is_empty() {
+            jira_env.insert("JIRA_USERNAME".to_string(), jira.username.clone());
+        }
+        if !jira.project_key.is_empty() {
+            jira_env.insert("JIRA_PROJECT_KEY".to_string(), jira.project_key.clone());
+        }
+    }
+
+    // Also include bitrix if configured.
+    let mut bitrix_env: HashMap<String, String> = HashMap::new();
+    if let Some(bx) = sources.bitrix.iter().find(|s| s.enabled) {
+        bitrix_env.insert("BITRIX_WEBHOOK".to_string(), bx.webhook_url.clone());
+        bitrix_env.insert("BITRIX_USER_ID".to_string(), bx.user_id.clone());
+    }
+
+    // Write env blocks into config.yaml using set_yaml_block_scalars for each
+    // mcp_servers.<name>.env.<KEY> path. This is a line-based approach that
+    // preserves the rest of config.yaml.
+    for (server_name, env_vars) in [
+        ("email", &email_env),
+        ("jira", &jira_env),
+        ("bitrix", &bitrix_env),
+    ] {
+        if env_vars.is_empty() {
+            continue;
+        }
+        // Write each env var as mcp_servers.<server_name>.env.<KEY>: <VALUE>
+        let kvs: Vec<(&str, &str)> = env_vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let block = format!("mcp_servers.{}.env", server_name);
+        crate::config::set_yaml_block_scalars(hermes_home, profile, &block, &kvs)?;
+    }
+
+    Ok(())
+}
+

@@ -13,14 +13,10 @@ import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ConnectionScreen } from "./components/ConnectionScreen";
 import { ApprovalCard } from "./components/chat/ApprovalCard";
+import { CommandPalette } from "./components/shared/CommandPalette";
 import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import { FeedView } from "./components/views/FeedView";
-import { TasksView } from "./components/views/TasksView";
-import { KanbanView } from "./components/views/KanbanView";
-import { GoalsView } from "./components/views/GoalsView";
-import { ProjectsView } from "./components/views/ProjectsView";
-import { ProtocolsView } from "./components/views/ProtocolsView";
-import { StatsView } from "./components/views/StatsView";
+import { WorkView, type WorkTab } from "./components/views/WorkView";
 import { SelfDiagModal } from "./components/SelfDiagModal";
 import { useTranslation as useTranslationHook } from "./hooks/useTranslation";
 import { SplashScreen } from "./components/SplashScreen";
@@ -36,10 +32,10 @@ export function App() {
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
   const [historyOpen, setHistoryOpen] = useState(true);
   const [selfDiagOpen, setSelfDiagOpen] = useState(false);
-  // Drill-down navigation: Goal → Projects → Tasks
-  const [drillGoalId, setDrillGoalId] = useState<number | null>(null);
-  const [drillProjectId, setDrillProjectId] = useState<number | null>(null);
-  const [drillProjectName, setDrillProjectName] = useState<string | undefined>(undefined);
+  // Which sub-tab WorkView opens on (e.g. "tasks" from dashboard "new task").
+  const [workInitialTab, setWorkInitialTab] = useState<WorkTab>("tasks");
+  // Command palette (Cmd/Ctrl+K).
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
@@ -78,6 +74,31 @@ export function App() {
     };
     init();
   }, [setHermesHome]);
+
+  // ── Global keyboard shortcuts ──────────────────────────────────────────
+  // Cmd/Ctrl+K → command palette
+  // Cmd/Ctrl+B → toggle sidebar
+  // Cmd/Ctrl+, → settings
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      } else if (mod && e.key === "b") {
+        e.preventDefault();
+        // Toggle sidebar via uiStore.
+        import("./stores/uiStore").then(({ useUIStore }) => {
+          useUIStore.getState().toggleSidebar();
+        });
+      } else if (mod && e.key === ",") {
+        e.preventDefault();
+        setActiveView("settings");
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // Detect existing agent installations once, to offer adopting an
   // environment on the welcome screen.
@@ -256,9 +277,10 @@ export function App() {
   }
 
   // Main UI (or auto-transitioned from connection → main).
-  // shturman.ai-style SPA shell: Sidebar (8 sections) + frosted Header + main
+  // shturman.ai-style SPA shell: Sidebar (4 sections) + frosted Header + main
   // content (one active view). The chat view additionally gets the right-hand
-  // history rail.
+  // history rail. Tasks/Kanban/Goals/Projects/Protocols/Stats are consolidated
+  // inside WorkView with internal sub-tabs.
   return (
     <div className="flex h-full bg-ac-bg overflow-hidden">
       <Sidebar
@@ -290,7 +312,7 @@ export function App() {
           ) : activeView === "dashboard" ? (
             <div className="flex-1 overflow-y-auto">
               <FeedView
-                onNewTask={() => setActiveView("tasks")}
+                onNewTask={() => { setWorkInitialTab("tasks"); setActiveView("work"); }}
                 onOpenSession={async (sid) => {
                   try {
                     const msgs = await invoke<Array<{ id: number; role: string; content: string; timestamp: number }>>("get_session_messages_cmd", { sessionId: sid, profile: null });
@@ -302,40 +324,11 @@ export function App() {
                   setActiveView("chat");
                 }}
                 onOpenChat={() => setActiveView("chat")}
+                onOpenWork={(tab) => { setWorkInitialTab(tab); setActiveView("work"); }}
               />
             </div>
-          ) : activeView === "tasks" ? (
-            <div className="flex-1 overflow-y-auto">
-              <TasksView
-                projectId={drillProjectId}
-                projectName={drillProjectName}
-                onBack={() => { setDrillProjectId(null); setActiveView("projects"); }}
-              />
-            </div>
-          ) : activeView === "kanban" ? (
-            <KanbanView
-              projectId={drillProjectId}
-              projectName={drillProjectName}
-              onBack={() => { setDrillProjectId(null); setActiveView("projects"); }}
-            />
-          ) : activeView === "goals" ? (
-            <div className="flex-1 overflow-y-auto">
-              <GoalsView
-                onOpenProject={(pid, pname) => { setDrillProjectId(pid); setDrillProjectName(pname); setActiveView("tasks"); }}
-              />
-            </div>
-          ) : activeView === "projects" ? (
-            <div className="flex-1 overflow-y-auto">
-              <ProjectsView
-                goalId={drillGoalId}
-                onBack={() => { setDrillGoalId(null); setActiveView("goals"); }}
-                onOpenTasks={(pid, pname) => { setDrillProjectId(pid); setDrillProjectName(pname); setActiveView("tasks"); }}
-              />
-            </div>
-          ) : activeView === "protocols" ? (
-            <div className="flex-1 overflow-y-auto"><ProtocolsView /></div>
-          ) : activeView === "stats" ? (
-            <div className="flex-1 overflow-y-auto"><StatsView /></div>
+          ) : activeView === "work" ? (
+            <WorkView initialTab={workInitialTab} />
           ) : activeView === "settings" ? (
             <div className="flex-1 overflow-y-auto">
               <SettingsPanel onClose={() => setActiveView("dashboard")} />
@@ -356,6 +349,22 @@ export function App() {
       {selfDiagOpen && (
         <SelfDiagModal onClose={() => setSelfDiagOpen(false)} />
       )}
+
+      {/* Command palette (Cmd/Ctrl+K) */}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onNavigate={(view) => {
+          if (view === "work") setWorkInitialTab("tasks");
+          setActiveView(view as ViewId);
+        }}
+        onNewTask={() => { setWorkInitialTab("tasks"); setActiveView("work"); }}
+        onToggleTheme={() => {
+          import("./stores/uiStore").then(({ useUIStore }) => {
+            useUIStore.getState().toggleDarkMode();
+          });
+        }}
+      />
     </div>
   );
 }

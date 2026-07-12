@@ -34,7 +34,7 @@ mod validation;
 use std::path::PathBuf;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 // ── Re-exports ───────────────────────────────────────────────────────────
 
@@ -546,7 +546,7 @@ fn save_provider_key_cmd(
     // agent picks them up immediately.
     if let (Some(p), Some(m)) = (provider, model) {
         let b = base_url.unwrap_or_default();
-        let _ = config::set_model_config(&hermes_home, None, &p, &m, &b, None);
+        let _ = config::set_model_config(&hermes_home, None, &p, &m, &b, None, None, None, None, None, None);
     }
     Ok(())
 }
@@ -847,6 +847,16 @@ async fn send_message_cmd(
     .await
 }
 
+/// Abort the current chat generation. Emits a `chat-abort` event that the
+/// frontend listens for to stop appending streaming tokens and reset the agent
+/// status to idle. The backend SSE task will finish on its own (the next event
+/// or stream end closes it), but the user sees an immediate stop.
+#[tauri::command]
+async fn abort_message_cmd(app_handle: AppHandle) -> Result<(), String> {
+    let _ = app_handle.emit("chat-abort", ());
+    Ok(())
+}
+
 // ── Session Commands ──────────────────────────────────────────────────────
 
 /// Resolve hermes_home from state, falling back to config::resolve_hermes_home()
@@ -966,6 +976,32 @@ async fn generate_smart_briefing_cmd(
 ) -> Result<briefing::BriefingResult, String> {
     let hermes_home = home_or_resolve(&state)?;
     briefing::generate_smart_briefing(&hermes_home, profile.as_deref(), days.unwrap_or(7))
+}
+
+/// Dashboard-only channel feed: strictly whitelisted user-facing sources
+/// (telegram/email/jira). No service sessions leak in.
+#[tauri::command]
+async fn list_feed_channels_cmd(
+    state: State<'_, AppState>,
+    limit_per_source: Option<i64>,
+    profile: Option<String>,
+) -> Result<Vec<FeedItem>, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    sessions::list_feed_channels(&hermes_home, profile.as_deref(), limit_per_source.unwrap_or(5))
+        .map_err(|e| format!("SQLite error: {}", e))
+}
+
+/// Read the most recent cached briefing from state.db. The dashboard calls
+/// this on mount instead of auto-firing an LLM/MCP call. `max_age_secs`
+/// controls staleness (default 1800 = 30 min).
+#[tauri::command]
+async fn get_cached_briefing_cmd(
+    state: State<'_, AppState>,
+    max_age_secs: Option<f64>,
+    profile: Option<String>,
+) -> Result<briefing::CachedBriefing, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    Ok(briefing::get_cached_briefing(&hermes_home, profile.as_deref(), max_age_secs.unwrap_or(1800.0)))
 }
 
 // ── Profile Commands ──────────────────────────────────────────────────────
@@ -1101,7 +1137,8 @@ async fn get_model_config_cmd(
     Ok(config::get_model_config(&hermes_home, profile.as_deref()))
 }
 
-/// Set model config
+/// Set model config (including steer fields: reasoning_effort, verbosity,
+/// autonomy, prompt_cache, reasoning_context — GPT-5.6 guide practices 2-7).
 #[tauri::command]
 async fn set_model_config_cmd(
     state: State<'_, AppState>,
@@ -1110,10 +1147,46 @@ async fn set_model_config_cmd(
     base_url: String,
     profile: Option<String>,
     proxy: Option<config::ProxySettings>,
+    reasoning_effort: Option<String>,
+    verbosity: Option<String>,
+    autonomy_policy: Option<String>,
+    prompt_cache: Option<bool>,
+    reasoning_context: Option<String>,
 ) -> Result<(), String> {
     let hermes_home = state.hermes_home()?;
 
-    config::set_model_config(&hermes_home, profile.as_deref(), &provider, &model, &base_url, proxy)
+    config::set_model_config(
+        &hermes_home,
+        profile.as_deref(),
+        &provider,
+        &model,
+        &base_url,
+        proxy,
+        reasoning_effort.as_deref(),
+        verbosity.as_deref(),
+        autonomy_policy.as_deref(),
+        prompt_cache,
+        reasoning_context.as_deref(),
+    )
+}
+
+/// Set multi-model routing: map task type → model id (practice 1).
+/// e.g. {"routine": "gpt-5.6-luna", "complex": "gpt-5.6-sol"}.
+/// Written as a YAML sub-block under `model.model_routing:`.
+#[tauri::command]
+async fn set_model_routing_cmd(
+    state: State<'_, AppState>,
+    routing: std::collections::HashMap<String, String>,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    // Write each routing entry as a nested key under model_routing.
+    let kvs: Vec<(&str, &str)> = routing
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    config::set_yaml_block_scalars(&hermes_home, profile.as_deref(), "model_routing", &kvs)?;
+    Ok(())
 }
 
 // ── Skills Commands ───────────────────────────────────────────────────────
@@ -1332,7 +1405,9 @@ async fn add_telegram_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     config.add_telegram(source);
-    config.save(&hermes_home, profile.as_deref())
+    config.save(&hermes_home, profile.as_deref())?;
+    apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    Ok(())
 }
 
 /// Update Telegram source
@@ -1346,7 +1421,10 @@ async fn update_telegram_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     let ok = config.update_telegram(&id, source);
-    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
     Ok(ok)
 }
 
@@ -1360,7 +1438,10 @@ async fn remove_telegram_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     let ok = config.remove_telegram(&id);
-    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
     Ok(ok)
 }
 
@@ -1374,7 +1455,9 @@ async fn add_email_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     config.add_email(source);
-    config.save(&hermes_home, profile.as_deref())
+    config.save(&hermes_home, profile.as_deref())?;
+    apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    Ok(())
 }
 
 /// Update Email source
@@ -1388,7 +1471,10 @@ async fn update_email_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     let ok = config.update_email(&id, source);
-    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
     Ok(ok)
 }
 
@@ -1402,7 +1488,10 @@ async fn remove_email_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     let ok = config.remove_email(&id);
-    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
     Ok(ok)
 }
 
@@ -1416,7 +1505,9 @@ async fn add_jira_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     config.add_jira(source);
-    config.save(&hermes_home, profile.as_deref())
+    config.save(&hermes_home, profile.as_deref())?;
+    apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    Ok(())
 }
 
 /// Update Jira source
@@ -1430,7 +1521,10 @@ async fn update_jira_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     let ok = config.update_jira(&id, source);
-    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
     Ok(ok)
 }
 
@@ -1444,8 +1538,86 @@ async fn remove_jira_source_cmd(
     let hermes_home = state.hermes_home()?;
     let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
     let ok = config.remove_jira(&id);
-    if ok { config.save(&hermes_home, profile.as_deref())?; }
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        // Auto-apply to Hermes .env so changes take effect immediately.
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
     Ok(ok)
+}
+
+// ── Bitrix source commands ─────────────────────────────────────────────────
+
+/// Add Bitrix source
+#[tauri::command]
+async fn add_bitrix_source_cmd(
+    state: State<'_, AppState>,
+    source: sources::BitrixSource,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    config.add_bitrix(source);
+    config.save(&hermes_home, profile.as_deref())?;
+    apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    Ok(())
+}
+
+/// Update Bitrix source
+#[tauri::command]
+async fn update_bitrix_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    source: sources::BitrixSource,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.update_bitrix(&id, source);
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
+    Ok(ok)
+}
+
+/// Remove Bitrix source
+#[tauri::command]
+async fn remove_bitrix_source_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = state.hermes_home()?;
+    let mut config = sources::SourcesConfig::load(&hermes_home, profile.as_deref());
+    let ok = config.remove_bitrix(&id);
+    if ok {
+        config.save(&hermes_home, profile.as_deref())?;
+        apply_sources_env(&hermes_home, profile.as_deref(), &config);
+    }
+    Ok(ok)
+}
+
+/// Helper: write source env vars to Hermes .env. Called automatically after
+/// every source add/update/remove so the user never has to click a separate
+/// "Apply" button — sources propagate to Hermes immediately.
+fn apply_sources_env(
+    hermes_home: &PathBuf,
+    profile: Option<&str>,
+    config: &sources::SourcesConfig,
+) {
+    let env_vars = config.to_env_vars();
+    for (key, value) in env_vars {
+        if let Err(e) = config::write_env_value(hermes_home, profile, &key, &value) {
+            eprintln!("[sources] failed to write env {}={}: {}", key, key, e);
+        }
+    }
+    // Also sync MCP env blocks into config.yaml (ADR-002 §MCP env whitelist).
+    // Hermes _build_safe_env() strips non-whitelisted env vars, so .env alone
+    // doesn't reach MCP servers. The env: block in config.yaml is the ONLY way.
+    if let Err(e) = mcp::sync_mcp_env_blocks(hermes_home, profile) {
+        eprintln!("[sources] failed to sync MCP env blocks: {}", e);
+    }
 }
 
 /// Apply sources to Hermes .env (for backwards compatibility)
@@ -2254,6 +2426,7 @@ pub fn run() {
             get_gateway_port_cmd,
             // Chat
             send_message_cmd,
+            abort_message_cmd,
             // Sessions
             list_sessions_cmd,
             get_session_messages_cmd,
@@ -2261,7 +2434,9 @@ pub fn run() {
             delete_session_cmd,
             get_session_stats_cmd,
             list_feed_cmd,
+            list_feed_channels_cmd,
             generate_smart_briefing_cmd,
+            get_cached_briefing_cmd,
             // Profiles
             list_profiles_cmd,
             create_profile_cmd,
@@ -2277,6 +2452,7 @@ pub fn run() {
             set_env_cmd,
             get_model_config_cmd,
             set_model_config_cmd,
+            set_model_routing_cmd,
             // Skills
             list_installed_skills_cmd,
             get_skill_content_cmd,
@@ -2386,6 +2562,9 @@ pub fn run() {
             add_jira_source_cmd,
             update_jira_source_cmd,
             remove_jira_source_cmd,
+            add_bitrix_source_cmd,
+            update_bitrix_source_cmd,
+            remove_bitrix_source_cmd,
             apply_sources_to_env_cmd,
             // MCP servers
             list_mcp_servers_cmd,

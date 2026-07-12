@@ -73,7 +73,8 @@ pub fn list_sessions(
                     ''
                 ) as preview
          FROM sessions s
-         WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
+         WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions
+           AND s.source NOT IN ('subagent', 'cli', 'api_server', 'tui', 'mcp', 'briefing_smart')  -- skip service sessions
          ORDER BY s.started_at DESC
          LIMIT ?1 OFFSET ?2",
     )?;
@@ -336,14 +337,61 @@ pub fn list_feed(
                      ORDER BY m.timestamp ASC LIMIT 1), ''
                 ) as preview
          FROM sessions s
-         WHERE s.source NOT IN ('subagent')  -- skip internal subagent sessions
-           AND s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions (Bug A)
+         WHERE s.source NOT IN ('subagent', 'cli', 'api_server', 'tui', 'mcp', 'briefing_smart')  -- skip service sessions
+           AND s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions
          ORDER BY s.started_at DESC
          LIMIT ?1",
     )?;
 
     let items = stmt
         .query_map(params![limit], |r| {
+            Ok(FeedItem {
+                session_id: r.get(0)?,
+                source: r.get(1)?,
+                started_at: r.get(2)?,
+                title: r.get(3)?,
+                message_count: r.get(4)?,
+                model: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                preview: r.get(6)?,
+            })
+        })?
+        .collect::<SqliteResult<Vec<_>>>()?;
+
+    Ok(items)
+}
+
+/// Dashboard-only feed: strictly whitelisted user-facing channels.
+/// Returns the most recent sessions per real connector (telegram/email/jira),
+/// excluding ALL internal/service sources. This is what the Bento-grid dashboard
+/// "Каналы" tile renders — no "собери брифинг" or API roundtrip sessions leak in.
+pub fn list_feed_channels(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    limit_per_source: i64,
+) -> SqliteResult<Vec<FeedItem>> {
+    let db_path = state_db_path(hermes_home, profile);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&db_path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.source, s.started_at, s.title, s.message_count, s.model,
+                COALESCE(
+                    (SELECT SUBSTR(m.content, 1, 200) FROM messages m
+                     WHERE m.session_id = s.id AND m.role = 'user'
+                     ORDER BY m.timestamp ASC LIMIT 1), ''
+                ) as preview
+         FROM sessions s
+         WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'
+           AND s.id NOT LIKE 'cron_%'
+           AND s.source NOT IN ('subagent', 'briefing_smart')
+         ORDER BY s.started_at DESC
+         LIMIT ?1",
+    )?;
+
+    let items = stmt
+        .query_map(params![limit_per_source], |r| {
             Ok(FeedItem {
                 session_id: r.get(0)?,
                 source: r.get(1)?,

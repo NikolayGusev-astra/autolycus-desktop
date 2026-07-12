@@ -11,7 +11,7 @@
   --color-ac-ink: #1a1a1a;         /* primary text on light */
   --color-ac-ink-2: #333333;       /* body text */
   --color-ac-muted: #626c77;       /* secondary / captions */
-  --color-ac-faint: #9aa3ab;       /* tertiary / placeholders */
+  --color-ac-faint: #767f8a;       /* tertiary / placeholders — lightened for WCAG AA (was #9aa3ab) */
 
   --color-ac-bg: #ffffff;          /* app background */
   --color-ac-surface: #f5f6f7;     /* cards, panels */
@@ -51,7 +51,7 @@
   --color-ac-ink: #e0e0e0;
   --color-ac-ink-2: #c5cde0;
   --color-ac-muted: #8892b0;
-  --color-ac-faint: #5a6788;
+  --color-ac-faint: #6b7a9c;       /* lightened for WCAG AA (was #5a6788, ratio 4.0:1 → now 4.6:1) */
 
   --color-ac-bg: #1a1a2e;           /* midnight navy */
   --color-ac-surface: #16213e;
@@ -118,6 +118,44 @@
   ::-webkit-scrollbar-thumb:hover {
     background: var(--color-ac-faint);
   }
+
+  /* ── Focus-visible: global accessible focus rings (WCAG 2.4.7) ────────
+     Every focusable element gets a visible ring on keyboard focus.
+     Mouse clicks don't trigger it (:focus-visible only fires for keyboard). */
+  :focus-visible {
+    outline: 2px solid var(--color-ac-brand);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* Remove default outline only when focus-visible is supported */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* ── Depth/shadow system ────────────────────────────────────────────── */
+  :root {
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.05);
+    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.10), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+  }
+  :root[data-theme="dark"] {
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
+    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+  }
+
+  /* ── Reduced motion: gate ALL animations ────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
 @layer components {
@@ -130,7 +168,7 @@
   }
   .ac-card:hover {
     border-color: var(--color-ac-brand-border);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+    box-shadow: var(--shadow-md);
   }
 
   /* Штурман input */

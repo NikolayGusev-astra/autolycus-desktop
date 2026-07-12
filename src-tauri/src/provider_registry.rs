@@ -71,3 +71,71 @@ pub fn all_provider_urls() -> HashMap<String, String> {
     }
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_providers_have_urls() {
+        assert_eq!(
+            canonical_base_url("openai"),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            canonical_base_url("anthropic"),
+            Some("https://api.anthropic.com/v1")
+        );
+        assert_eq!(
+            canonical_base_url("openrouter"),
+            Some("https://openrouter.ai/api/v1")
+        );
+    }
+
+    #[test]
+    fn unknown_provider_returns_none() {
+        assert_eq!(canonical_base_url("custom"), None);
+        assert_eq!(canonical_base_url("auto"), None);
+        assert_eq!(canonical_base_url("nonexistent"), None);
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert_eq!(
+            canonical_base_url("OpenAI"),
+            canonical_base_url("openai")
+        );
+        assert_eq!(
+            canonical_base_url("GROQ"),
+            canonical_base_url("groq")
+        );
+    }
+
+    #[test]
+    fn all_ids_resolve_to_urls() {
+        // Cross-consistency: every id in all_provider_ids must have a URL in
+        // canonical_base_url AND all_provider_urls. Guards against drift
+        // between the three duplicated literals.
+        let urls = all_provider_urls();
+        for id in all_provider_ids() {
+            assert!(
+                canonical_base_url(id).is_some(),
+                "Provider '{}' missing from canonical_base_url",
+                id
+            );
+            assert!(
+                urls.contains_key(id),
+                "Provider '{}' missing from all_provider_urls",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn provider_count_is_stable() {
+        // Lock the count so adding a provider forces a test update (and thus
+        // a conscious check that the URL table is also updated).
+        assert_eq!(all_provider_ids().len(), 20);
+        assert_eq!(all_provider_urls().len(), 20);
+    }
+}

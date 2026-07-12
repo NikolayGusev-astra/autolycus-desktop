@@ -73,24 +73,28 @@ pub fn run_health_check(hermes_home: &PathBuf, profile: Option<&str>) -> Result<
         });
     }
 
-    // Check 4: Python virtual environment
-    let venv_path = hermes_home.join("venv");
+    // Check 4: Python virtual environment (ADR-002: real path is hermes-agent/venv)
+    let venv_path = hermes_home.join("hermes-agent").join("venv");
     if !venv_path.exists() {
-        issues.push(HealthIssue {
-            code: "VENV_MISSING".to_string(),
-            severity: "error".to_string(),
-            message: "Python virtual environment not found".to_string(),
-            fix: Some("Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt".to_string()),
-        });
+        // Also check the legacy venv/ path (older installs).
+        let legacy_venv = hermes_home.join("venv");
+        if !legacy_venv.exists() {
+            issues.push(HealthIssue {
+                code: "VENV_MISSING".to_string(),
+                severity: "error".to_string(),
+                message: "Python virtual environment not found".to_string(),
+                fix: Some("Run: hermes setup (installs hermes-agent/venv automatically)".to_string()),
+            });
+        }
     }
 
-    // Check 5: SQLite session database
-    let db_path = hermes_home.join("sessions.db");
+    // Check 5: SQLite session database (ADR-002: real name is state.db, not sessions.db)
+    let db_path = hermes_home.join("state.db");
     if !db_path.exists() {
         issues.push(HealthIssue {
             code: "DB_MISSING".to_string(),
             severity: "warning".to_string(),
-            message: "Sessions database not found — will be created automatically".to_string(),
+            message: "State database not found — will be created automatically on first chat".to_string(),
             fix: None,
         });
     }
@@ -136,11 +140,12 @@ pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) 
             let default_config = "\
 # Штурман Configuration
 model:
-  provider: auto
-  name: auto
-gateway:
-  port: 8000
-  host: 127.0.0.1
+  default: ''
+  provider: ''
+platforms:
+  api_server:
+    host: 127.0.0.1
+    port: 8642
 ";
             std::fs::write(&config_path, default_config)
                 .map_err(|e| format!("Failed to create config: {}", e))?;

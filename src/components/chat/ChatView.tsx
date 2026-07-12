@@ -341,6 +341,37 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     [currentSessionId, addMessage, setAgentStatus]
   );
 
+  // Stop the current generation: tell the backend to emit chat-abort, then
+  // reset the UI locally so the user sees an immediate stop. The streaming
+  // message is finalized (isStreaming=false) with whatever tokens arrived.
+  const handleStop = useCallback(() => {
+    invoke("abort_message_cmd").catch((err) =>
+      console.error("Failed to abort:", err)
+    );
+    const sid = streamingMsgIdRef.current;
+    if (sid) {
+      updateMessage(sid, { isStreaming: false });
+    }
+    streamingMsgIdRef.current = null;
+    runningToolRef.current = null;
+    setAgentStatus("idle");
+  }, [updateMessage, setAgentStatus]);
+
+  // Listen for backend-initiated abort (e.g. gateway disconnect).
+  useEffect(() => {
+    const unlisten = listen("chat-abort", () => {
+      const sid = streamingMsgIdRef.current;
+      if (sid) {
+        updateMessage(sid, { isStreaming: false });
+      }
+      streamingMsgIdRef.current = null;
+      setAgentStatus("idle");
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [updateMessage, setAgentStatus]);
+
   const handleNewSession = useCallback(() => {
     useGatewayStore.setState({ messages: [], currentSessionId: null });
     setAgentStatus("idle");
@@ -374,7 +405,11 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
       <div className="flex-1 overflow-hidden">
         <MessageList />
       </div>
-      <ChatInput onSend={handleSend} agentStatus={agentStatus} />
+      <ChatInput
+        onSend={handleSend}
+        onStop={handleStop}
+        agentStatus={agentStatus}
+      />
     </div>
   );
 }

@@ -60,7 +60,7 @@ export function ToolsScreen() {
               className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
                 filter === cat
                   ? "bg-ac-blue text-white"
-                  : "bg-ac-bg border border-ac-border hover:border-ac-stone"
+                  : "bg-ac-bg border border-ac-border hover:border-ac-muted"
               }`}
               onClick={() => setFilter(cat)}
             >

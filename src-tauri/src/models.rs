@@ -18,6 +18,17 @@ pub struct SavedModel {
     pub base_url: String,
     pub api_mode: Option<String>,
     pub created_at: i64,
+    // Capability flags (populated from discovery). Used to gate steer UI controls.
+    #[serde(default)]
+    pub supports_reasoning: Option<bool>,
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
+    #[serde(default)]
+    pub context_length: Option<u32>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 // ── Models file path ──────────────────────────────────────────────────────
@@ -51,6 +62,11 @@ pub fn add_model(
 ) -> Result<SavedModel, String> {
     let mut models = list_models(hermes_home);
 
+    // Infer capabilities from model id so steer controls are gated correctly
+    // even before a manual discovery refresh.
+    let caps = crate::model_discovery::ModelCapabilities::default();
+    let inferred = crate::model_discovery::infer_capabilities_public(provider, model);
+
     let new_model = SavedModel {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_string(),
@@ -59,6 +75,11 @@ pub fn add_model(
         base_url: base_url.to_string(),
         api_mode: None,
         created_at: chrono::Utc::now().timestamp(),
+        supports_reasoning: Some(inferred.supports_reasoning),
+        supports_vision: Some(inferred.supports_vision),
+        supports_tools: Some(inferred.supports_tools),
+        context_length: caps.context_length, // unknown until discovery
+        max_output_tokens: caps.max_output_tokens,
     };
 
     models.push(new_model.clone());
@@ -107,6 +128,26 @@ pub fn update_model(
             }
             if let Some(api_mode) = fields.get("api_mode") {
                 model.api_mode = Some(api_mode.clone());
+            }
+            // Capability fields (set from discovery results).
+            if let Some(v) = fields.get("supports_reasoning") {
+                model.supports_reasoning = Some(v == "true");
+            }
+            if let Some(v) = fields.get("supports_vision") {
+                model.supports_vision = Some(v == "true");
+            }
+            if let Some(v) = fields.get("supports_tools") {
+                model.supports_tools = Some(v == "true");
+            }
+            if let Some(v) = fields.get("context_length") {
+                if let Ok(n) = v.parse::<u32>() {
+                    model.context_length = Some(n);
+                }
+            }
+            if let Some(v) = fields.get("max_output_tokens") {
+                if let Ok(n) = v.parse::<u32>() {
+                    model.max_output_tokens = Some(n);
+                }
             }
 
             write_models(hermes_home, &models)?;

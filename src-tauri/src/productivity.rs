@@ -601,8 +601,14 @@ pub struct DashStats {
     pub tasks_total: i64,
     pub tasks_done: i64,
     pub tasks_today: i64,
+    /// Active (not done) tasks — the number the dashboard shows prominently.
+    pub active_tasks: i64,
+    /// Overdue: due_date < today AND not done. NULL due_date excluded.
+    pub overdue_tasks: i64,
     pub goals_total: i64,
     pub projects_total: i64,
+    /// Protocol count for the dashboard tile.
+    pub protocols: i64,
 }
 
 pub fn dash_stats(hermes_home: &Path, profile: Option<&str>) -> Result<DashStats, String> {
@@ -613,6 +619,7 @@ pub fn dash_stats(hermes_home: &Path, profile: Option<&str>) -> Result<DashStats
     let tasks_done: i64 = conn
         .query_row("SELECT COUNT(*) FROM tasks WHERE status='done'", [], |r| r.get(0))
         .unwrap_or(0);
+    let active_tasks = tasks_total - tasks_done;
     // today = due_date is today (YYYY-MM-DD)
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let tasks_today: i64 = conn
@@ -620,17 +627,31 @@ pub fn dash_stats(hermes_home: &Path, profile: Option<&str>) -> Result<DashStats
             r.get(0)
         })
         .unwrap_or(0);
+    // Overdue: due_date is set, in the past, and task not done.
+    let overdue_tasks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE due_date IS NOT NULL AND due_date != '' AND due_date < ?1 AND status != 'done'",
+            params![today],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     let goals_total: i64 = conn
         .query_row("SELECT COUNT(*) FROM goals", [], |r| r.get(0))
         .unwrap_or(0);
     let projects_total: i64 = conn
         .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
         .unwrap_or(0);
+    let protocols: i64 = conn
+        .query_row("SELECT COUNT(*) FROM protocols", [], |r| r.get(0))
+        .unwrap_or(0);
     Ok(DashStats {
         tasks_total,
         tasks_done,
         tasks_today,
+        active_tasks,
+        overdue_tasks,
         goals_total,
         projects_total,
+        protocols,
     })
 }

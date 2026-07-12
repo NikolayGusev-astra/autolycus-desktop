@@ -415,7 +415,8 @@ impl Default for ProxySettings {
 impl ProxySettings {
     /// Resolve effective proxy URL. Returns `""` (=> direct connection) when:
     ///   - `use_proxy == false`, OR
-    ///   - no explicit URL is configured AND no HTTP_PROXY/HTTPS_PROXY env var is set.
+    ///   - no explicit URL is configured AND no HTTP_PROXY/HTTPS_PROXY env var
+    ///     AND no system proxy is detected.
     /// Callers already gate on `use_proxy` before calling reqwest::Proxy::all(),
     /// so the empty-string return is the safe default.
     pub fn resolve_url(&self) -> String {
@@ -425,14 +426,218 @@ impl ProxySettings {
         if !self.proxy_url.is_empty() {
             return self.proxy_url.clone();
         }
+        // Check process env vars (HTTP_PROXY / HTTPS_PROXY).
         if let Ok(env_p) = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("HTTPS_PROXY")) {
             if !env_p.is_empty() {
                 return env_p;
             }
         }
-        // No proxy configured and no env override => direct connection.
+        // Check system proxy settings (Windows registry, macOS system config,
+        // Linux gsettings). This is the TUN/system-proxy case.
+        if let Some(sys_proxy) = detect_system_proxy() {
+            return sys_proxy;
+        }
+        // No proxy configured and no env/system override => direct connection.
         String::new()
     }
+}
+
+/// Universal proxy resolver: checks ALL possible sources in priority order and
+/// returns the first non-empty proxy URL. Used by both gateway.rs (to propagate
+/// to the Hermes child process) and chat.rs (for direct LLM calls).
+///
+/// Priority (ADR-002 §Proxy, ADR-003 §Proxy):
+///   1. Desktop ProxySettings (config.yaml `proxy:` block with use_proxy=true)
+///      — our desktop-only feature for explicit proxy config
+///   2. HTTPS_PROXY → HTTP_PROXY → ALL_PROXY in .env
+///      — upstream Hermes Agent chain (case-insensitive)
+///   3. HTTPS_PROXY → HTTP_PROXY → ALL_PROXY in process env
+///   4. OS system proxy (Windows registry / macOS scutil / Linux gsettings)
+///
+/// NOTE: config.yaml keys `500-network.proxy`, top-level `proxy:`, `model.proxy`
+/// are NOT checked — they do NOT exist in upstream Hermes Agent (ADR-002 §Config).
+/// They were fork-only inventions that caused false-positive proxy detection.
+pub fn resolve_effective_proxy(hermes_home: &Path, profile: Option<&str>) -> String {
+    // Source 1: desktop ProxySettings (our feature)
+    let model_config = get_model_config(hermes_home, profile);
+    if model_config.proxy.use_proxy {
+        let url = model_config.proxy.resolve_url();
+        if !url.is_empty() {
+            return url;
+        }
+    }
+    // Source 2: .env — upstream Hermes Agent proxy chain
+    let env_map = read_env(hermes_home, profile);
+    for var in &["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                 "https_proxy", "http_proxy", "all_proxy"] {
+        if let Some(url) = env_map.get(*var) {
+            if !url.is_empty() {
+                return url.clone();
+            }
+        }
+    }
+    // Source 3: process env — same chain (inherited from shell)
+    for var in &["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                 "https_proxy", "http_proxy", "all_proxy"] {
+        if let Ok(url) = std::env::var(var) {
+            if !url.is_empty() {
+                return url;
+            }
+        }
+    }
+    // Source 4: OS system proxy
+    if let Some(sys_proxy) = detect_system_proxy() {
+        return sys_proxy;
+    }
+    String::new()
+}
+
+/// Detect the system-level proxy configuration. This handles cases the user
+/// did NOT explicitly configure in the app but their OS is set to use:
+///   - Windows: Internet Settings (registry `ProxyServer` / `ProxyEnable`)
+///   - macOS: `scutil --proxy` or `networksetup`
+///   - Linux: GNOME `org.gnome.system.proxy` via gsettings
+///
+/// TUN-mode proxies (e.g. Clash TUN, v2ray tun2socks) route at the network
+/// layer and don't need env vars — they are transparent. This function only
+/// returns proxies that require explicit configuration (HTTP/SOCKS), so TUN
+/// mode is correctly a "no proxy URL needed, traffic flows" case → returns "".
+pub fn detect_system_proxy() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        detect_windows_proxy()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        detect_macos_proxy()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        detect_linux_proxy()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Windows: read the Internet Settings registry key.
+/// HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+///   ProxyEnable (DWORD): 1 = proxy on
+///   ProxyServer (REG_SZ): "host:port" or "http=host:port;https=host:port"
+#[cfg(target_os = "windows")]
+fn detect_windows_proxy() -> Option<String> {
+    // Use reg.exe query — no winreg crate dependency, works on all Windows.
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Look for "ProxyEnable    REG_DWORD    0x1"
+    let enabled = stdout.lines().any(|line| {
+        line.contains("ProxyEnable") && line.contains("0x1")
+    });
+    if !enabled {
+        return None;
+    }
+
+    // Read ProxyServer value.
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.contains("ProxyServer") {
+            // Extract the value after "REG_SZ"
+            if let Some(idx) = line.find("REG_SZ") {
+                let raw = line[idx + 6..].trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                // ProxyServer can be "host:port" or "http=host:port;https=host:port;..."
+                // Extract the http= entry first, else fall back to the first entry.
+                for part in raw.split(';') {
+                    let part = part.trim();
+                    if let Some(addr) = part.strip_prefix("http=") {
+                        return Some(format!("http://{}", addr));
+                    }
+                    if let Some(addr) = part.strip_prefix("https=") {
+                        return Some(format!("http://{}", addr));
+                    }
+                    if let Some(addr) = part.strip_prefix("socks=") {
+                        return Some(format!("socks5://{}", addr));
+                    }
+                }
+                // No protocol prefix — assume HTTP.
+                if raw.contains(':') && !raw.contains('=') {
+                    return Some(format!("http://{}", raw));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// macOS: use `scutil --proxy` to read system proxy settings.
+#[cfg(target_os = "macos")]
+fn detect_macos_proxy() -> Option<String> {
+    let output = std::process::Command::new("scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut enabled = false;
+    let mut host = String::new();
+    let mut port = String::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("HTTPEnable : 1") {
+            enabled = true;
+        }
+        if let Some(val) = line.strip_prefix("HTTPProxy : ") {
+            host = val.trim().to_string();
+        }
+        if let Some(val) = line.strip_prefix("HTTPPort : ") {
+            port = val.trim().to_string();
+        }
+    }
+    if enabled && !host.is_empty() && !port.is_empty() {
+        return Some(format!("http://{}:{}", host, port));
+    }
+    None
+}
+
+/// Linux: check GNOME gsettings for system proxy.
+#[cfg(target_os = "linux")]
+fn detect_linux_proxy() -> Option<String> {
+    // Try gsettings (GNOME/Ubuntu/Fedora).
+    let mode = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.system.proxy", "mode"])
+        .output()
+        .ok()?;
+    let mode_str = String::from_utf8_lossy(&mode.stdout).trim().trim_matches('\'').to_string();
+    if mode_str != "manual" {
+        return None;
+    }
+    let host = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.system.proxy.http", "host"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().trim_matches('\'').to_string())
+        .unwrap_or_default();
+    let port = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.system.proxy.http", "port"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !host.is_empty() && !port.is_empty() {
+        return Some(format!("http://{}:{}", host, port));
+    }
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -445,6 +650,26 @@ pub struct ModelConfig {
     pub base_url: String,
     #[serde(default)]
     pub proxy: ProxySettings,
+    // ── Steer fields (GPT-5.6 guide practices 2, 3, 5, 6, 7) ─────────────
+    /// reasoning.effort: none|low|medium|high|xhigh|max (practice 2).
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// text.verbosity: low|medium|high (practice 5).
+    #[serde(default)]
+    pub verbosity: Option<String>,
+    /// Autonomy policy: readonly|local|confirm-external (practice 3).
+    #[serde(default)]
+    pub autonomy_policy: Option<String>,
+    /// Enable prompt caching for stable prefixes (practice 6).
+    #[serde(default)]
+    pub prompt_cache: Option<bool>,
+    /// reasoning.context: all_turns|current_turn (practice 7).
+    #[serde(default)]
+    pub reasoning_context: Option<String>,
+    /// Multi-model routing: map task type → model id (practice 1).
+    /// e.g. {"routine": "gpt-5.6-luna", "complex": "gpt-5.6-sol"}
+    #[serde(default)]
+    pub model_routing: Option<std::collections::HashMap<String, String>>,
 }
 
 pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfig {
@@ -474,11 +699,42 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
                     .to_string();
             }
             if !provider.is_empty() || !default.is_empty() {
+                // Parse model_routing map if present (practice 1).
+                let model_routing = model_block
+                    .get("model_routing")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .filter_map(|(k, v)| {
+                                v.as_str().map(|s| (k.clone(), s.to_string()))
+                            })
+                            .collect::<std::collections::HashMap<String, String>>()
+                    });
                 return ModelConfig {
                     provider: provider.to_string(),
                     model: default.to_string(),
                     base_url: base_url.to_string(),
                     proxy,
+                    reasoning_effort: model_block
+                        .get("reasoning_effort")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    verbosity: model_block
+                        .get("verbosity")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    autonomy_policy: model_block
+                        .get("autonomy")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    prompt_cache: model_block
+                        .get("prompt_cache")
+                        .and_then(|v| v.as_bool()),
+                    reasoning_context: model_block
+                        .get("reasoning_context")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    model_routing,
                 };
             }
         }
@@ -491,6 +747,12 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
         model: env.get("MODEL").cloned().unwrap_or_default(),
         base_url: env.get("BASE_URL").cloned().unwrap_or_default(),
         proxy: ProxySettings::default(),
+        reasoning_effort: None,
+        verbosity: None,
+        autonomy_policy: None,
+        prompt_cache: None,
+        reasoning_context: None,
+        model_routing: None,
     }
 }
 
@@ -501,6 +763,11 @@ pub fn set_model_config(
     model: &str,
     base_url: &str,
     proxy: Option<ProxySettings>,
+    reasoning_effort: Option<&str>,
+    verbosity: Option<&str>,
+    autonomy_policy: Option<&str>,
+    prompt_cache: Option<bool>,
+    reasoning_context: Option<&str>,
 ) -> Result<(), String> {
     // Write to config.yaml's `model:` block — this is the source of truth that
     // `hermes setup`/Hermes itself reads (aligning the desktop with the agent,
@@ -511,6 +778,30 @@ pub fn set_model_config(
         ("default", model),
         ("base_url", base_url),
     ];
+    // Steer fields — only write non-empty values (practice 2, 3, 5, 6, 7).
+    if let Some(effort) = reasoning_effort {
+        if !effort.is_empty() {
+            kvs.push(("reasoning_effort", effort));
+        }
+    }
+    if let Some(verb) = verbosity {
+        if !verb.is_empty() {
+            kvs.push(("verbosity", verb));
+        }
+    }
+    if let Some(autonomy) = autonomy_policy {
+        if !autonomy.is_empty() {
+            kvs.push(("autonomy", autonomy));
+        }
+    }
+    if let Some(cache) = prompt_cache {
+        kvs.push(("prompt_cache", if cache { "true" } else { "false" }));
+    }
+    if let Some(ctx) = reasoning_context {
+        if !ctx.is_empty() {
+            kvs.push(("reasoning_context", ctx));
+        }
+    }
     if let Some(p) = &proxy {
         // Persist proxy in a dedicated top-level `proxy:` block (desktop-managed),
         // separate from Hermes's `model:` block, so we don't fight `hermes setup`
@@ -752,6 +1043,41 @@ pub fn has_api_key_for_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_default_is_off() {
+        let p = ProxySettings::default();
+        assert!(!p.use_proxy, "proxy must default to OFF (safe default)");
+        assert!(p.proxy_url.is_empty());
+        assert!(p.resolve_url().is_empty(), "OFF proxy must resolve to empty");
+    }
+
+    #[test]
+    fn proxy_explicit_url() {
+        let p = ProxySettings {
+            use_proxy: true,
+            proxy_url: "http://proxy.local:3128".into(),
+        };
+        assert_eq!(p.resolve_url(), "http://proxy.local:3128");
+    }
+
+    #[test]
+    fn proxy_off_returns_empty_even_with_url() {
+        // If use_proxy is false, resolve_url must return empty even if proxy_url
+        // is set — the flag is the authoritative gate.
+        let p = ProxySettings {
+            use_proxy: false,
+            proxy_url: "http://proxy.local:3128".into(),
+        };
+        assert_eq!(p.resolve_url(), "");
+    }
+
+    #[test]
+    fn detect_system_proxy_does_not_panic() {
+        // This must work on all platforms (Windows/macOS/Linux) without error.
+        // It may return None (no system proxy configured) — that's fine.
+        let _ = detect_system_proxy();
+    }
 
     /// Verify resolve_hermes_home points at the real Hermes install (the one
     /// holding state.db), not a stale ~/.hermes. Run with:

@@ -25,16 +25,9 @@ export interface ThemeDef {
 export const THEMES: ThemeDef[] = [
   { id: "dark", name: "Dark", appearance: "dark" },
   { id: "light", name: "Light", appearance: "light" },
-  { id: "dracula", name: "Dracula", appearance: "dark" },
-  { id: "nord", name: "Nord", appearance: "dark" },
-  { id: "one-dark", name: "One Dark", appearance: "dark" },
-  { id: "github-dark", name: "GitHub Dark", appearance: "dark" },
-  { id: "monokai", name: "Monokai", appearance: "dark" },
-  { id: "solarized-dark", name: "Solarized Dark", appearance: "dark" },
-  { id: "gruvbox-dark", name: "Gruvbox Dark", appearance: "dark" },
-  { id: "tokyo-night", name: "Tokyo Night", appearance: "dark" },
-  { id: "github-light", name: "GitHub Light", appearance: "light" },
-  { id: "solarized-light", name: "Solarized Light", appearance: "light" },
+  // Only light + dark are implemented in globals.css.
+  // Removed 10 dead themes (dracula, nord, etc.) that had no CSS — they
+  // rendered as unstyled fallback and misled the config.
 ];
 
 export const THEME_OPTIONS = [

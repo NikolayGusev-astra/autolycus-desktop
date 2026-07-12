@@ -90,7 +90,7 @@ export function InstallScreen({ onComplete }: { onComplete?: () => void }) {
                       className={`w-full text-left p-3 rounded-lg border transition-colors ${
                         selectedProvider === p.id
                           ? "border-ac-blue bg-ac-blue/10"
-                          : "border-ac-border hover:border-ac-stone"
+                          : "border-ac-border hover:border-ac-muted"
                       }`}
                       onClick={() => setSelectedProvider(p.id)}
                     >
