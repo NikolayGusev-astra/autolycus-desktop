@@ -272,6 +272,20 @@ soul.md (Hermes)            — agent persona text
 
 ## 7. ТЕХНИЧЕСКИЙ ДОЛГ (актуально на 2026-07-12)
 
+> ⚠️ **ВНИМАНИЕ (обновление 2026-07-15).** Инспекция живой установки Hermes
+> показала, что **транспортная часть ADR-002 и ADR-003 устарела**. Реальный
+> бэкенд поднимается командой `hermes serve` (WebSocket `/api/ws`, сервер #1),
+> а НЕ HTTP API Server #2 (`/v1/chat/completions`, порт 8642), которого в
+> актуальной установке **нет**. Следовательно:
+> - пункты §7.1 #1, #2 (session_id header) и §7.2 #6 (Runs transport), #9
+>   (Content-Length) описывают endpoint'ы, **которых не существует**;
+> - весь чат-движок `chat.rs` (HTTP-путь) не может работать с реальным Hermes.
+>
+> Актуальный транспортный контракт зафиксирован в **ADR-004** (`hermes serve` +
+> WS `/api/ws`). Разделы ниже сохранены как историческая запись аудита; при
+> планировании работы сверяйтесь с ADR-004. Не валидные для WS-транспорта
+> пункты помечены ниже знаком 🚫.
+>
 > **Полная ревизия.** Предыдущие §7.1/7.2 устарели. Этот раздел — результат
 > полного аудита порта против ground truth из исходников `fathah/hermes-desktop`
 > (оригинал) и `NousResearch/hermes-agent` (upstream). См. **ADR-002** и
@@ -288,40 +302,40 @@ soul.md (Hermes)            — agent persona text
 
 ### 7.1. КРИТИЧЕСКИЕ расхождения (ломают core-функционал)
 
-| # | Зона | Оригинал | Наш порт | Файл:строка |
-|---|------|----------|----------|-------------|
-| 1 | **Session ID в body** | `session_id` body-field при resume, формат `desk-<ts>-<uuid4>` | Вычисляется `_sid`, **выбрасывается** (underscore=unused) | `chat.rs:231` |
-| 2 | **X-Hermes-Session-Id header** | На каждом authed-запросе | **Никогда не отправляется** (grep: 0) | `chat.rs:263-270` |
-| 3 | **API_SERVER_ENABLED** | `=true` в env gateway | **Не устанавливается** | `gateway.rs:183-188` |
-| 4 | **.env bridge** | Все ключи `.env` → в process env gateway | Только HERMES_HOME + PORT | `gateway.rs:180-215` |
-| 5 | **reasoning_effort формат** | Top-level строка `"reasoning_effort":"medium"` | Вложенный объект `reasoning:{effort,context}` | `chat.rs:244-249` |
+| # | Зона | Оригинал | Наш порт | Файл:строка | Статус (2026-07-15) |
+|---|------|----------|----------|-------------|---------------------|
+| 1 | **Session ID в body** 🚫 | `session_id` body-field при resume, формат `desk-<ts>-<uuid4>` | Вычисляется `_sid`, **выбрасывается** (underscore=unused) | `chat.rs:231` | SUPERSEDED — WS создаёт сессию через `session.create`; формат `desk-<ts>-<uuid>` переиспользуется в `ws_transport.rs`. Удалить с HTTP в P2.1 |
+| 2 | **X-Hermes-Session-Id header** 🚫 | На каждом authed-запросе | **Никогда не отправляется** (grep: 0) | `chat.rs:263-270` | INVALID — header есть (`chat.rs:291-296`), но endpoint `/v1/chat/completions` (8642) не существует в живом Hermes. WS auth через `?token=` |
+| 3 | **API_SERVER_ENABLED** 🚫 | `=true` в env gateway | **Не устанавливается** | `gateway.rs:183-188` | INVALID → VALID для spawn: `gateway.rs:180` зовёт `gateway` не `serve`; `gateway.rs:215` шлёт `API_SERVER_ENABLED` (бэкенд игнорирует). → P1.1 |
+| 4 | **.env bridge** | Все ключи `.env` → в process env gateway | Только HERMES_HOME + PORT | `gateway.rs:180-215` | CLOSED — `gateway.rs:225-231` bridges все ключи read_env; process.env наследуется полностью |
+| 5 | **reasoning_effort формат** 🚫 | Top-level строка `"reasoning_effort":"medium"` | Вложенный объект `reasoning:{effort,context}` | `chat.rs:244-249` | CLOSED — `chat.rs:259-263` top-level строка; закрыто в `6ce9fb4` |
 
 **Эффект:** чат либо не работает (403 от upstream без прокси), либо теряет
 контекст между сообщениями (session_id потерян).
 
 ### 7.2. ВЫСОКИЕ расхождения (значительная дивергенция)
 
-| # | Зона | Оригинал | Наш порт | Файл:строка |
-|---|------|----------|----------|-------------|
-| 6 | **Runs transport** | `POST /v1/runs` + SSE (PREFERRED, capability-detected) | Только `/v1/chat/completions` | `chat.rs:177-322` |
-| 7 | **Профиль** | `--profile <name>` CLI flag | `HERMES_PROFILE_HOME` env (недокументирован) | `gateway.rs:191-194` |
-| 8 | **Health check** | Poll HTTP `/health` | TCP connect только | `gateway.rs:260-281` |
-| 9 | **Content-Length** | Явный header (middleware требует) | Не отправляется | `chat.rs:263-266` |
-| 10 | **ALL_PROXY** | Проверяет HTTPS_PROXY→HTTP_PROXY→**ALL_PROXY** | ALL_PROXY **не проверяется** | `config.rs:494-514` |
+| # | Зона | Оригинал | Наш порт | Файл:строка | Статус (2026-07-15) |
+|---|------|----------|----------|-------------|---------------------|
+| 6 | **Runs transport** 🚫 | `POST /v1/runs` + SSE (PREFERRED, capability-detected) | Только `/v1/chat/completions` | `chat.rs:177-322` | SUPERSEDED — функции есть (`chat.rs:565,598,740`), но `/v1/runs` нет в живом Hermes. WS даёт tool events напрямую. Удалить в P2.1 |
+| 7 | **Профиль** | `--profile <name>` CLI flag | `HERMES_PROFILE_HOME` env (недокументирован) | `gateway.rs:191-194` | CLOSED — `gateway.rs:191` `cmd.arg("--profile")`, не env var |
+| 8 | **Health check** 🚫 | Poll HTTP `/health` | TCP connect только | `gateway.rs:260-281` | PARTIAL — `gateway.rs:300-335` делает TCP+HTTP/1.0 GET `/health`, но `/health` → 404 на `hermes serve`. Readiness нужен через WS `gateway.ready`. → P1.4 |
+| 9 | **Content-Length** 🚫 | Явный header (middleware требует) | Не отправляется | `chat.rs:263-266` | INVALID — header есть (`chat.rs:289`), но endpoint'а `/v1/chat/completions` нет. WS не использует Content-Length |
+| 10 | **ALL_PROXY** | Проверяет HTTPS_PROXY→HTTP_PROXY→**ALL_PROXY** | ALL_PROXY **не проверяется** | `config.rs:494-514` | CLOSED — `config.rs:471-481` проверяет все три (+ lowercase) |
 
 **Эффект:** теряются tool events и reasoning stream; профили могут не
 активироваться; gateway может быть "half-started" при запросе.
 
 ### 7.3. СРЕДНИЕ расхождения (неправильное место/формат)
 
-| # | Зона | Оригинал | Наш порт | Файл:строка |
-|---|------|----------|----------|-------------|
-| 11 | **MCP store** | config.yaml `mcp_servers` блок | `servers.json` (JSON, другой путь) | `mcp.rs:75-80` |
-| 12 | **MCP креды** | config.yaml `mcp_servers.<name>.env:` блок | `.env` (вырезается `_build_safe_env` whitelist) | `sources.rs:223-278` |
-| 13 | **Proxy config keys** | Нет в upstream (`network:{force_ipv4}` без proxy) | `500-network.proxy`, top-level `proxy:`, `model.proxy` | `config.rs:468-493` |
-| 14 | **cwd gateway** | `HERMES_REPO` (source checkout) | Не установлен | `gateway.rs:165` |
-| 15 | **pythonw.exe** | `pythonw.exe` (no console) на Windows | Bare `python` + CREATE_NO_WINDOW | `gateway.rs:171` |
-| 16 | **Briefing env** | Стандартный MCP `env:` блок | Hand-curated список (хак) | `briefing.rs:178-200` |
+| # | Зона | Оригинал | Наш порт | Файл:строка | Статус (2026-07-15) |
+|---|------|----------|----------|-------------|---------------------|
+| 11 | **MCP store** | config.yaml `mcp_servers` блок | `servers.json` (JSON, другой путь) | `mcp.rs:75-80` | VALID — `mcp.rs:79` всё ещё `servers.json`. → P2.3 |
+| 12 | **MCP креды** | config.yaml `mcp_servers.<name>.env:` блок | `.env` (вырезается `_build_safe_env` whitelist) | `sources.rs:223-278` | PARTIAL — `mcp.rs:330-352 sync_mcp_env_blocks` пишет env-блоки, но через line-based editor. → P2.3 (serde_yaml round-trip) |
+| 13 | **Proxy config keys** | Нет в upstream (`network:{force_ipv4}` без proxy) | `500-network.proxy`, top-level `proxy:`, `model.proxy` | `config.rs:468-493` | CLOSED — fork-ключи отсутствуют (`config.rs:457` только комментарий); прокси через env |
+| 14 | **cwd gateway** | `HERMES_REPO` (source checkout) | Не установлен | `gateway.rs:165` | CLOSED — `gateway.rs:197-198` `cmd.current_dir(repo)` |
+| 15 | **pythonw.exe** | `pythonw.exe` (no console) на Windows | Bare `python` + CREATE_NO_WINDOW | `gateway.rs:171` | CLOSED — `gateway.rs:166-170` prefer pythonw.exe |
+| 16 | **Briefing env** | Стандартный MCP `env:` блок | Hand-curated список (хак) | `briefing.rs:178-200` | CLOSED — `briefing.rs:165-178` env-fixing реализован |
 
 **Эффект:** MCP-серверы не получают креды → брифинг показывает 0; proxy может
 не найтись (fork-ключи не существуют в upstream); относительные пути gateway
@@ -329,21 +343,22 @@ soul.md (Hermes)            — agent persona text
 
 ### 7.4. НИЗКИЕ расхождения (косметика/минорное)
 
-| # | Зона | Оригинал | Наш порт | Файл:строка |
-|---|------|----------|----------|-------------|
-| 17 | **SID format** | `desk-<timestamp>-<uuid4>` | `desk-<uuid4>` (без timestamp) | `chat.rs:233` |
-| 18 | **Proxy injection** | Inherits process.env (явной инъекции нет) | Явная инъекция HTTP_PROXY/HTTPS_PROXY | `gateway.rs:196-215` |
-| 19 | **Config write** | `hermes config set` CLI | Line-based YAML edit (хрупкий) | `config.rs:857-942` |
-| 20 | **Gateway stop** | (N/A) | `child.kill()` без graceful shutdown | `gateway.rs:354-358` |
-| 21 | **config_health.rs** | (N/A — desktop-only) | Stale: проверяет `sessions.db` (реально `state.db`), порт 8000 | `config_health.rs:77-85,136-144` |
+| # | Зона | Оригинал | Наш порт | Файл:строка | Статус (2026-07-15) |
+|---|------|----------|----------|-------------|---------------------|
+| 17 | **SID format** | `desk-<timestamp>-<uuid4>` | `desk-<uuid4>` (без timestamp) | `chat.rs:233` | CLOSED — `chat.rs:241,626` `format!("desk-{}-{}", ts, uuid::Uuid::new_v4())` |
+| 18 | **Proxy injection** | Inherits process.env (явной инъекции нет) | Явная инъекция HTTP_PROXY/HTTPS_PROXY | `gateway.rs:196-215` | CLOSED — process.env наследуется (нет env_clear); явной инъекции нет |
+| 19 | **Config write** | `hermes config set` CLI | Line-based YAML edit (хрупкий) | `config.rs:857-942` | VALID — `mcp.rs:349` вызывает `set_yaml_block_scalars` (line-based, fragile). → P2.3 |
+| 20 | **Gateway stop** | (N/A) | `child.kill()` без graceful shutdown | `gateway.rs:354-358` | CLOSED — `gateway.rs:378-407` SIGTERM→wait→kill (graceful уже есть) |
+| 21 | **config_health.rs** | (N/A — desktop-only) | Stale: проверяет `sessions.db` (реально `state.db`), порт 8000 | `config_health.rs:77-85,136-144` | VALID — DB уже `state.db` (строка 92), но порт `8642` хардкожен (строка 148); модуль генерит false-positive. → P2.3 (удалить) |
 
 ### 7.5. Dead/stub code
 
-| Компонент | Файл | Статус |
-|-----------|------|--------|
-| `send_message_via_gateway` (WS transport) | `chat.rs:326-379` | Никогда не вызывается |
-| `check_gateway_health` (HTTP /health) | `gateway.rs:393` | Определена, не используется в startup |
-| `test_mcp_server`, `list_mcp_catalog` | `mcp.rs:233-275` | Stubs с hardcoded данными |
+| Компонент | Файл | Статус | Проверка 2026-07-15 |
+|-----------|------|--------|---------------------|
+| `send_message_via_gateway` (WS transport) | `chat.rs:326-379` | Никогда не вызывается | VALID dead — grep: 0 вызовов; заменён на `ws_transport.rs` в Phase 0. → P2.3 |
+| `check_gateway_health` (HTTP /health) | `gateway.rs:393` | Определена, не используется в startup | CLOSED (не dead) — вызывается в `gateway.rs:474` `is_api_server_ready`. Аудит ошибался |
+| `test_mcp_server`, `list_mcp_catalog` | `mcp.rs:233-275` | Stubs с hardcoded данными | CLOSED — не найдены в текущем mcp.rs (grep 0); уже удалены |
+| `python/tcp_server.py` | `src-tauri/python/` | — | VALID dead — файл присутствует (7959 bytes), не вызывается из Rust. → P2.3 |
 
 ### 7.6. Мёртвый/устаревший config_health.rs
 
@@ -351,6 +366,12 @@ soul.md (Hermes)            — agent persona text
 хардкодит порт 8000 (реальный 8642), проверяет `venv/` (реальный путь
 `hermes-agent/venv/`). Модуль — leftover от ранней итерации порта и
 генерирует false-positive ошибки на реальных установках.
+
+> **Проверка 2026-07-15:** DB-имя уже исправлено на `state.db`
+> (`config_health.rs:92`), но порт `8642` всё ещё хардкожен в default-конфиге
+> (`config_health.rs:148`). Сам модуль проверяет endpoint'ы (`/v1/*`),
+> которых нет в `hermes serve`. **Вердикт: VALID** — удалить весь модуль в
+> P2.3. Модуль подключён (`lib.rs:8`).
 
 ### 7.7. Ранее закрытые пункты (из §7.1 редакции 2026-07-08)
 
@@ -361,14 +382,19 @@ soul.md (Hermes)            — agent persona text
 - CSS `@import` — порядок корректен ✅
 - Self-diagnosis modal — подключён ✅
 
-### 7.8. План устранения (приоритизированный)
+### 7.8. План устранения (приоритизированный, актуализирован 2026-07-15)
 
-| Приоритет | Пункты | Объём | Эффект |
-|-----------|--------|-------|--------|
-| **P0** | #1-5 (критические) | ~2ч | Чат + сессии + reasoning заработают |
-| **P1** | #6-10 (высокие) | ~4ч | Tool events + профили + health |
-| **P2** | #11-16 (средние) | ~3ч | MCP креды + proxy + cwd |
-| **P3** | #17-21 (низкие) | ~1ч | Косметика + cleanup |
+> ⚠️ **Прежний план (P0=#1-5, P1=#6-10, ...) устарел** — он исходил из
+> аудита 2026-07-12, не знавшего о WS-миграции (ADR-004). Из 21 пункта
+> реальных дефектов осталось 5 VALID + 2 PARTIAL. См. `docs/plans/P-AUDIT-report.md`.
+
+| Фаза | Пункты | Что делается | Зависимости |
+|------|--------|--------------|-------------|
+| **Phase 0** ✅ | — | WS-парсер `parse_ws_message` + клиент `ws_transport.rs` + флаг `STEERSMAN_TRANSPORT`. Доказано e2e на живом Hermes | выполнено |
+| **P-AUDIT** ✅ | все 21 | Перепроверка против HEAD; этот отчёт | выполнено |
+| **P1** | #3, #8 | Spawn `serve --port 0` (вместо `gateway`), генерация `HERMES_DASHBOARD_SESSION_TOKEN`, readiness через WS `gateway.ready`, WS как дефолт | `docs/plans/tasks/P1-ws-wiring.md` |
+| **P2** | #1,#2,#6,#9,#11,#12,#19,#21 + §7.5 + tcp_server.py | Удаление ~600 строк HTTP dead code, долгоживущее WS, MCP servers.json→config.yaml, serde_yaml round-trip, удаление config_health.rs | P1 стабилен |
+| **P3** | (новое) | Remote/SSH на WS (ADR-005), thiserror типизированные ошибки, tracing structured logging | P2 завершён |
 
 ---
 
