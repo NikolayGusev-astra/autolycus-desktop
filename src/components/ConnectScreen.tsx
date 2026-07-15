@@ -203,7 +203,7 @@ function RemoteConnect({ onConnected }: { onConnected: () => void }) {
         setTimeout(onConnected, 800);
       } else {
         setStatus("error");
-        setStatusMsg("Server unreachable — check URL and API key");
+        setStatusMsg("Server unreachable — check URL and session token");
       }
     } catch (err) {
       setStatus("error");
@@ -227,9 +227,9 @@ function RemoteConnect({ onConnected }: { onConnected: () => void }) {
       </div>
 
       <div className="mb-4">
-        <label className="text-[11px] text-ac-muted mb-1 block">API Key</label>
+        <label className="text-[11px] text-ac-muted mb-1 block">Session Token</label>
         <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
-          placeholder="Optional" className="ac-input w-full px-3 py-2 text-sm" />
+          placeholder="Dashboard session token of the remote backend" className="ac-input w-full px-3 py-2 text-sm" />
       </div>
 
       {status === "error" && (

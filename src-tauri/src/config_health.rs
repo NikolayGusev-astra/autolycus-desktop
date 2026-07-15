@@ -118,6 +118,21 @@ pub fn run_health_check(hermes_home: &PathBuf, profile: Option<&str>) -> Result<
     })
 }
 
+/// Default config.yaml template written by the CONFIG_MISSING auto-fix.
+///
+/// NOTE (ADR-004): there is intentionally NO `platforms.api_server.port` here.
+/// The real backend is `hermes serve --port 0`, which has the OS assign a free
+/// port — hardcoding 8642 (the legacy ADR-002 HTTP API Server port) pointed
+/// users at an endpoint that is never listened on.
+const DEFAULT_CONFIG_TEMPLATE: &str = "\
+# Штурман Configuration
+# The backend is launched via `hermes serve` (ADR-004); its port is assigned
+# by the OS, so no platforms.api_server.port is hardcoded here.
+model:
+  default: ''
+  provider: ''
+";
+
 /// Attempt to auto-fix a specific config health issue
 pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) -> Result<String, String> {
     match code {
@@ -137,17 +152,7 @@ pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) 
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create config directory: {}", e))?;
             }
-            let default_config = "\
-# Штурман Configuration
-model:
-  default: ''
-  provider: ''
-platforms:
-  api_server:
-    host: 127.0.0.1
-    port: 8642
-";
-            std::fs::write(&config_path, default_config)
+            std::fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
                 .map_err(|e| format!("Failed to create config: {}", e))?;
             Ok(format!("Created default config at {}", config_path.display()))
         }
@@ -157,5 +162,40 @@ platforms:
             Ok(format!("Created directory: {}", hermes_home.display()))
         }
         _ => Err(format!("No auto-fix available for issue: {}", code)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ADR-004: the default config must NOT hardcode the legacy 8642 port.
+    // The real backend is `hermes serve --port 0` (OS-assigned); 8642 pointed
+    // at an endpoint that is never listened on and confused users.
+
+    #[test]
+    fn default_config_has_no_legacy_8642_port() {
+        assert!(
+            !DEFAULT_CONFIG_TEMPLATE.contains("8642"),
+            "default config template must not reference the legacy 8642 port"
+        );
+    }
+
+    #[test]
+    fn default_config_has_no_api_server_block() {
+        // platforms.api_server was an ADR-002 concept; hermes serve does not
+        // read it. Check for the actual YAML key (indented, colon) rather than
+        // the bare word, which legitimately appears in this explanatory comment.
+        assert!(
+            !DEFAULT_CONFIG_TEMPLATE.contains("\n  api_server:") &&
+            !DEFAULT_CONFIG_TEMPLATE.contains("\napi_server:"),
+            "default config template must not define an api_server YAML block"
+        );
+    }
+
+    #[test]
+    fn default_config_has_model_block() {
+        // The one thing the backend DOES read from config.yaml is model.default.
+        assert!(DEFAULT_CONFIG_TEMPLATE.contains("model:"));
     }
 }

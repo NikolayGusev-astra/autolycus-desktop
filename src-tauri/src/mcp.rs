@@ -351,3 +351,100 @@ pub fn sync_mcp_env_blocks(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tempdir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steersman-mcp-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ADR-002 §Config.yaml schema: the upstream `mcp_servers:` block is the
+    // single source of truth. Steersman must read/write THERE, not servers.json.
+
+    #[test]
+    fn add_then_list_reads_from_config_yaml() {
+        let dir = tempdir();
+        // Pre-seed an (empty) config.yaml so the writer has somewhere to go.
+        fs::write(dir.join("config.yaml"), "model:\n  default: ''\n").unwrap();
+
+        let input = McpServerInput {
+            name: "email".to_string(),
+            server_type: "stdio".to_string(),
+            url: None,
+            command: Some("mcp-email".to_string()),
+            args: Some(vec![]),
+            env: Some(HashMap::from([("EMAIL_ADDRESS".to_string(), "a@b.com".to_string())])),
+            auth: None,
+        };
+        add_mcp_server(&dir, None, &input).unwrap();
+
+        // The server must be readable back — from config.yaml, not servers.json.
+        let listed = list_mcp_servers(&dir, None);
+        assert_eq!(listed.len(), 1, "expected 1 server, got {:?}", listed);
+        assert_eq!(listed[0].name, "email");
+        assert_eq!(listed[0].command.as_deref(), Some("mcp-email"));
+    }
+
+    #[test]
+    fn add_writes_to_config_yaml_not_servers_json() {
+        let dir = tempdir();
+        fs::write(dir.join("config.yaml"), "model:\n  default: ''\n").unwrap();
+
+        let input = McpServerInput {
+            name: "jira".to_string(),
+            server_type: "stdio".to_string(),
+            url: None,
+            command: Some("mcp-jira".to_string()),
+            args: None,
+            env: None,
+            auth: None,
+        };
+        add_mcp_server(&dir, None, &input).unwrap();
+
+        // config.yaml must now contain the mcp_servers block.
+        let yaml = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(yaml.contains("mcp_servers:"), "config.yaml missing mcp_servers: {}", yaml);
+        assert!(yaml.contains("jira"), "config.yaml missing server name: {}", yaml);
+
+        // servers.json must NOT be created (the legacy storage is retired).
+        assert!(
+            !dir.join(".hermes").join("mcp").join("servers.json").exists(),
+            "servers.json was created — storage must be config.yaml only"
+        );
+    }
+
+    #[test]
+    fn remove_deletes_from_config_yaml() {
+        let dir = tempdir();
+        fs::write(dir.join("config.yaml"), "model:\n  default: ''\n").unwrap();
+        let input = McpServerInput {
+            name: "temp".to_string(),
+            server_type: "stdio".to_string(),
+            url: None,
+            command: Some("x".to_string()),
+            args: None,
+            env: None,
+            auth: None,
+        };
+        add_mcp_server(&dir, None, &input).unwrap();
+        assert_eq!(list_mcp_servers(&dir, None).len(), 1);
+
+        remove_mcp_server(&dir, None, "temp").unwrap();
+        assert!(
+            list_mcp_servers(&dir, None).is_empty(),
+            "server still present after remove"
+        );
+    }
+}
+
