@@ -481,7 +481,16 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 duration_ms: 0,
             })
         }
-        "message.end" | "done" => Some(ChatEvent::Done { session_id: None }),
+        "message.end" | "done" => {
+            // upstream emits session_id in params on message.end; the frontend
+            // pins currentSessionId from it (ChatView.tsx:201-203).
+            let session_id = value
+                .get("params")
+                .and_then(|p| p.get("session_id"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            Some(ChatEvent::Done { session_id })
+        }
         "error" => {
             let msg = value
                 .get("params")
@@ -506,6 +515,45 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
         }
         _ => None,
     }
+}
+
+// ── WebSocket wire-envelope dispatcher (ADR-004) ───────────────────────────
+//
+// The /api/ws JSON-RPC channel sends newline-delimited messages in BOTH
+// directions (tui_gateway/ws.py:11). A streaming event is wrapped as:
+//   {"jsonrpc":"2.0","method":"event","params":{"type":"<event>", ...}}
+// while a JSON-RPC *response* (to session.create / prompt.submit) carries an
+// "id" + "result"/"error" and is NOT a streaming event. This thin dispatcher
+// unwraps the envelope and delegates the params payload to
+// `parse_gateway_event`, which already knows the upstream event vocabulary.
+
+/// Parse one raw WS wire line into a streaming ChatEvent, if it is one.
+///
+/// Returns None for:
+/// - non-JSON / empty lines (heartbeats, partial frames)
+/// - JSON-RPC responses (have `id` + `result`/`error`) — handled by the caller
+/// - envelopes whose `method != "event"`
+/// - events `parse_gateway_event` doesn't recognise
+pub fn parse_ws_message(raw: &str) -> Option<ChatEvent> {
+    let raw = raw.trim();
+    if raw.is_empty() || !raw.starts_with('{') {
+        return None;
+    }
+    let value: Value = serde_json::from_str(raw).ok()?;
+    // A JSON-RPC response carries an "id" — it is not a streaming event.
+    if value.get("id").is_some() {
+        return None;
+    }
+    // Only "event" envelopes carry streaming events.
+    let is_event = value
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(|m| m == "event")
+        .unwrap_or(false);
+    if !is_event {
+        return None;
+    }
+    parse_gateway_event(&value)
 }
 
 // ── Capability detection (ADR-002 §Chat transports) ───────────────────────
@@ -808,6 +856,44 @@ async fn send_via_best_transport(
 
 // ── Unified send message ──────────────────────────────────────────────────
 
+/// Local-mode WebSocket transport (ADR-004, Phase 0).
+///
+/// Builds the WS URL from the spawned gateway's port and reads the auth token
+/// from `HERMES_DASHBOARD_SESSION_TOKEN` (Phase 0: the token is supplied by the
+/// already-running `hermes serve` process; Phase 1 will have Steersman spawn
+/// `hermes serve` itself and generate the token).
+async fn send_via_ws_local(
+    gateway_state: &GatewayState,
+    request: &SendMessageRequest,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    let port = gateway::get_gateway_port(gateway_state, None)
+        .ok_or("Gateway not available (no port)")?;
+    // Token: prefer the one Steersman generated for the spawned process (P1);
+    // fall back to HERMES_DASHBOARD_SESSION_TOKEN env for Phase 0 compatibility.
+    let token = gateway::get_gateway_session_token(gateway_state, None)
+        .or_else(|| {
+            std::env::var("HERMES_DASHBOARD_SESSION_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            "No dashboard session token: gateway not spawned by Steersman, \
+             and HERMES_DASHBOARD_SESSION_TOKEN env is unset."
+                .to_string()
+        })?;
+    // The session token is base64url (secrets.token_urlsafe in upstream),
+    // whose alphabet [A-Za-z0-9_-] needs no percent-encoding in a query string.
+    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
+    crate::ws_transport::send_message_via_ws(
+        &ws_url,
+        request.session_id.as_deref(),
+        &request.text,
+        app_handle,
+    )
+    .await
+}
+
 pub async fn send_message(
     gateway_state: &GatewayState,
     ssh_state: &SshState,
@@ -830,6 +916,19 @@ pub async fn send_message(
                 if !result.success {
                     return Err(result.error.unwrap_or("Failed to start gateway".to_string()));
                 }
+            }
+
+            // ── Transport selection (ADR-004, P1.5) ──────────────────────────
+            // WS /api/ws is now the DEFAULT transport — it is the one the real
+            // Hermes backend (hermes serve) actually exposes. Set
+            // STEERSMAN_TRANSPORT=http to fall back to the legacy HTTP path
+            // (which targets the non-existent /v1/chat/completions endpoint and
+            // is kept only for emergency rollback / comparison).
+            let transport = std::env::var("STEERSMAN_TRANSPORT")
+                .unwrap_or_else(|_| "ws".to_string())
+                .to_ascii_lowercase();
+            if transport != "http" {
+                return send_via_ws_local(gateway_state, &request, app_handle).await;
             }
 
             // Get API URL
@@ -966,5 +1065,115 @@ mod tests {
     #[test]
     fn unknown_policy_returns_none() {
         assert_eq!(autonomy_policy_text(Some("bogus")), None);
+    }
+
+    // ── ADR-004: WebSocket transport — parser tests (TDD) ──────────────────
+    // Fixtures mirror the real events emitted by the upstream tui_gateway
+    // (tui_gateway/server.py:3648-3921) over the /api/ws JSON-RPC channel.
+
+    /// Helper: parse a raw JSON-RPC wire line into a ChatEvent.
+    fn ws_event(raw: &str) -> Option<ChatEvent> {
+        parse_ws_message(raw)
+    }
+
+    // ── parse_ws_message: the wire-envelope dispatcher (full JSON-RPC) ──────
+
+    #[test]
+    fn ws_token_event_from_message_chunk_envelope() {
+        // Real upstream wire format: {"jsonrpc":"2.0","method":"event",
+        //   "params":{"type":"message.chunk","text":"Hi"}}
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.chunk","text":"Hi"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "Hi"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_reasoning_event_from_reasoning_delta() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.delta","text":"thinking..."}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Reasoning { content }) => assert_eq!(content, "thinking..."),
+            other => panic!("expected Reasoning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_tool_start_then_complete() {
+        let start = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","name":"read_file","tool_id":"t1"}}"#,
+        );
+        match start {
+            Some(ChatEvent::ToolStart { name, tool_call_id }) => {
+                assert_eq!(name, "read_file");
+                assert_eq!(tool_call_id, "t1");
+            }
+            other => panic!("expected ToolStart, got {:?}", other),
+        }
+        let complete = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","name":"read_file","tool_id":"t1","output":"42 chars"}}"#,
+        );
+        match complete {
+            Some(ChatEvent::ToolComplete { name, output, .. }) => {
+                assert_eq!(name, "read_file");
+                assert_eq!(output, "42 chars");
+            }
+            other => panic!("expected ToolComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_done_event_carries_session_id() {
+        // upstream message.end emits the session_id in params; the frontend
+        // relies on it to pin currentSessionId (ChatView.tsx:201-203).
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.end","session_id":"desk-123-abc"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Done { session_id }) => {
+                assert_eq!(session_id.as_deref(), Some("desk-123-abc"));
+            }
+            other => panic!("expected Done with session_id, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_error_event_extracts_message() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"error","message":"model overloaded"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Error { message }) => assert_eq!(message, "model overloaded"),
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_status_update_event() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"status.update","text":"thinking"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Status { status }) => assert_eq!(status, "thinking"),
+            other => panic!("expected Status, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_rpc_response_is_not_an_event() {
+        // A JSON-RPC *response* (result/error with an id) is not a streaming
+        // event and must not be misinterpreted as one.
+        let ev = ws_event(r#"{"jsonrpc":"2.0","id":1,"result":{"session_id":"s1"}}"#);
+        assert!(ev.is_none());
+    }
+
+    #[test]
+    fn ws_garbage_line_returns_none() {
+        assert!(ws_event("not json at all").is_none());
+        assert!(ws_event("").is_none());
     }
 }

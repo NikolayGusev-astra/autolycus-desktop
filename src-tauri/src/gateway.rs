@@ -13,8 +13,6 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::config::profile_home;
-
 /// Apply the Windows `CREATE_NO_WINDOW` creation flag to a Command so spawning a
 /// console-subsystem child (python.exe, hermes.exe) does NOT pop up a console
 /// window. On non-Windows this is a no-op. Without it, a Tauri GUI app spawning
@@ -50,6 +48,9 @@ pub struct GatewayProcess {
     pub port: u16,
     pub profile_key: String,
     pub started_at: Instant,
+    /// Dashboard session token (ADR-004 §2). Used to build the WS ?token= URL
+    /// and also injected into the child env as HERMES_DASHBOARD_SESSION_TOKEN.
+    pub session_token: String,
 }
 
 // ── State ─────────────────────────────────────────────────────────────────
@@ -147,22 +148,16 @@ pub fn start_gateway(
         }
     };
 
-    let port = allocate_port(&profile_key);
     let repo_path = find_hermes_repo(&python_path);
 
-    // Build the gateway command (ADR-002). The real Hermes backend exposes
-    // `gateway` as a subcommand of the `hermes` console-script launcher
-    // (hermes.exe / hermes), NOT as a `python -m hermes` module (there is no
-    // top-level `hermes` package — only `hermes_cli`). The gateway also does
-    // NOT accept a `--port` flag; the port is taken from
-    // platforms.api_server.extra.port in config.yaml or the API_SERVER_PORT
-    // env var. So: prefer the launcher if present, else fall back to
-    // `python -m hermes_cli.main gateway`, and pass the port via env.
+    // ── Build `hermes serve` command (ADR-004) ────────────────────────────
+    // The real Hermes backend is launched via `hermes serve --host 127.0.0.1
+    // --port 0`. With --port 0 the OS assigns a free port, printed to stdout
+    // as HERMES_BACKEND_READY port=N. Auth is a session token (ADR-004 §2).
     let hermes_launcher = python_path
         .parent() // bin/ or Scripts/
         .map(|dir| dir.join(if cfg!(windows) { "hermes.exe" } else { "hermes" }));
 
-    // ── Build gateway command (ADR-003: spawn контракт) ───────────────────
     // Windows: prefer pythonw.exe (no console). Fallback: bare python + CREATE_NO_WINDOW.
     #[cfg(windows)]
     let python_for_gateway = {
@@ -172,28 +167,22 @@ pub fn start_gateway(
     #[cfg(not(windows))]
     let python_for_gateway = python_path.clone();
 
+    // serve_args mirrors the desktop invocation (build_serve_args, unit-tested).
+    let serve_args = build_serve_args(profile);
+
     let mut cmd = if let Some(launcher) = hermes_launcher.as_ref().filter(|p| p.exists()) {
         let mut c = Command::new(launcher);
-        c.arg("gateway");
+        for a in &serve_args { c.arg(a); }
         c
     } else {
         // Fallback: invoke the CLI module directly with the interpreter.
         let mut c = Command::new(&python_for_gateway);
-        c.arg("-m").arg("hermes_cli.main").arg("gateway");
+        c.arg("-m").arg("hermes_cli.main");
+        for a in &serve_args { c.arg(a); }
         c
     };
 
-    // Profile: pass via --profile CLI flag (ADR-003: NOT HERMES_PROFILE_HOME env).
-    // The original fathah/hermes-desktop uses the CLI flag to activate the
-    // Hermes Agent profile loader.
-    if let Some(p) = profile {
-        if p != "default" && !p.is_empty() {
-            cmd.arg("--profile").arg(p);
-        }
-    }
-
-    // cwd: set to HERMES_REPO (ADR-003 #14). Gateway and its dependencies
-    // resolve relative paths (config, mcp servers, skills) from cwd.
+    // cwd: set to HERMES_REPO (ADR-003 #14 — still valid in ADR-004).
     if let Some(repo) = &repo_path {
         cmd.current_dir(repo);
     }
@@ -202,53 +191,36 @@ pub fn start_gateway(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // ── Environment (ADR-003: full inheritance + bridge) ──────────────────
-    // The original inherits process.env fully, then adds specific keys on top.
-    // We do NOT call env_clear() — we inherit, then override/augment.
+    // ── Environment (ADR-004 §2: session token, not API_SERVER_*) ─────────
+    // Generate a random dashboard session token and inject it into the child
+    // env. The same token is later used as the WS ?token= value.
+    let session_token = generate_session_token();
     if let Some(repo) = &repo_path {
         cmd.env("HERMES_PYTHON_SRC_ROOT", repo);
     }
     cmd.env("HERMES_HOME", hermes_home);
     cmd.env("PYTHONUNBUFFERED", "1");
-    // API_SERVER_ENABLED: enables the HTTP API server in the gateway (ADR-003 #3).
-    // Without this, the gateway may start but not expose /v1/chat/completions.
-    cmd.env("API_SERVER_ENABLED", "true");
-    // The gateway reads its listen port from this env var (falls back to the
-    // value in config.yaml, default 8642). We set it explicitly so the port
-    // we allocated matches the one we health-check.
-    cmd.env("API_SERVER_PORT", port.to_string());
+    cmd.env("HERMES_DASHBOARD_SESSION_TOKEN", &session_token);
 
-    // ── .env bridge (ADR-003 #4): inject ALL .env keys into gateway env ───
-    // The original bridges every key from readEnv(profile) so the gateway's
-    // os.getenv sees provider keys, API_SERVER_KEY, etc. even if it doesn't
-    // self-load .env. We read from profile_home, then hermes_home as fallback.
+    // ── .env bridge (ADR-003 #4 — still valid): inject ALL .env keys ──────
     let env_map = crate::config::read_env(hermes_home, profile);
     for (key, value) in &env_map {
-        // Don't override keys we already set explicitly above.
-        if key != "HERMES_HOME" && key != "PYTHONUNBUFFERED" && key != "API_SERVER_PORT" {
+        // Don't override keys we set explicitly above.
+        if key != "HERMES_HOME"
+            && key != "PYTHONUNBUFFERED"
+            && key != "HERMES_DASHBOARD_SESSION_TOKEN"
+        {
             cmd.env(key, value);
-        }
-    }
-    // Bridge API_SERVER_KEY explicitly so the gateway's auth check finds it
-    // regardless of where it was configured (config.yaml, .env, or keyring).
-    let api_server_key = crate::config::get_api_server_key(hermes_home, profile);
-    if let Some(key) = &api_server_key {
-        if !key.is_empty() {
-            cmd.env("API_SERVER_KEY", key);
         }
     }
 
     // ── Proxy (ADR-003: env chain, not config.yaml keys) ──────────────────
-    // Upstream Hermes Agent reads HTTPS_PROXY → HTTP_PROXY → ALL_PROXY.
-    // We resolve from all sources and inject into the gateway child env so
-    // its HTTP client (httpx/requests) routes through the proxy.
     let proxy_url = crate::config::resolve_effective_proxy(hermes_home, profile);
 
     if !proxy_url.is_empty() {
         cmd.env("HTTP_PROXY", &proxy_url);
         cmd.env("HTTPS_PROXY", &proxy_url);
         cmd.env("ALL_PROXY", &proxy_url);
-        // Lowercase variants — some tools (curl, pip, httpx) read these.
         cmd.env("http_proxy", &proxy_url);
         cmd.env("https_proxy", &proxy_url);
         cmd.env("all_proxy", &proxy_url);
@@ -275,18 +247,25 @@ pub fn start_gateway(
         }
     };
 
-    // Drain stdout/stderr in the background so the child's pipes never fill and
-    // block the process. We no longer parse stdout for a "READY" string — the
-    // real Hermes gateway logs to stdout in formats that vary by version, and
-    // blocking on stdout.lines() hangs until the pipe closes. Instead we wait
-    // for readiness by polling the HTTP /health endpoint (ADR-002).
+    // Drain stdout/stderr in the background. The stdout thread ALSO parses the
+    // HERMES_BACKEND_READY port=N line (ADR-004 §1) and stores it in a shared
+    // cell so the main thread can pick up the OS-assigned port.
+    let port_cell: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let profile_key_clone = profile_key.clone();
+    let port_cell_stdout = Arc::clone(&port_cell);
     thread::spawn(move || {
         let reader = std::io::BufReader::new(stdout);
         for line in reader.lines().flatten() {
             eprintln!("[gateway:{}] {}", profile_key_clone, line);
+            // Capture the OS-assigned port the first time we see the ready line.
+            if let Some(p) = parse_ready_port(&line) {
+                let mut cell = port_cell_stdout.lock().unwrap_or_else(|e| e.into_inner());
+                if cell.is_none() {
+                    *cell = Some(p);
+                }
+            }
         }
     });
     let profile_key_clone2 = profile_key.clone();
@@ -297,39 +276,49 @@ pub fn start_gateway(
         }
     });
 
-    // Wait for the gateway HTTP server to become ready (ADR-003 #8).
-    // TCP accept ≠ HTTP ready — the listener can be bound while Python is
-    // still importing modules. The original polls GET /health for 200.
-    // We do a raw HTTP GET via std::net (no extra crate dependency) — send
-    // a minimal HTTP/1.0 request, check for "200" in the response status line.
+    // ── Readiness (ADR-004 §3): wait for the backend to print its port, then
+    // confirm a WS handshake completes (gateway.ready event). The legacy TCP
+    // /health poll is gone — hermes serve has no /health on the WS server.
     let mut ready = false;
+    let mut port: u16 = 0;
     let deadline = Instant::now() + Duration::from_secs(30);
-    let addr_str = format!("127.0.0.1:{}", port);
     while Instant::now() < deadline {
         // Bail early if the child already exited.
-        match child.try_wait() {
-            Ok(Some(_status)) => break, // process died
-            _ => {}
+        if let Ok(Some(_status)) = child.try_wait() {
+            break;
         }
-        // Probe /health via raw TCP + HTTP/1.0 GET (the real readiness signal).
-        if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
-            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
-                use std::io::{Read, Write};
-                let _ = stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
-                let mut buf = [0u8; 64];
-                if let Ok(n) = stream.read(&mut buf) {
-                    let resp = String::from_utf8_lossy(&buf[..n]);
-                    // Check for "HTTP/1.0 200" or "HTTP/1.1 200" in status line
-                    if resp.starts_with("HTTP/") && resp.contains(" 200 ") {
-                        ready = true;
-                        break;
-                    }
-                }
+        // Has the stdout thread captured the port yet?
+        let captured = {
+            let cell = port_cell.lock().unwrap_or_else(|e| e.into_inner());
+            *cell
+        };
+        if let Some(p) = captured {
+            port = p;
+            // Probe readiness with a WS handshake. spawn a one-shot tokio task
+            // (start_gateway itself is sync, so we use a fresh runtime here).
+            let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, session_token);
+            let ws_ok = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::try_current()
+                    .ok()
+                    .map(|h| h.block_on(check_ws_ready(&ws_url)))
+                    .unwrap_or(false)
+            });
+            if ws_ok {
+                ready = true;
+                break;
             }
         }
         thread::sleep(Duration::from_millis(500));
     }
-    eprintln!("[gateway:{}] ready={} (health poll)", profile_key, ready);
+    eprintln!(
+        "[gateway:{}] ready={} port={} (WS handshake)",
+        profile_key, ready, port
+    );
+
+    // If we never captured a port, fall back to 0 (caller treats as not-ready).
+    if port == 0 {
+        ready = false;
+    }
 
     // Store process
     {
@@ -341,6 +330,7 @@ pub fn start_gateway(
                 port,
                 profile_key: profile_key.clone(),
                 started_at: Instant::now(),
+                session_token: session_token.clone(),
             },
         );
     }
@@ -359,8 +349,8 @@ pub fn start_gateway(
             None
         } else {
             Some(format!(
-                "Gateway process started but did not become reachable on port {} within 30s. \
-                 Check that Hermes Agent is installed and config.yaml has platforms.api_server.enabled.",
+                "Backend process started but did not become ready via WS handshake within 30s. \
+                 Check that Hermes Agent is installed and `hermes serve` runs. Captured port: {}.",
                 port
             ))
         },
@@ -439,6 +429,14 @@ pub fn get_gateway_port(state: &GatewayState, profile: Option<&str>) -> Option<u
     processes.get(&profile_key).map(|gw| gw.port)
 }
 
+/// Return the dashboard session token for the spawned gateway (ADR-004 §2).
+/// Used to build the WS ?token= URL. Falls back to None if no process is held.
+pub fn get_gateway_session_token(state: &GatewayState, profile: Option<&str>) -> Option<String> {
+    let profile_key = profile.unwrap_or("default").to_string();
+    let processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+    processes.get(&profile_key).map(|gw| gw.session_token.clone())
+}
+
 // ── Health check ──────────────────────────────────────────────────────────
 
 pub async fn check_gateway_health(port: u16) -> bool {
@@ -474,5 +472,191 @@ pub async fn is_api_server_ready(state: &GatewayState, profile: Option<&str>) ->
         check_gateway_health(port).await
     } else {
         false
+    }
+}
+
+// ADR-004: hermes serve spawn helpers (P1)
+//
+// The real Hermes backend is launched via: hermes serve --host 127.0.0.1 --port 0
+// With --port 0 the OS assigns a free port, which the backend prints to stdout
+// as HERMES_BACKEND_READY port=N. Auth between Steersman and the backend is a
+// random session token (secrets.token_urlsafe equivalent) passed to the child
+// via HERMES_DASHBOARD_SESSION_TOKEN and echoed back in the WS URL ?token=.
+// These helpers keep the spawn logic unit-testable by extracting the pure
+// pieces (arg construction, port parsing, token generation).
+
+// Build the argv for hermes serve, in the shape the upstream CLI expects.
+// profile None or "default" means no --profile flag (launch profile).
+// Otherwise --profile <name> is inserted before the subcommand, mirroring
+// the desktop invocation: [--profile, p, serve, --host, 127.0.0.1, --port, 0].
+pub fn build_serve_args(profile: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(p) = profile {
+        if p != "default" && !p.is_empty() {
+            args.push("--profile".to_string());
+            args.push(p.to_string());
+        }
+    }
+    args.push("serve".to_string());
+    args.push("--host".to_string());
+    args.push("127.0.0.1".to_string());
+    args.push("--port".to_string());
+    args.push("0".to_string());
+    args
+}
+
+// Parse the OS-assigned port out of a backend stdout line.
+// The backend emits HERMES_BACKEND_READY port=N once it is listening.
+// Returns None for lines that do not match (caller keeps scanning stdout).
+pub fn parse_ready_port(line: &str) -> Option<u16> {
+    // Tolerate surrounding whitespace / ANSI / log prefixes.
+    let idx = line.find("HERMES_BACKEND_READY")?;
+    let tail = &line[idx..];
+    let port_idx = tail.find("port=")?;
+    let after = &tail[port_idx + "port=".len()..];
+    // Take leading digits only.
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u16>().ok()
+}
+
+// Generate a fresh dashboard session token.
+// Mirrors upstream secrets.token_urlsafe(32): 32 random bytes encoded
+// base64url (URL-safe, no padding). Used both as the WS ?token= value and
+// as the HERMES_DASHBOARD_SESSION_TOKEN env injected into the child.
+pub fn generate_session_token() -> String {
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    // getrandom is pulled in transitively by uuid; use its fallback-safe path.
+    fill_random(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+// Best-effort cryptographically-secure random fill (getrandom via uuid dep).
+fn fill_random(buf: &mut [u8]) {
+    // uuid::Uuid::new_v4() internally calls getrandom(); reuse it to fill buf.
+    let mut offset = 0;
+    while offset < buf.len() {
+        let u = uuid::Uuid::new_v4();
+        let bytes = u.as_bytes();
+        let take = (buf.len() - offset).min(bytes.len());
+        buf[offset..offset + take].copy_from_slice(&bytes[..take]);
+        offset += take;
+    }
+}
+
+// One-shot WS readiness probe (ADR-004 §3). Connects, waits up to 5s for the
+// gateway.ready event, returns true on success. Used by start_gateway in place
+// of the legacy TCP /health poll. The connection is closed immediately after.
+async fn check_ws_ready(ws_url: &str) -> bool {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
+        Ok(pair) => pair,
+        Err(_) => return false,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let is_ready = v.get("method").and_then(|m| m.as_str()) == Some("event")
+                        && v.get("params")
+                            .and_then(|p| p.get("type"))
+                            .and_then(|t| t.as_str())
+                            == Some("gateway.ready");
+                    if is_ready {
+                        let _ = ws.close(None).await;
+                        return true;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    let _ = ws.close(None).await;
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // build_serve_args
+
+    #[test]
+    fn serve_args_default_profile_no_profile_flag() {
+        let args = build_serve_args(None);
+        assert_eq!(args, vec!["serve", "--host", "127.0.0.1", "--port", "0"]);
+    }
+
+    #[test]
+    fn serve_args_named_profile_inserts_profile_flag() {
+        let args = build_serve_args(Some("architect"));
+        assert_eq!(
+            args,
+            vec!["--profile", "architect", "serve", "--host", "127.0.0.1", "--port", "0"]
+        );
+    }
+
+    #[test]
+    fn serve_args_default_string_treated_as_no_profile() {
+        // "default" is the launch profile; must NOT emit --profile default.
+        let args = build_serve_args(Some("default"));
+        assert_eq!(args, vec!["serve", "--host", "127.0.0.1", "--port", "0"]);
+        assert!(!args.iter().any(|a| a == "--profile"));
+    }
+
+    // parse_ready_port
+
+    #[test]
+    fn parse_ready_port_extracts_port() {
+        assert_eq!(parse_ready_port("HERMES_BACKEND_READY port=9420"), Some(9420));
+    }
+
+    #[test]
+    fn parse_ready_port_with_log_prefix() {
+        assert_eq!(
+            parse_ready_port("[2026-07-15 20:00:01] HERMES_BACKEND_READY port=64724"),
+            Some(64724)
+        );
+    }
+
+    #[test]
+    fn parse_ready_port_rejects_non_matching_lines() {
+        assert_eq!(parse_ready_port("Starting hermes..."), None);
+        assert_eq!(parse_ready_port("listening on 8642"), None);
+        assert_eq!(parse_ready_port(""), None);
+    }
+
+    #[test]
+    fn parse_ready_port_invalid_number_returns_none() {
+        // port=99999 overflows u16.
+        assert_eq!(parse_ready_port("HERMES_BACKEND_READY port=99999"), None);
+    }
+
+    // generate_session_token
+
+    #[test]
+    fn session_token_is_base64url_no_pad_43_chars() {
+        // 32 bytes -> base64url no-pad -> exactly 43 chars, alphabet [A-Za-z0-9_-].
+        let t = generate_session_token();
+        assert_eq!(t.len(), 43);
+        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn session_token_is_unique() {
+        let first = generate_session_token();
+        let second = generate_session_token();
+        assert!(first != second);
+    }
+
+    #[test]
+    fn session_token_no_padding_char() {
+        let t = generate_session_token();
+        // base64url-no-pad must never contain the padding char.
+        assert_eq!(t.contains('='), false);
     }
 }
