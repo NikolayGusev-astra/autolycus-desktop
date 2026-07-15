@@ -30,6 +30,7 @@ mod stt;
 mod telegram;
 mod terminal;
 mod validation;
+mod ws_transport;
 
 use std::path::PathBuf;
 
@@ -2275,6 +2276,17 @@ async fn delete_conn_profile_cmd(state: State<'_, AppState>, id: i64, profile: O
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize structured logging (ADR-004 P3.4). RUST_LOG controls the
+    // filter (default: info for steersman, warn for deps). Falls back to
+    // stderr; safe to call before the Tauri runtime starts.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("steersman_desktop_lib=info,warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     tauri::Builder::default()
         // Single-instance: a second launch focuses the existing window instead
         // of starting a duplicate process (which would also fail to register

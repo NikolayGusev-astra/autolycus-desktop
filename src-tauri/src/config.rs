@@ -1098,6 +1098,113 @@ mod tests {
             assert!(n > 0, "expected sessions in the resolved home");
         }
     }
+
+    // ── T3: YAML round-trip editor (P-AUDIT #19) ────────────────────────────
+
+    use std::fs;
+    use std::path::Path;
+
+    /// Write a fixture config.yaml to a temp hermes_home for round-trip tests.
+    fn write_fixture(home: &Path, yaml: &str) {
+        fs::write(home.join("config.yaml"), yaml).unwrap();
+    }
+
+    #[test]
+    fn yaml_roundtrip_updates_top_level_block() {
+        let dir = tempdir();
+        write_fixture(&dir, "model:\n  default: old-model\n  provider: old\n");
+        set_yaml_block_scalars(&dir, None, "model", &[("default", "new-model")]).unwrap();
+        let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(updated.contains("new-model"), "updated content: {}", updated);
+        assert!(!updated.contains("old-model"));
+    }
+
+    #[test]
+    fn yaml_roundtrip_updates_nested_dotted_path() {
+        // The real callers use dotted paths like "mcp_servers.email.env".
+        let dir = tempdir();
+        write_fixture(
+            &dir,
+            "mcp_servers:\n  email:\n    command: foo\n    env:\n      EMAIL_ADDRESS: old@example.com\n",
+        );
+        // Note: set_yaml_block_scalars treats block as a flat key search within
+        // the located block; nested dotted paths exercise the line-walker.
+        set_yaml_block_scalars(&dir, None, "mcp_servers.email.env", &[("EMAIL_ADDRESS", "new@example.com")]).unwrap();
+        let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(
+            updated.contains("new@example.com"),
+            "nested env update failed. content: {}",
+            updated
+        );
+    }
+
+    #[test]
+    fn yaml_roundtrip_preserves_unrelated_keys() {
+        let dir = tempdir();
+        write_fixture(
+            &dir,
+            "model:\n  default: m1\n  provider: p1\nagent:\n  max_turns: 60\n",
+        );
+        set_yaml_block_scalars(&dir, None, "model", &[("default", "m2")]).unwrap();
+        let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        // Unrelated agent block must survive.
+        assert!(updated.contains("max_turns: 60"), "unrelated key dropped: {}", updated);
+        // Untouched sibling key in the same block survives.
+        assert!(updated.contains("provider: p1"), "sibling key dropped: {}", updated);
+    }
+
+    #[test]
+    fn yaml_roundtrip_preserves_comments() {
+        // The audit flagged comment loss as a key fragility of the line-based
+        // editor (P-AUDIT #19). A safe round-trip must keep user comments.
+        let dir = tempdir();
+        write_fixture(
+            &dir,
+            "# user comment: do not delete\nmodel:\n  default: m1\n  provider: p1\n",
+        );
+        set_yaml_block_scalars(&dir, None, "model", &[("default", "m2")]).unwrap();
+        let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(
+            updated.contains("# user comment: do not delete"),
+            "comment was dropped by round-trip. content: {}",
+            updated
+        );
+    }
+
+    #[test]
+    fn yaml_roundtrip_updates_correct_instance_of_repeated_key() {
+        // Fragility: when the same key name appears at multiple nesting levels
+        // (e.g. `env:` under two different mcp_servers), the line-walker must
+        // update only the targeted block, not all matches.
+        let dir = tempdir();
+        write_fixture(
+            &dir,
+            "mcp_servers:\n  email:\n    command: x\n    env:\n      KEY: email-val\n  jira:\n    command: y\n    env:\n      KEY: jira-val\n",
+        );
+        set_yaml_block_scalars(&dir, None, "mcp_servers.email.env", &[("KEY", "updated-email")]).unwrap();
+        let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(updated.contains("updated-email"), "target not updated: {}", updated);
+        // The jira env must be untouched.
+        assert!(
+            updated.contains("jira-val"),
+            "wrong block was modified (jira clobbered). content: {}",
+            updated
+        );
+    }
+
+    /// Minimal tempdir helper (avoids pulling in the tempfile crate).
+    fn tempdir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steersman-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 }
 
 // ── Config Health Check ───────────────────────────────────────────────────

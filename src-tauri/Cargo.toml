@@ -27,6 +27,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls", "socks"] }
 futures = "0.3"
+# ADR-004: WebSocket client for the /api/ws JSON-RPC transport. rustls-tls
+# matches the reqwest TLS stack (no native-tls/OpenSSL split).
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# ADR-004 P3.4: structured logging. Replaces ad-hoc eprintln! in the WS path
+# (ws_transport.rs, gateway.rs) with level-filtered, field-carrying spans.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ssh2 = "0.9"
 yaml-rust2 = "0.8"
 uuid = { version = "1", features = ["v4"] }
