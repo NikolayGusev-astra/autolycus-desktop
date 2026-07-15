@@ -30,6 +30,7 @@ mod stt;
 mod telegram;
 mod terminal;
 mod validation;
+mod ws_transport;
 
 use std::path::PathBuf;
 
