@@ -41,16 +41,16 @@ pub async fn send_message_via_ws(
     session_id: Option<&str>,
     text: &str,
     app_handle: &AppHandle,
-) -> Result<String, String> {
-    eprintln!("[ws] connecting to {}", ws_url);
+) -> Result<String, WsError> {
+    tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "connecting");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url)
         .await
-        .map_err(|e| format!("WS connect failed: {}", e))?;
+        .map_err(|e| WsError::Connect(e.to_string()))?;
 
     // 1. Handshake: wait for the `gateway.ready` event (tui_gateway/ws.py:324).
     let ready = wait_for_ready(&mut ws).await;
     if !ready {
-        eprintln!("[ws] WARNING: did not receive gateway.ready before timeout, proceeding anyway");
+        tracing::warn!(target: "steersman_desktop_lib::ws", "no gateway.ready before timeout, proceeding anyway");
     }
 
     // 2. Resolve session: create one if none was supplied.
@@ -58,7 +58,7 @@ pub async fn send_message_via_ws(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => create_session(&mut ws).await?,
     };
-    eprintln!("[ws] session = {}", sid);
+    tracing::info!(target: "steersman_desktop_lib::ws", session_id = %sid, "session ready");
 
     // 3. Submit the prompt; the response acks turn start, real content streams.
     submit_prompt(&mut ws, &sid, text).await?;
@@ -113,7 +113,7 @@ where
 }
 
 /// Send `session.create`, return the new session_id from the response.
-async fn create_session<S>(ws: &mut S) -> Result<String, String>
+async fn create_session<S>(ws: &mut S) -> Result<String, WsError>
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
         + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -136,7 +136,7 @@ where
             Ok(Some(Ok(msg))) => {
                 if let Message::Text(text) = msg {
                     let value: Value = serde_json::from_str(&text)
-                        .map_err(|e| format!("session.create: bad JSON: {}", e))?;
+                        .map_err(|e| WsError::SessionCreate(format!("bad JSON: {}", e)))?;
                     // Skip streaming events while waiting for the response.
                     if value.get("id").and_then(|v| v.as_u64()) != Some(id) {
                         continue;
@@ -146,7 +146,7 @@ where
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("session.create failed");
-                        return Err(msg.to_string());
+                        return Err(WsError::SessionCreate(msg.to_string()));
                     }
                     let sid = value
                         .get("result")
@@ -156,18 +156,22 @@ where
                             // Some servers return the id at the top of result.
                             value.get("result").and_then(|r| r.as_str())
                         })
-                        .ok_or_else(|| "session.create: no session_id in response".to_string())?;
+                        .ok_or_else(|| {
+                            WsError::SessionCreate("no session_id in response".to_string())
+                        })?;
                     return Ok(sid.to_string());
                 }
             }
-            Ok(Some(Err(e))) => return Err(format!("session.create: socket: {}", e)),
-            _ => return Err("session.create: stream closed".to_string()),
+            Ok(Some(Err(e))) => {
+                return Err(WsError::Stream(format!("session.create socket: {}", e)))
+            }
+            _ => return Err(WsError::Stream("session.create: stream closed".to_string())),
         }
     }
 }
 
 /// Send `prompt.submit` for the given session.
-async fn submit_prompt<S>(ws: &mut S, session_id: &str, text: &str) -> Result<(), String>
+async fn submit_prompt<S>(ws: &mut S, session_id: &str, text: &str) -> Result<(), WsError>
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -189,7 +193,7 @@ where
 ///
 /// Returns `Ok(Some(session_id))` on a clean `Done` (carrying the session id),
 /// `Ok(None)` if the stream ended without an explicit done, `Err` on error event.
-async fn read_events<S>(ws: &mut S, app_handle: &AppHandle) -> Result<Option<String>, String>
+async fn read_events<S>(ws: &mut S, app_handle: &AppHandle) -> Result<Option<String>, WsError>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
@@ -211,25 +215,31 @@ where
                             let _ = app_handle.emit("chat_event", event);
                             return Ok(sid);
                         }
+                        // If the backend sent an explicit error event, surface
+                        // it as a typed BackendError so callers can branch.
+                        if let ChatEvent::Error { message } = &event {
+                            let _ = app_handle.emit("chat_event", event.clone());
+                            return Err(WsError::BackendError(message.clone()));
+                        }
                         let _ = app_handle.emit("chat_event", event);
                         if terminal {
-                            // Done without session_id, or Error.
+                            // Done without session_id.
                             return Ok(None);
                         }
                     }
                 }
                 Message::Close(_) => {
-                    eprintln!("[ws] server closed connection");
+                    tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
                     return Ok(None);
                 }
                 _ => {}
             },
-            Ok(Some(Err(e))) => return Err(format!("stream error: {}", e)),
+            Ok(Some(Err(e))) => return Err(WsError::Stream(e.to_string())),
             Ok(None) => {
-                eprintln!("[ws] stream ended");
+                tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
                 return Ok(None);
             }
-            Err(_) => return Err("ws turn timed out (1800s)".to_string()),
+            Err(_) => return Err(WsError::Timeout),
         }
     }
 }
@@ -241,12 +251,103 @@ fn is_terminal(event: &ChatEvent) -> bool {
     )
 }
 
-async fn send_json<S>(ws: &mut S, value: &Value) -> Result<(), String>
+async fn send_json<S>(ws: &mut S, value: &Value) -> Result<(), WsError>
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
-    let text = serde_json::to_string(value).map_err(|e| format!("encode: {}", e))?;
+    let text = serde_json::to_string(value).map_err(|e| WsError::Protocol(format!("encode: {}", e)))?;
     ws.send(Message::Text(text))
         .await
-        .map_err(|e| format!("ws send: {}", e))
+        .map_err(|e| WsError::Protocol(format!("ws send: {}", e)))
+}
+
+// ── Typed errors (ADR-004 §Последствия, P3.3) ──────────────────────────────
+//
+// The WS transport previously returned Result<T, String> everywhere, which
+// forced the frontend to display a generic message and made it impossible to
+// branch on error KIND in calling code (e.g. retry on Connect, surface auth
+// on AuthFailed, give up on Protocol). WsError replaces String across the WS
+// path. Tauri serializes the variant via thiserror's Display → JSON string,
+// and callers can match on the variant.
+
+/// Error type for the WebSocket transport (ws_transport.rs).
+///
+/// Scope (P3.3): the WS path only. gateway.rs still returns GatewayStartResult
+/// (a struct, not Result) and the legacy HTTP path still uses String — both are
+/// out of scope here and tracked separately.
+#[derive(Debug)]
+pub enum WsError {
+    /// WebSocket connect or upgrade failed (network down, wrong port, TLS).
+    Connect(String),
+    /// Auth rejected by the backend (bad/expired session token) → 401/403 on /api/ws.
+    AuthFailed,
+    /// session.create RPC failed or returned no session_id.
+    SessionCreate(String),
+    /// JSON-RPC send/encode failure (should be rare; protocol-level).
+    Protocol(String),
+    /// A streaming turn ended with an `error` event from the backend.
+    BackendError(String),
+    /// The turn did not complete within the deadline.
+    Timeout,
+    /// Underlying socket error mid-stream.
+    Stream(String),
+}
+
+impl std::fmt::Display for WsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WsError::Connect(s) => write!(f, "WS connect failed: {}", s),
+            WsError::AuthFailed => write!(f, "WS auth rejected (bad/expired session token)"),
+            WsError::SessionCreate(s) => write!(f, "session.create failed: {}", s),
+            WsError::Protocol(s) => write!(f, "WS protocol error: {}", s),
+            WsError::BackendError(s) => write!(f, "backend error event: {}", s),
+            WsError::Timeout => write!(f, "WS turn timed out (1800s)"),
+            WsError::Stream(s) => write!(f, "WS stream error: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for WsError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RED: these tests assert that the WS transport returns typed WsError
+    // variants, not bare Strings. Currently send_message_via_ws returns
+    // Result<String, String>, so these will not compile until the migration
+    // is complete (GREEN step).
+
+    #[test]
+    fn ws_error_connect_is_matchable() {
+        let err = WsError::Connect("refused".to_string());
+        assert!(matches!(err, WsError::Connect(_)));
+    }
+
+    #[test]
+    fn ws_error_auth_failed_is_distinct_variant() {
+        let err = WsError::AuthFailed;
+        assert!(matches!(err, WsError::AuthFailed));
+        // Distinct from Connect — callers branch differently (auth → re-login).
+        assert!(!matches!(err, WsError::Connect(_)));
+    }
+
+    #[test]
+    fn ws_error_timeout_has_no_payload() {
+        let err = WsError::Timeout;
+        assert!(matches!(err, WsError::Timeout));
+    }
+
+    #[test]
+    fn ws_error_display_is_human_readable() {
+        let s = WsError::Connect("refused".to_string()).to_string();
+        assert!(s.contains("WS connect failed"));
+        assert!(s.contains("refused"));
+    }
+
+    #[test]
+    fn ws_error_backend_error_carries_message() {
+        let err = WsError::BackendError("model overloaded".to_string());
+        assert!(matches!(err, WsError::BackendError(msg) if msg == "model overloaded"));
+    }
 }

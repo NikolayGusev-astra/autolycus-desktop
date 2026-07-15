@@ -2,7 +2,6 @@
 // Chat streaming: sendMessage with SSE, API fallback, session management
 // Ported from fathah/hermes-desktop src/main/hermes.ts (chat part)
 
-use std::io::BufRead;
 use std::path::PathBuf;
 
 use futures::StreamExt;
@@ -832,6 +831,9 @@ async fn send_via_ws_local(
     // The session token is base64url (secrets.token_urlsafe in upstream),
     // whose alphabet [A-Za-z0-9_-] needs no percent-encoding in a query string.
     let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
+    // send_message_via_ws returns Result<_, WsError> (typed); convert to String
+    // at the Tauri-command boundary. Full Result<_,String> -> typed migration
+    // across chat.rs is out of P3.3 scope (only the WS path is typed here).
     crate::ws_transport::send_message_via_ws(
         &ws_url,
         request.session_id.as_deref(),
@@ -839,6 +841,7 @@ async fn send_via_ws_local(
         app_handle,
     )
     .await
+    .map_err(|e| e.to_string())
 }
 
 pub async fn send_message(

@@ -224,9 +224,9 @@ pub fn start_gateway(
         cmd.env("http_proxy", &proxy_url);
         cmd.env("https_proxy", &proxy_url);
         cmd.env("all_proxy", &proxy_url);
-        eprintln!("[gateway] proxy enabled: {}", proxy_url);
+        tracing::info!(target: "steersman_desktop_lib::gateway", proxy = %proxy_url, "proxy enabled");
     } else {
-        eprintln!("[gateway] no proxy detected (direct or TUN mode)");
+        tracing::info!(target: "steersman_desktop_lib::gateway", "no proxy detected (direct or TUN mode)");
     }
 
     // Windows: suppress the console window that would otherwise pop up and
@@ -310,9 +310,10 @@ pub fn start_gateway(
         }
         thread::sleep(Duration::from_millis(500));
     }
-    eprintln!(
-        "[gateway:{}] ready={} port={} (WS handshake)",
-        profile_key, ready, port
+    tracing::info!(
+        target: "steersman_desktop_lib::gateway",
+        profile = %profile_key, ready, port,
+        "WS handshake complete"
     );
 
     // If we never captured a port, fall back to 0 (caller treats as not-ready).
