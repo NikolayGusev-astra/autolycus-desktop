@@ -2,10 +2,8 @@
 // Chat streaming: sendMessage with SSE, API fallback, session management
 // Ported from fathah/hermes-desktop src/main/hermes.ts (chat part)
 
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::ChildStdout;
-use std::thread;
 
 use futures::StreamExt;
 use reqwest::Client;
@@ -350,61 +348,10 @@ pub async fn send_message_via_api(
 }
 
 // ── TUI Gateway chat (local mode) ─────────────────────────────────────────
-
-pub fn send_message_via_gateway(
-    gateway_stdout: BufReader<ChildStdout>,
-    _message: &str,
-    session_id: Option<String>,
-    app_handle: &AppHandle,
-) -> Result<(), String> {
-    // Parse gateway stdout for events
-    let handle = app_handle.clone();
-
-    thread::spawn(move || {
-        let mut parser = SseParser::new();
-        let mut buffer = String::new();
-
-        for line in gateway_stdout.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-
-            // Gateway events are newline-delimited JSON
-            if line.trim().starts_with('{') {
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    // Parse as gateway event
-                    if let Some(event) = parse_gateway_event(&value) {
-                        let _ = handle.emit("chat_event", event);
-                    }
-                }
-            } else if line.contains("data:") {
-                // SSE format
-                buffer.push_str(&line);
-                buffer.push('\n');
-
-                if line.trim().is_empty() || line == "data: [DONE]" {
-                    if let Some((_, data)) = SseParser::parse_block(&buffer) {
-                        if let Some(event) = parser.process_data(&data) {
-                            let _ = handle.emit("chat_event", event);
-                        }
-                    }
-                    buffer.clear();
-                }
-            }
-        }
-
-        // Emit done
-        let _ = handle.emit(
-            "chat_event",
-            ChatEvent::Done {
-                session_id,
-            },
-        );
-    });
-
-    Ok(())
-}
+// NOTE (ADR-004, P2.3): the old send_message_via_gateway() WS-over-stdio stub
+// was dead code (0 callers) and is now superseded by ws_transport.rs. Removed.
+// parse_gateway_event() below is retained — it is the core of parse_ws_message
+// (the live WS wire-envelope dispatcher).
 
 fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
     let event_type = value

@@ -122,5 +122,34 @@
 - **P3** — принципиально новая работа (Remote/SSH + thiserror + tracing),
   не описанная в исходных 21.
 
+---
+
+## P2 execution notes (2026-07-15, post-execution corrections)
+
+При выполнении P2 несколько вердиктов P-AUDIT потребовали уточнения на
+основе реальной проверки вызовов (grep callers, не только определений):
+
+### Уточнённые вердикты
+
+| Компонент | Вердикт P-AUDIT | Уточнённый вердикт | Причина |
+|---|---|---|---|
+| `config_health.rs` | VALID (удалить) | **LIVE (не удалять)** | Модуль зарегистрирован как Tauri-команда `config_health_check_cmd` (`lib.rs:2516`) и вызывается фронтендом. Удаление сломает UI. Только порт 8642 → FIXME. |
+| `send_message_via_gateway` (old WS stub) | VALID dead | **CONFIRMED dead — удалён в P2.3** | grep: 0 callers. Удалено вместе с неиспользуемыми импортами (BufReader, ChildStdout, thread). |
+| `tcp_server.py` | VALID dead | **CONFIRMED dead — удалён в P2.3** | 0 ссылок из Rust. Файл и пустой python/ каталог удалены. |
+| HTTP dead code (5 функций) | VALID (P2.1) | **BLOCKED on P3** | `send_via_best_transport` вызывается из **Remote и SSH** веток `send_message` (`chat.rs:965,1000`), не только Local-флага. Нельзя удалить, пока Remote/SSH не мигрированы на WS (P3.2). |
+
+### Итог P2 (реальный объём)
+- **Удалено:** `send_message_via_gateway` (~55 строк) + `tcp_server.py` (7959 bytes) + 3 неиспользуемых импорта.
+- **Отложено на P3:** HTTP dead code (5 функций, ~600 строк) — блокирован Remote/SSH-зависимостью; `config_health` — блокирован frontend-командой.
+- **MCP servers.json→config.yaml, line-based YAML editor** — не тронуты (P2.3 scope сужен до safe deletions; MCP-правки требуют отдельной аккуратной работы с config.yaml пользователя).
+
+### Урок
+P-AUDIT помечал компоненты как "VALID dead" на основе отсутствия вызовов
+в Rust-коде, но не проверял (а) Tauri-команды, доступные фронтенду, и
+(б) вызовы из других transport-веток. Грести "dead code" по этому списку
+без проверки callers-by-grep привело бы к сломанному UI. Поэтому каждая
+P2-чистка сопровождалась `grep -rn "<fn>" src/ | grep -v "fn <fn>"`
+перед удалением.
+
 Исходный P0-промпт (гнавший 6 из 21) был основан на устаревшем аудите и
 не знал о WS-миграции. Этот отчёт даёт P1/P2/P3 точный, проверенный список.
