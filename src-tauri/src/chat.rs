@@ -4,13 +4,11 @@
 
 use std::path::PathBuf;
 
-use futures::StreamExt;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
-use crate::config::{self, ModelConfig, SshConfig};
+use crate::config::{self, SshConfig};
 use crate::gateway::{self, GatewayState};
 use crate::ssh::SshState;
 
@@ -170,181 +168,11 @@ impl SseParser {
 }
 
 // ── API-based chat (remote mode) ──────────────────────────────────────────
-
-pub async fn send_message_via_api(
-    api_url: &str,
-    api_key: &str,
-    model_config: &ModelConfig,
-    message: &str,
-    history: Option<&Vec<HistoryItem>>,
-    session_id: Option<&str>,
-    app_handle: &AppHandle,
-    use_proxy: bool,
-) -> Result<String, String> {
-    // Only route through proxy when talking to a remote/ssh endpoint. Local
-    // gateway lives on localhost and must stay direct (SOCKS5 breaks 127.0.0.1).
-    let proxy_url = if use_proxy { model_config.proxy.resolve_url() } else { String::new() };
-    let client = if proxy_url.is_empty() {
-        Client::new()
-    } else {
-        Client::builder()
-            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Proxy config error: {}", e))?)
-            .build()
-            .map_err(|e| format!("Proxy client error: {}", e))?
-    };
-
-    // Build messages array
-    let mut messages: Vec<Value> = Vec::new();
-
-    // ── Compact system prompt with autonomy policy (practices 3 + 4) ────────
-    // The GPT-5.6 guide: a compact policy beats a long "how to behave" wall of
-    // text. We inject a SHORT system message encoding the autonomy boundary so
-    // the agent knows when to act vs. ask. This is one rule per case — no
-    // repetitive "ask first" boilerplate (which the guide warns against).
-    if let Some(text) = autonomy_policy_text(model_config.autonomy_policy.as_deref()) {
-        messages.push(serde_json::json!({
-            "role": "system",
-            "content": text,
-        }));
-    }
-
-    // Add history
-    if let Some(hist) = history {
-        for item in hist {
-            messages.push(serde_json::json!({
-                "role": if item.role == "agent" { "assistant" } else { &item.role },
-                "content": &item.content,
-            }));
-        }
-    }
-
-    // Add current message
-    messages.push(serde_json::json!({
-        "role": "user",
-        "content": message,
-    }));
-
-    // ── Session ID (ADR-002 §Chat endpoint контракт) ──────────────────────
-    // Format: desk-<timestamp_ms>-<uuid4>. Sent as X-Hermes-Session-Id header
-    // on EVERY authed request, and as session_id body field ONLY when resuming.
-    // Sending the header without API_SERVER_KEY → 403, so gate on api_key.
-    let sid = session_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            format!("desk-{}-{}", ts, uuid::Uuid::new_v4())
-        });
-
-    let mut body = serde_json::json!({
-        "model": if model_config.model.is_empty() { "hermes-agent" } else { &model_config.model },
-        "messages": messages,
-        "stream": true,
-    });
-
-    // session_id in body ONLY when resuming an existing session (ADR-002).
-    if session_id.is_some() {
-        body["session_id"] = serde_json::json!(sid);
-    }
-
-    // ── Steer fields (ADR-002: reasoning_effort is TOP-LEVEL string) ──────
-    // The Hermes gateway expects reasoning_effort as a top-level string field,
-    // NOT a nested reasoning:{effort,context} object. The previous nested
-    // format was silently ignored by the gateway.
-    if let Some(effort) = &model_config.reasoning_effort {
-        if !effort.is_empty() {
-            body["reasoning_effort"] = serde_json::json!(effort);
-        }
-    }
-    // Autonomy policy as system message (practices 3+4) — already injected above.
-    // Verbosity and prompt_cache are desktop-local concepts not in the upstream
-    // contract; keep them but as top-level fields (not nested objects).
-    if let Some(verbosity) = &model_config.verbosity {
-        if !verbosity.is_empty() {
-            body["verbosity"] = serde_json::json!(verbosity);
-        }
-    }
-    if let Some(cache) = model_config.prompt_cache {
-        if cache {
-            body["prompt_cache"] = serde_json::json!(true);
-        }
-    }
-
-    let url = format!("{}/v1/chat/completions", api_url.trim_end_matches('/'));
-
-    // Build request with required headers (ADR-002):
-    //   - Content-Type: application/json
-    //   - Content-Length: explicit (gateway middleware validates presence)
-    //   - Authorization: Bearer <API_SERVER_KEY>
-    //   - X-Hermes-Session-Id: desk-<ts>-<uuid> (only when authed)
-    let body_bytes = body.to_string();
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Content-Length", body_bytes.len().to_string());
-
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
-        // X-Hermes-Session-Id REQUIRES API_SERVER_KEY to be set.
-        // Without auth, the gateway returns 403 for this header.
-        req = req.header("X-Hermes-Session-Id", &sid);
-    }
-
-    let req = req.body(body_bytes);
-
-    let response = req
-        .send()
-        .await
-        .map_err(|e| format!("API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("API error {}: {}", status, body));
-    }
-
-    // Stream SSE response
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut parser = SseParser::new();
-    let mut full_text = String::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
-
-        // Process complete lines
-        while let Some(pos) = buffer.find("\n\n") {
-            let block = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
-
-            if let Some((_, data)) = SseParser::parse_block(&block) {
-                if let Some(event) = parser.process_data(&data) {
-                    match &event {
-                        ChatEvent::Token { content } => {
-                            full_text.push_str(content);
-                        }
-                        ChatEvent::Done { .. } => {
-                            let _ = app_handle.emit("chat_event", event);
-                            return Ok(full_text);
-                        }
-                        ChatEvent::Error { .. } => {
-                            let _ = app_handle.emit("chat_event", event.clone());
-                            return Err(parser.last_error.clone());
-                        }
-                        _ => {}
-                    }
-                    let _ = app_handle.emit("chat_event", event);
-                }
-            }
-        }
-    }
-
-    Ok(full_text)
-}
+// REMOVED (ADR-004, P2.1): send_message_via_api() targeted the HTTP
+// /v1/chat/completions endpoint, which does not exist on a real `hermes serve`
+// backend. All three connection modes now use the WebSocket transport
+// (send_message_via_ws). The SseParser below was its only consumer and is
+// removed with it.
 
 // ── TUI Gateway chat (local mode) ─────────────────────────────────────────
 // NOTE (ADR-004, P2.3): the old send_message_via_gateway() WS-over-stdio stub
@@ -502,305 +330,60 @@ pub fn parse_ws_message(raw: &str) -> Option<ChatEvent> {
     parse_gateway_event(&value)
 }
 
-// ── Capability detection (ADR-002 §Chat transports) ───────────────────────
-// GET /v1/capabilities → {features: {run_submission, run_events_sse, ...}}
-// If the gateway supports Runs transport, prefer it over Chat Completions.
-
-/// Check if the gateway supports the Runs transport (POST /v1/runs + SSE events).
-/// Returns true only if BOTH run_submission AND run_events_sse are supported.
-async fn supports_runs_transport(api_url: &str, api_key: &str) -> bool {
-    let client = Client::new();
-    let url = format!("{}/v1/capabilities", api_url.trim_end_matches('/'));
-    let mut req = client.get(&url).timeout(std::time::Duration::from_secs(3));
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
-    }
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(json) => {
-                    let features = json.get("features");
-                    let run_submission = features
-                        .and_then(|f| f.get("run_submission"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let run_events = features
-                        .and_then(|f| f.get("run_events_sse"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    run_submission && run_events
-                }
-                Err(_) => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Send message via Runs transport (PREFERRED per ADR-002).
-/// POST /v1/runs → {run_id, status}, then GET /v1/runs/{run_id}/events (SSE).
-/// Events: run.started, message.delta, reasoning.delta, tool.progress,
-///         run.completed, run.failed, run.cancelled, approval.request.
-async fn send_message_via_runs(
-    api_url: &str,
-    api_key: &str,
-    model_config: &ModelConfig,
-    message: &str,
-    history: Option<&Vec<HistoryItem>>,
-    session_id: Option<&str>,
-    app_handle: &AppHandle,
-    use_proxy: bool,
-) -> Result<String, String> {
-    let proxy_url = if use_proxy { model_config.proxy.resolve_url() } else { String::new() };
-    let client = if proxy_url.is_empty() {
-        Client::new()
-    } else {
-        Client::builder()
-            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Proxy error: {}", e))?)
-            .build()
-            .map_err(|e| format!("Proxy client error: {}", e))?
-    };
-
-    // Session ID (same format as Chat Completions transport).
-    let sid = session_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            format!("desk-{}-{}", ts, uuid::Uuid::new_v4())
-        });
-
-    // Build conversation_history for /v1/runs (ADR-002: "input" + "conversation_history").
-    let conv_history: Vec<Value> = history
-        .map(|h| {
-            h.iter()
-                .map(|item| {
-                    serde_json::json!({
-                        "role": if item.role == "agent" { "assistant" } else { &item.role },
-                        "content": &item.content,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut body = serde_json::json!({
-        "model": if model_config.model.is_empty() { "hermes-agent" } else { &model_config.model },
-        "input": message,
-        "stream": true,
-    });
-    if !conv_history.is_empty() {
-        body["conversation_history"] = serde_json::json!(conv_history);
-    }
-    if let Some(effort) = &model_config.reasoning_effort {
-        if !effort.is_empty() {
-            body["reasoning_effort"] = serde_json::json!(effort);
-        }
-    }
-
-    // POST /v1/runs with same headers as Chat Completions (ADR-002).
-    let url = format!("{}/v1/runs", api_url.trim_end_matches('/'));
-    let body_bytes = body.to_string();
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Content-Length", body_bytes.len().to_string())
-        .body(body_bytes);
-    if !api_key.is_empty() {
-        req = req
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("X-Hermes-Session-Id", &sid);
-    }
-
-    let response = req.send().await.map_err(|e| format!("Runs API failed: {}", e))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Runs API error {}: {}", status, body));
-    }
-
-    let run_json: Value = response.json().await.map_err(|e| format!("Runs parse error: {}", e))?;
-    let run_id = run_json
-        .get("run_id")
-        .and_then(|v| v.as_str())
-        .ok_or("No run_id in response")?
-        .to_string();
-
-    let _ = app_handle.emit("chat_event", ChatEvent::Status { status: "run_started".into() });
-
-    // GET /v1/runs/{run_id}/events (SSE stream).
-    let events_url = format!("{}/v1/runs/{}/events", api_url.trim_end_matches('/'), run_id);
-    let mut req = client.get(&events_url).timeout(std::time::Duration::from_secs(300));
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
-    }
-
-    let response = req.send().await.map_err(|e| format!("Events stream failed: {}", e))?;
-    if !response.status().is_success() {
-        return Err(format!("Events stream HTTP {}", response.status()));
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process complete SSE events (separated by \n\n).
-        while let Some(pos) = buffer.find("\n\n") {
-            let raw_event = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
-            if let Some(event) = parse_runs_event(&raw_event) {
-                match &event {
-                    ChatEvent::Done { .. } => {
-                        let _ = app_handle.emit("chat_event", &event);
-                        return Ok(sid);
-                    }
-                    ChatEvent::Error { message } => {
-                        let _ = app_handle.emit("chat_event", &event);
-                        return Err(message.clone());
-                    }
-                    _ => {
-                        let _ = app_handle.emit("chat_event", &event);
-                    }
-                }
-            }
-        }
-    }
-
-    // Stream ended without explicit done/error — treat as done.
-    let _ = app_handle.emit(
-        "chat_event",
-        ChatEvent::Done { session_id: Some(sid.clone()) },
-    );
-    Ok(sid)
-}
-
-/// Parse an SSE event from /v1/runs/{id}/events stream.
-/// Events have: data: {"event": "<type>", "run_id": "...", ...}
-/// Types: run.started, message.delta, reasoning.delta, tool.progress,
-///        run.completed, run.failed, run.cancelled, approval.request.
-fn parse_runs_event(raw: &str) -> Option<ChatEvent> {
-    // Extract the data: line.
-    let data_line = raw.lines().find(|l| l.starts_with("data:"))?;
-    let json_str = data_line.trim_start_matches("data:").trim();
-    if json_str == "[DONE]" || json_str.is_empty() {
-        return None;
-    }
-    let value: Value = serde_json::from_str(json_str).ok()?;
-    let event_type = value.get("event").and_then(|v| v.as_str()).unwrap_or("");
-
-    match event_type {
-        "run.started" => Some(ChatEvent::Status { status: "thinking".into() }),
-        "message.delta" => {
-            let content = value
-                .get("delta")
-                .or_else(|| value.get("content"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            if content.is_empty() {
-                None
-            } else {
-                Some(ChatEvent::Token { content: content.to_string() })
-            }
-        }
-        "reasoning.delta" => {
-            let content = value
-                .get("delta")
-                .or_else(|| value.get("content"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            if content.is_empty() {
-                None
-            } else {
-                Some(ChatEvent::Reasoning { content: content.to_string() })
-            }
-        }
-        "tool.progress" => {
-            let name = value
-                .get("tool_name")
-                .or_else(|| value.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("tool");
-            let tool_id = value
-                .get("tool_id")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            Some(ChatEvent::ToolStart {
-                name: name.to_string(),
-                tool_call_id: tool_id.to_string(),
-            })
-        }
-        "approval.request" => {
-            Some(ChatEvent::ApprovalRequest {
-                request_id: value.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                tool_name: value.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                tool_input: value.get("tool_input").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                action: value.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                command_class: value.get("command_class").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            })
-        }
-        "run.completed" => {
-            let session = value.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            Some(ChatEvent::Done { session_id: session })
-        }
-        "run.failed" => {
-            let error = value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Run failed");
-            Some(ChatEvent::Error { message: error.to_string() })
-        }
-        "run.cancelled" => {
-            Some(ChatEvent::Error { message: "Run cancelled".into() })
-        }
-        _ => None,
-    }
-}
-
-// ── Transport selection (ADR-002 §Chat transports) ────────────────────────
-
-/// Select the best available transport and send the message.
-/// Priority: Runs API (if supported) → Chat Completions (fallback).
-/// Falls back automatically on Runs API failure to Chat Completions.
-async fn send_via_best_transport(
-    api_url: &str,
-    api_key: &str,
-    model_config: &ModelConfig,
-    message: &str,
-    history: Option<&Vec<HistoryItem>>,
-    session_id: Option<&str>,
-    app_handle: &AppHandle,
-    use_proxy: bool,
-) -> Result<String, String> {
-    // Capability detection: check if gateway supports Runs transport.
-    if supports_runs_transport(api_url, api_key).await {
-        eprintln!("[chat] Runs transport supported, using /v1/runs");
-        match send_message_via_runs(
-            api_url, api_key, model_config, message, history, session_id, app_handle, use_proxy,
-        )
-        .await
-        {
-            Ok(sid) => return Ok(sid),
-            Err(e) => {
-                eprintln!("[chat] Runs transport failed ({}), falling back to Chat Completions", e);
-                // Fall through to Chat Completions fallback.
-            }
-        }
-    }
-
-    // Fallback: Chat Completions transport.
-    eprintln!("[chat] Using Chat Completions transport");
-    send_message_via_api(
-        api_url, api_key, model_config, message, history, session_id, app_handle, use_proxy,
-    )
-    .await
-}
+// ── Capability detection + Runs/Chat-Completions HTTP transports ──────────
+// REMOVED (ADR-004/005, P2.1): supports_runs_transport(), send_message_via_runs(),
+// parse_runs_event(), and send_via_best_transport() targeted the HTTP
+// /v1/capabilities, /v1/runs, and /v1/chat/completions endpoints, none of which
+// exist on a real `hermes serve` backend. All connection modes now use the
+// WebSocket transport (send_message_via_ws). This block was ~300 lines.
 
 // ── Unified send message ──────────────────────────────────────────────────
+
+// ── Unified send message ──────────────────────────────────────────────────
+
+/// Convert an HTTP(S) URL to a WebSocket URL (ADR-005).
+///
+/// `http://` → `ws://`, `https://` → `wss://`. Already-ws URLs pass through
+/// unchanged. Used by the Remote and SSH branches to talk to a remote
+/// `hermes serve` over the same /api/ws transport as Local.
+pub fn to_ws_url(url: &str) -> String {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{}", rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{}", rest)
+    } else {
+        // Already ws:// / wss:// or some other scheme — pass through unchanged.
+        url.to_string()
+    }
+}
+
+/// Remote/SSH WebSocket transport (ADR-005, P3.2).
+///
+/// Same `send_message_via_ws` as Local, but the URL/token come from the
+/// remote backend (or SSH tunnel). `base_url` is an http(s) URL and is
+/// converted to ws(s); `token` is the remote backend's session token.
+async fn send_via_ws_remote(
+    base_url: &str,
+    token: &str,
+    request: &SendMessageRequest,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    if token.is_empty() {
+        return Err("Remote session token is empty. Set it in Settings → Connection.".to_string());
+    }
+    // Strip any trailing path so we control the /api/ws suffix cleanly.
+    let base = base_url.trim_end_matches('/').trim_end_matches("/api/ws");
+    let ws_url = format!("{}/api/ws?token={}", to_ws_url(base), token);
+    crate::ws_transport::send_message_via_ws(
+        &ws_url,
+        request.session_id.as_deref(),
+        &request.text,
+        app_handle,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
 
 /// Local-mode WebSocket transport (ADR-004, Phase 0).
 ///
@@ -855,8 +438,9 @@ pub async fn send_message(
     request: SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
-    let model_config = config::get_model_config(hermes_home, None);
-
+    // Note: model_config is no longer fetched here — the WS transport sends
+    // only {session_id, text}; reasoning_effort/verbosity/etc. live in the
+    // backend's config.yaml, not the per-request body (ADR-004).
     match connection_mode {
         ConnectionMode::Local => {
             // Check if gateway is running
@@ -868,66 +452,24 @@ pub async fn send_message(
                 }
             }
 
-            // ── Transport selection (ADR-004, P1.5) ──────────────────────────
-            // WS /api/ws is now the DEFAULT transport — it is the one the real
-            // Hermes backend (hermes serve) actually exposes. Set
-            // STEERSMAN_TRANSPORT=http to fall back to the legacy HTTP path
-            // (which targets the non-existent /v1/chat/completions endpoint and
-            // is kept only for emergency rollback / comparison).
-            let transport = std::env::var("STEERSMAN_TRANSPORT")
-                .unwrap_or_else(|_| "ws".to_string())
-                .to_ascii_lowercase();
-            if transport != "http" {
-                return send_via_ws_local(gateway_state, &request, app_handle).await;
-            }
-
-            // Get API URL
-            let api_url = gateway::get_api_url(gateway_state, None)
-                .ok_or("Gateway not available")?;
-
-            // The Hermes API server requires a Bearer token (API_SERVER_KEY).
-            // The key can live in the profile .env OR the global ~/.hermes/.env
-            // (Hermes's real credential store). Check both, plus process env.
-            let local_key = config::get_api_server_key(hermes_home, None)
-                .or_else(|| {
-                    dirs::home_dir().and_then(|h| {
-                        config::get_api_server_key(&h.join(".hermes"), None)
-                    })
-                })
-                .or_else(|| std::env::var("API_SERVER_KEY").ok().filter(|v| !v.is_empty()))
-                .unwrap_or_default();
-
-            // Use best transport (ADR-002): prefer Runs API if gateway supports it,
-            // fall back to Chat Completions.
-            send_via_best_transport(
-                &api_url,
-                &local_key,
-                &model_config,
-                &request.text,
-                request.history.as_ref(),
-                request.session_id.as_deref(),
-                app_handle,
-                false,
-            )
-            .await
+            // ADR-004: the local backend is `hermes serve`, which exposes the
+            // WebSocket /api/ws transport. There is no HTTP fallback — the
+            // legacy /v1/chat/completions endpoint does not exist on a real
+            // backend and has been removed (P2.1).
+            send_via_ws_local(gateway_state, &request, app_handle).await
         }
         ConnectionMode::Remote => {
-            send_via_best_transport(
-                remote_url,
-                remote_api_key,
-                &model_config,
-                &request.text,
-                request.history.as_ref(),
-                request.session_id.as_deref(),
-                app_handle,
-                true,
-            )
-            .await
+            // ADR-005: Remote talks to a remote `hermes serve` over the same
+            // WS /api/ws transport. remote_api_key is interpreted as the remote
+            // backend's session token (UI label rename is a separate task).
+            send_via_ws_remote(remote_url, remote_api_key, &request, app_handle).await
         }
         ConnectionMode::Ssh => {
             let ssh = ssh_config.as_ref().ok_or("SSH config not provided")?;
 
-            // Ensure tunnel is active
+            // Ensure tunnel is active. The SSH tunnel is generic TCP forwarding
+            // (-L local:remote), so WebSocket frames pass through unmodified
+            // (ADR-005). Only the URL scheme must be ws://, not http://.
             if !crate::ssh::is_tunnel_active(ssh_state) {
                 crate::ssh::start_ssh_tunnel(ssh_state, ssh)
                     .map_err(|e| format!("SSH tunnel failed: {}", e))?;
@@ -936,9 +478,8 @@ pub async fn send_message(
             let tunnel_url = crate::ssh::get_tunnel_url(ssh_state)
                 .ok_or("SSH tunnel not available")?;
 
-            // The remote gateway still requires its API_SERVER_KEY (profile env
-            // or global ~/.hermes/.env).
-            let tunneled_key = config::get_api_server_key(hermes_home, None)
+            // The remote backend's session token (same resolution as Remote).
+            let tunneled_token = config::get_api_server_key(hermes_home, None)
                 .or_else(|| {
                     dirs::home_dir().and_then(|h| {
                         config::get_api_server_key(&h.join(".hermes"), None)
@@ -947,17 +488,7 @@ pub async fn send_message(
                 .or_else(|| std::env::var("API_SERVER_KEY").ok().filter(|v| !v.is_empty()))
                 .unwrap_or_default();
 
-            send_via_best_transport(
-                &tunnel_url,
-                &tunneled_key,
-                &model_config,
-                &request.text,
-                request.history.as_ref(),
-                request.session_id.as_deref(),
-                app_handle,
-                true,
-            )
-            .await
+            send_via_ws_remote(&tunnel_url, &tunneled_token, &request, app_handle).await
         }
     }
 }
@@ -1125,5 +656,38 @@ mod tests {
     fn ws_garbage_line_returns_none() {
         assert!(ws_event("not json at all").is_none());
         assert!(ws_event("").is_none());
+    }
+
+    // ── ADR-005: Remote/SSH scheme conversion (P3.2) ────────────────────────
+
+    #[test]
+    fn to_ws_url_converts_http_to_ws() {
+        assert_eq!(to_ws_url("http://1.2.3.4:8642"), "ws://1.2.3.4:8642");
+    }
+
+    #[test]
+    fn to_ws_url_converts_https_to_wss() {
+        assert_eq!(to_ws_url("https://remote.example.com:9000"), "wss://remote.example.com:9000");
+    }
+
+    #[test]
+    fn to_ws_url_preserves_path_and_query() {
+        assert_eq!(
+            to_ws_url("http://127.0.0.1:9421/api/ws?token=abc"),
+            "ws://127.0.0.1:9421/api/ws?token=abc"
+        );
+    }
+
+    #[test]
+    fn to_ws_url_idempotent_if_already_ws() {
+        // Already-ws URLs pass through unchanged (no double-conversion).
+        assert_eq!(to_ws_url("ws://host:1/path"), "ws://host:1/path");
+        assert_eq!(to_ws_url("wss://host:1/path"), "wss://host:1/path");
+    }
+
+    #[test]
+    fn to_ws_url_ssh_tunnel_localhost() {
+        // SSH tunnel exposes a loopback http URL; must become ws://.
+        assert_eq!(to_ws_url("http://127.0.0.1:18642"), "ws://127.0.0.1:18642");
     }
 }
