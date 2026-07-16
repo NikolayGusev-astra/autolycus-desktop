@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -69,7 +68,8 @@ impl GatewayState {
     }
 }
 
-static GATEWAY_PORT_BASE: AtomicU64 = AtomicU64::new(8642);
+// NOTE (v2 §7.4): the static GATEWAY_PORT_BASE (8642) was removed alongside
+// allocate_port — port is now OS-assigned via `hermes serve --port 0`.
 
 // ── Hermes paths ──────────────────────────────────────────────────────────
 
@@ -98,18 +98,9 @@ pub fn find_hermes_repo(python_path: &PathBuf) -> Option<PathBuf> {
 }
 
 // ── Port allocation ───────────────────────────────────────────────────────
-
-fn allocate_port(profile_key: &str) -> u16 {
-    // Default profile gets 8642, others get offset
-    if profile_key == "default" {
-        8642
-    } else {
-        let hash = profile_key.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
-        (8642 + (hash % 1000)) as u16
-    }
-}
+// REMOVED (ADR-004, v2 §7.4): allocate_port() hardcoded 8642 for the default
+// profile and a hash-formula for others. With `hermes serve --port 0` the OS
+// assigns the port, read back from stdout via parse_ready_port(). 0 callers.
 
 // ── Gateway start ─────────────────────────────────────────────────────────
 

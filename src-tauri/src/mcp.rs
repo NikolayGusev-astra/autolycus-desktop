@@ -54,10 +54,10 @@ pub struct McpEnvVar {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpConfigFile {
-    pub servers: HashMap<String, McpServerConfig>,
-}
+// NOTE (T2): the legacy McpConfigFile wrapper ({servers: ...} JSON) was removed
+// when storage migrated from servers.json to config.yaml's mcp_servers: block.
+// McpServerConfig below is retained — it is the in-memory representation used by
+// the yaml round-trip helpers.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -71,30 +71,155 @@ pub struct McpServerConfig {
 }
 
 // ── File path ─────────────────────────────────────────────────────────────
+//
+// ADR-002 §Config.yaml schema + T2 (P-AUDIT #11): MCP servers are stored in
+// config.yaml `mcp_servers:` block, NOT in a separate servers.json. The Hermes
+// backend reads ONLY config.yaml, so servers in servers.json were invisible
+// to the agent. This module now reads/writes the `mcp_servers:` hash in
+// config.yaml via yaml-rust2 round-trip.
 
-fn mcp_config_path(hermes_home: &Path, profile: Option<&str>) -> std::path::PathBuf {
-    crate::config::profile_home(hermes_home, profile)
-        .join(".hermes")
-        .join("mcp")
-        .join("servers.json")
+fn config_yaml_path(hermes_home: &Path, profile: Option<&str>) -> std::path::PathBuf {
+    match profile {
+        Some(p) if p != "default" && !p.is_empty() => {
+            hermes_home.join("profiles").join(p).join("config.yaml")
+        }
+        _ => hermes_home.join("config.yaml"),
+    }
+}
+
+/// Read the `mcp_servers:` block from config.yaml as a map of name → McpServerConfig.
+fn read_mcp_servers_yaml(hermes_home: &Path, profile: Option<&str>) -> HashMap<String, McpServerConfig> {
+    let path = config_yaml_path(hermes_home, profile);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let json = match crate::config::read_config_yaml(hermes_home, profile) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    // read_config_yaml returns the full config; extract mcp_servers.
+    let mcp_block = json.get("mcp_servers").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+    let mut out = HashMap::new();
+    if let serde_json::Value::Object(map) = mcp_block {
+        for (name, val) in map {
+            // McpServerConfig uses snake_case fields; upstream config.yaml uses
+            // the same names (command, args, env, enabled). server_type is a
+            // Steersman-only annotation; infer from presence of url vs command.
+            let server_type = if val.get("url").is_some() { "http" } else { "stdio" };
+            let cfg = McpServerConfig {
+                server_type: val
+                    .get("server_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(server_type)
+                    .to_string(),
+                url: val.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                command: val.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                args: val.get("args").and_then(|v| v.as_array()).map(|a| {
+                    a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                }),
+                env: val.get("env").and_then(|v| v.as_object()).map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
+                auth: val.get("auth").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                enabled: val.get("enabled").and_then(|v| v.as_bool()),
+            };
+            out.insert(name, cfg);
+        }
+    }
+    let _ = content; // (content was read for the existence gate above)
+    out
+}
+
+/// Serialize the full `mcp_servers:` map back into config.yaml, preserving the
+/// rest of the file. Uses yaml-rust2 round-trip: load → replace the
+/// `mcp_servers` key → emit.
+fn write_mcp_servers_yaml(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    servers: &HashMap<String, McpServerConfig>,
+) -> Result<(), String> {
+    use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
+
+    let path = config_yaml_path(hermes_home, profile);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Load the existing YAML doc (or start fresh).
+    let mut docs = YamlLoader::load_from_str(&content)
+        .map_err(|e| format!("config.yaml parse error: {}", e))?;
+    let mut root = docs.pop().unwrap_or(Yaml::Hash(yaml_rust2::yaml::Hash::new()));
+
+    // Build the mcp_servers hash.
+    let mut mcp_hash = yaml_rust2::yaml::Hash::new();
+    for (name, cfg) in servers {
+        let mut entry = yaml_rust2::yaml::Hash::new();
+        if let Some(url) = &cfg.url {
+            entry.insert(Yaml::String("url".into()), Yaml::String(url.clone()));
+        }
+        if let Some(cmd) = &cfg.command {
+            entry.insert(Yaml::String("command".into()), Yaml::String(cmd.clone()));
+        }
+        if let Some(args) = &cfg.args {
+            entry.insert(
+                Yaml::String("args".into()),
+                Yaml::Array(args.iter().map(|a| Yaml::String(a.clone())).collect()),
+            );
+        }
+        if let Some(env) = &cfg.env {
+            let mut env_hash = yaml_rust2::yaml::Hash::new();
+            for (k, v) in env {
+                env_hash.insert(Yaml::String(k.clone()), Yaml::String(v.clone()));
+            }
+            entry.insert(Yaml::String("env".into()), Yaml::Hash(env_hash));
+        }
+        if let Some(auth) = &cfg.auth {
+            entry.insert(Yaml::String("auth".into()), Yaml::String(auth.clone()));
+        }
+        if let Some(enabled) = cfg.enabled {
+            entry.insert(Yaml::String("enabled".into()), Yaml::Boolean(enabled));
+        }
+        mcp_hash.insert(Yaml::String(name.clone()), Yaml::Hash(entry));
+    }
+
+    if let Yaml::Hash(ref mut h) = root {
+        if mcp_hash.is_empty() {
+            h.remove(&Yaml::String("mcp_servers".into()));
+        } else {
+            h.insert(Yaml::String("mcp_servers".into()), Yaml::Hash(mcp_hash));
+        }
+    } else {
+        // root is null/empty — wrap in a hash.
+        let mut h = yaml_rust2::yaml::Hash::new();
+        if !mcp_hash.is_empty() {
+            h.insert(Yaml::String("mcp_servers".into()), Yaml::Hash(mcp_hash));
+        }
+        root = Yaml::Hash(h);
+    }
+
+    // Emit. yaml-rust2 YamlEmitter drops comments (known trade-off, documented
+    // in T3 prompt). Acceptable: the rest of the structure + keys are preserved.
+    let mut out = String::new();
+    {
+        let mut emitter = YamlEmitter::new(&mut out);
+        emitter
+            .dump(&root)
+            .map_err(|e| format!("config.yaml emit error: {}", e))?;
+    }
+    // YamlEmitter prepends "---\n"; strip the leading document marker to keep
+    // config.yaml a plain mapping (matches how Hermes writes it).
+    let out = out.strip_prefix("---\n").unwrap_or(&out).to_string();
+
+    std::fs::write(&path, out).map_err(|e| format!("Write config.yaml error: {}", e))?;
+    Ok(())
 }
 
 // ── List MCP servers ──────────────────────────────────────────────────────
 
 pub fn list_mcp_servers(hermes_home: &Path, profile: Option<&str>) -> Vec<McpServer> {
-    let path = mcp_config_path(hermes_home, profile);
-
-    if !path.exists() {
-        return Vec::new();
-    }
-
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let config: McpConfigFile = serde_json::from_str(&content).unwrap_or(McpConfigFile {
-        servers: HashMap::new(),
-    });
-
-    config
-        .servers
+    let servers = read_mcp_servers_yaml(hermes_home, profile);
+    servers
         .into_iter()
         .map(|(name, server)| McpServer {
             name: name.clone(),
@@ -119,19 +244,7 @@ pub fn add_mcp_server(
     profile: Option<&str>,
     input: &McpServerInput,
 ) -> Result<McpServer, String> {
-    let path = mcp_config_path(hermes_home, profile);
-
-    let mut config = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Read error: {}", e))?;
-        serde_json::from_str(&content).unwrap_or(McpConfigFile {
-            servers: HashMap::new(),
-        })
-    } else {
-        McpConfigFile {
-            servers: HashMap::new(),
-        }
-    };
+    let mut servers = read_mcp_servers_yaml(hermes_home, profile);
 
     let server_config = McpServerConfig {
         server_type: input.server_type.clone(),
@@ -143,16 +256,8 @@ pub fn add_mcp_server(
         enabled: Some(true),
     };
 
-    config.servers.insert(input.name.clone(), server_config);
-
-    // Ensure parent dir exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {}", e))?;
-    }
-
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
+    servers.insert(input.name.clone(), server_config);
+    write_mcp_servers_yaml(hermes_home, profile, &servers)?;
 
     Ok(McpServer {
         name: input.name.clone(),
@@ -176,24 +281,16 @@ pub fn remove_mcp_server(
     profile: Option<&str>,
     name: &str,
 ) -> Result<(), String> {
-    let path = mcp_config_path(hermes_home, profile);
-
+    let path = config_yaml_path(hermes_home, profile);
     if !path.exists() {
-        return Err("MCP config not found".to_string());
+        return Err("config.yaml not found".to_string());
     }
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Read error: {}", e))?;
-    let mut config: McpConfigFile = serde_json::from_str(&content)
-        .map_err(|e| format!("Parse error: {}", e))?;
-
-    config.servers.remove(name);
-
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
-
-    Ok(())
+    let mut servers = read_mcp_servers_yaml(hermes_home, profile);
+    if servers.remove(name).is_none() {
+        return Err(format!("Server '{}' not found", name));
+    }
+    write_mcp_servers_yaml(hermes_home, profile, &servers)
 }
 
 // ── Set MCP server enabled ────────────────────────────────────────────────
@@ -204,28 +301,12 @@ pub fn set_mcp_server_enabled(
     name: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let path = mcp_config_path(hermes_home, profile);
-
-    if !path.exists() {
-        return Err("MCP config not found".to_string());
-    }
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Read error: {}", e))?;
-    let mut config: McpConfigFile = serde_json::from_str(&content)
-        .map_err(|e| format!("Parse error: {}", e))?;
-
-    if let Some(server) = config.servers.get_mut(name) {
-        server.enabled = Some(enabled);
-    } else {
-        return Err(format!("Server '{}' not found", name));
-    }
-
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
-
-    Ok(())
+    let mut servers = read_mcp_servers_yaml(hermes_home, profile);
+    let server = servers
+        .get_mut(name)
+        .ok_or_else(|| format!("Server '{}' not found", name))?;
+    server.enabled = Some(enabled);
+    write_mcp_servers_yaml(hermes_home, profile, &servers)
 }
 
 // ── Test MCP server ───────────────────────────────────────────────────────
