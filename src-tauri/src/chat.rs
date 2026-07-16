@@ -112,10 +112,12 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
         .and_then(|t| t.as_str())?;
 
     match event_type {
-        "message.chunk" | "token" => {
+        "message.chunk" | "token" | "message.delta" => {
+            // message.delta is the real token stream from upstream; content
+            // may be in "delta" or "text" field depending on the event.
             let content = value
                 .get("params")
-                .and_then(|p| p.get("text"))
+                .and_then(|p| p.get("delta").or_else(|| p.get("text")))
                 .and_then(|t| t.as_str())
                 .unwrap_or("");
             if !content.is_empty() {
@@ -179,9 +181,9 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 duration_ms: 0,
             })
         }
-        "message.end" | "done" => {
-            // upstream emits session_id in params on message.end; the frontend
-            // pins currentSessionId from it (ChatView.tsx:201-203).
+        "message.end" | "message.complete" | "message.done" | "done" => {
+            // upstream emits session_id in params on message.complete (the real
+            // terminal event); the frontend pins currentSessionId from it.
             let session_id = value
                 .get("params")
                 .and_then(|p| p.get("session_id"))
@@ -189,6 +191,9 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .map(|s| s.to_string());
             Some(ChatEvent::Done { session_id })
         }
+        "message.start" => Some(ChatEvent::Status {
+            status: "streaming".to_string(),
+        }),
         "error" => {
             let msg = value
                 .get("params")
@@ -535,6 +540,62 @@ mod tests {
     fn ws_garbage_line_returns_none() {
         assert!(ws_event("not json at all").is_none());
         assert!(ws_event("").is_none());
+    }
+
+    // ── Real upstream event vocabulary (discovered via live WS probe) ───────
+    // The backend emits message.start/message.delta/message.complete (not
+    // message.chunk/message.end as the old parser assumed). message.delta is
+    // the real token stream; message.complete is the terminal event.
+
+    #[test]
+    fn ws_message_delta_is_token() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","delta":"Hi there"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "Hi there"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_delta_with_text_field() {
+        // Some events carry the content in "text" instead of "delta".
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","text":"alt"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "alt"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_complete_is_terminal_done() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"s42"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Done { session_id }) => assert_eq!(session_id.as_deref(), Some("s42")),
+            other => panic!("expected Done, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_start_is_status() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.start"}}"#,
+        );
+        assert!(matches!(ev, Some(ChatEvent::Status { .. })));
+    }
+
+    #[test]
+    fn ws_session_info_is_ignored() {
+        // session.info is informational, not a streaming event to display.
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info"}}"#,
+        );
+        assert!(ev.is_none());
     }
 
     // ── ADR-005: Remote/SSH scheme conversion (P3.2) ────────────────────────
