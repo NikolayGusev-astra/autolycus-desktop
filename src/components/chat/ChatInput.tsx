@@ -94,8 +94,30 @@ export function ChatInput({ onSend, onStop, disabled, agentStatus = "idle" }: Ch
   useEffect(() => {
     invoke<any[]>("list_models_cmd")
       .then((models) => {
-        setSavedModels(models);
-        if (models.length > 0) setCurrentModel(models[0].id);
+        if (models.length > 0) {
+          setSavedModels(models);
+          setCurrentModel(models[0].id);
+        } else {
+          // models.json is empty — fall back to the active config.yaml model
+          // so the chat is usable without manually adding a saved model.
+          invoke<any>("get_model_config_cmd", { profile: null })
+            .then((config) => {
+              if (config?.model) {
+                const fallback = [{
+                  id: `${config.provider}/${config.model}`,
+                  name: config.model,
+                  provider: config.provider,
+                  model: config.model,
+                  base_url: config.base_url ?? "",
+                  api_mode: null,
+                  created_at: Date.now(),
+                }];
+                setSavedModels(fallback);
+                setCurrentModel(fallback[0].id);
+              }
+            })
+            .catch(() => {});
+        }
       })
       .catch(() => {});
     invoke<any>("get_model_config_cmd", { profile: null })

@@ -93,14 +93,16 @@ function ProvidersScreen({ profile }: { profile?: string }): React.JSX.Element {
 
   const loadConfig = useCallback(async () => {
     try {
-      const [envData, mc] = await Promise.all([
+      const [envData, mc, pool] = await Promise.all([
         invoke<Record<string, string>>("get_env_cmd", { profile }),
         invoke<ModelConfig>("get_model_config_cmd", { profile }),
+        invoke<Record<string, CredentialPoolEntry[]>>("get_credential_pool_cmd"),
       ]);
       setEnv(envData);
       setModelProvider(mc.provider);
       setModelName(mc.model);
       setModelBaseUrl(mc.baseUrl);
+      setCredPool(pool);
       requestAnimationFrame(() => { modelLoaded.current = true; });
     } catch (err) {
       console.error("Failed to load config:", err);
