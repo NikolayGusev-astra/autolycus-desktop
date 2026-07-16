@@ -148,16 +148,16 @@ fn harden_secret_files(hermes_home: &std::path::Path) {
                     &path,
                     std::fs::Permissions::from_mode(0o600),
                 ) {
-                    eprintln!(
-                        "[steersman] warning: could not tighten permissions on {}: {}",
-                        path.display(),
-                        e
+                    tracing::warn!(
+                        target: "steersman_desktop_lib",
+                        path = %path.display(), error = %e,
+                        "could not tighten permissions"
                     );
                 } else {
-                    eprintln!(
-                        "[steersman] hardened '{}' to 0600 (was {:o})",
-                        path.display(),
-                        mode & 0o777
+                    tracing::info!(
+                        target: "steersman_desktop_lib",
+                        path = %path.display(), prev_mode = format!("{:o}", mode & 0o777),
+                        "hardened to 0600"
                     );
                 }
             }
@@ -1610,14 +1610,22 @@ fn apply_sources_env(
     let env_vars = config.to_env_vars();
     for (key, value) in env_vars {
         if let Err(e) = config::write_env_value(hermes_home, profile, &key, &value) {
-            eprintln!("[sources] failed to write env {}={}: {}", key, key, e);
+            tracing::warn!(
+                target: "steersman_desktop_lib::sources",
+                key = %key, error = %e,
+                "failed to write env var"
+            );
         }
     }
     // Also sync MCP env blocks into config.yaml (ADR-002 §MCP env whitelist).
     // Hermes _build_safe_env() strips non-whitelisted env vars, so .env alone
     // doesn't reach MCP servers. The env: block in config.yaml is the ONLY way.
     if let Err(e) = mcp::sync_mcp_env_blocks(hermes_home, profile) {
-        eprintln!("[sources] failed to sync MCP env blocks: {}", e);
+        tracing::warn!(
+            target: "steersman_desktop_lib::sources",
+            error = %e,
+            "failed to sync MCP env blocks"
+        );
     }
 }
 
@@ -2373,7 +2381,11 @@ pub fn run() {
             })();
 
             if let Err(e) = tray_result {
-                eprintln!("[steersman] warning: tray icon unavailable on this platform, continuing without it: {}", e);
+                tracing::warn!(
+                    target: "steersman_desktop_lib",
+                    error = %e,
+                    "tray icon unavailable on this platform, continuing without it"
+                );
             }
 
             // ── Global shortcut: Ctrl+Shift+S (best-effort) ────────────
@@ -2393,9 +2405,10 @@ pub fn run() {
                     }
                 },
             ) {
-                eprintln!(
-                    "[steersman] warning: global shortcut Ctrl+Shift+S unavailable, continuing without it: {}",
-                    e
+                tracing::warn!(
+                    target: "steersman_desktop_lib",
+                    error = %e,
+                    "global shortcut Ctrl+Shift+S unavailable, continuing without it"
                 );
             }
 

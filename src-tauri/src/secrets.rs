@@ -67,16 +67,18 @@ pub fn migrate(account: &str, plaintext: &str) -> bool {
     }
     match set(account, plaintext) {
         Ok(()) => {
-            eprintln!(
-                "[steersman] migrated '{}' secret from plaintext into the OS keyring",
-                account
+            tracing::info!(
+                target: "steersman_desktop_lib::secrets",
+                account = %account,
+                "migrated secret from plaintext into the OS keyring"
             );
             true
         }
         Err(e) => {
-            eprintln!(
-                "[steersman] warning: could not migrate '{}' into keyring (staying on plaintext): {}",
-                account, e
+            tracing::warn!(
+                target: "steersman_desktop_lib::secrets",
+                account = %account, error = %e,
+                "could not migrate into keyring (staying on plaintext)"
             );
             false
         }

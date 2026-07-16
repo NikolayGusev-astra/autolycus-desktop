@@ -400,7 +400,7 @@ pub fn generate_smart_briefing(
         &db_path, &session_id, "briefing_smart",
         started_at, &title, &user_msg, &formatted,
     ) {
-        eprintln!("[briefing] persist failed: {}", e);
+        tracing::warn!(target: "steersman_desktop_lib::briefing", error = %e, "persist failed");
     }
 
     Ok(BriefingResult {
