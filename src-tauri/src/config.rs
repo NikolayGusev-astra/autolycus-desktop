@@ -921,9 +921,10 @@ pub fn get_api_server_key(hermes_home: &Path, profile: Option<&str>) -> Option<S
     env.get("API_SERVER_KEY").cloned()
 }
 
-pub fn generate_api_server_key() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
+// REMOVED (P2.1 cleanup follow-up): generate_api_server_key() generated a
+// UUID for the legacy HTTP API_SERVER_KEY auth. WS transport uses
+// HERMES_DASHBOARD_SESSION_TOKEN (generate_session_token in gateway.rs).
+// 0 callers.
 
 // ── Profile paths ─────────────────────────────────────────────────────────
 

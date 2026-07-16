@@ -87,85 +87,9 @@ pub struct HistoryItem {
 }
 
 // ── SSE Parser ────────────────────────────────────────────────────────────
-
-pub struct SseParser {
-    pub has_content: bool,
-    pub last_error: String,
-}
-
-impl SseParser {
-    pub fn new() -> Self {
-        Self {
-            has_content: false,
-            last_error: String::new(),
-        }
-    }
-
-    /// Process a single SSE data line
-    pub fn process_data(&mut self, data: &str) -> Option<ChatEvent> {
-        if data == "[DONE]" {
-            return Some(ChatEvent::Done { session_id: None });
-        }
-
-        let parsed: Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return None,
-        };
-
-        // Check for error
-        if let Some(err) = parsed.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error");
-            self.last_error = msg.to_string();
-            return Some(ChatEvent::Error {
-                message: msg.to_string(),
-            });
-        }
-
-        // Extract delta
-        let delta = parsed.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta"));
-
-        // Extract usage
-        if let Some(_usage) = parsed.get("usage") {
-            // Usage is typically in the final chunk
-        }
-
-        if let Some(delta) = delta {
-            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                if !content.is_empty() {
-                    self.has_content = true;
-                    return Some(ChatEvent::Token {
-                        content: content.to_string(),
-                    });
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Parse a full SSE block (may contain event: and data: lines)
-    pub fn parse_block(block: &str) -> Option<(String, String)> {
-        let mut event_type = String::new();
-        let mut data_line = String::new();
-
-        for line in block.lines() {
-            if line.starts_with("event: ") {
-                event_type = line[7..].trim().to_string();
-            } else if line.starts_with("data: ") {
-                data_line = line[6..].to_string();
-            }
-        }
-
-        if data_line.is_empty() {
-            None
-        } else {
-            Some((event_type, data_line))
-        }
-    }
-}
+// REMOVED (P2.1 cleanup follow-up): SseParser was the HTTP /v1/chat/completions
+// SSE-stream parser. With the WS migration (ADR-004/005) all transports use
+// parse_ws_message / parse_gateway_event; SseParser had 0 callers.
 
 // ── API-based chat (remote mode) ──────────────────────────────────────────
 // REMOVED (ADR-004, P2.1): send_message_via_api() targeted the HTTP
@@ -493,60 +417,15 @@ pub async fn send_message(
     }
 }
 
-/// Resolve an autonomy policy name to a compact system-prompt text (practice 3).
-/// Returns None for unknown/empty policies so no system message is injected.
-/// Each policy is ONE sentence — the GPT-5.6 guide warns against repetitive
-/// "ask first" boilerplate that annoys users on safe actions.
-pub fn autonomy_policy_text(policy: Option<&str>) -> Option<&'static str> {
-    match policy? {
-        "" | "auto" => None,
-        "readonly" => Some(
-            "You are in read-only mode: gather information and report. Do not create, modify, or delete anything.",
-        ),
-        "local" => Some(
-            "You may make local changes and run checks without asking. External writes (messages, tickets, purchases, deletions) require user confirmation.",
-        ),
-        "confirm-external" => Some(
-            "All actions that affect external systems require explicit user confirmation. Local analysis and reporting are autonomous.",
-        ),
-        _ => None,
-    }
-}
+// REMOVED (P2.1 cleanup follow-up): autonomy_policy_text() injected an
+// autonomy-policy system message into the HTTP /v1/chat/completions body.
+// The WS transport sends only {session_id, text}; steer settings (reasoning
+// effort, autonomy policy, verbosity) live in the backend's config.yaml
+// (ADR-004). 0 callers in production code; its 5 unit tests removed with it.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn readonly_policy_produces_restriction() {
-        let text = autonomy_policy_text(Some("readonly"));
-        assert!(text.is_some());
-        assert!(text.unwrap().contains("read-only mode"));
-    }
-
-    #[test]
-    fn local_policy_allows_local_actions() {
-        let text = autonomy_policy_text(Some("local"));
-        assert!(text.unwrap().contains("local changes"));
-    }
-
-    #[test]
-    fn confirm_external_requires_confirmation() {
-        let text = autonomy_policy_text(Some("confirm-external"));
-        assert!(text.unwrap().contains("explicit user confirmation"));
-    }
-
-    #[test]
-    fn empty_policy_returns_none() {
-        assert_eq!(autonomy_policy_text(None), None);
-        assert_eq!(autonomy_policy_text(Some("")), None);
-        assert_eq!(autonomy_policy_text(Some("auto")), None);
-    }
-
-    #[test]
-    fn unknown_policy_returns_none() {
-        assert_eq!(autonomy_policy_text(Some("bogus")), None);
-    }
 
     // ── ADR-004: WebSocket transport — parser tests (TDD) ──────────────────
     // Fixtures mirror the real events emitted by the upstream tui_gateway
