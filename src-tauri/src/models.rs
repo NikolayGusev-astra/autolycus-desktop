@@ -15,8 +15,14 @@ pub struct SavedModel {
     pub name: String,
     pub provider: String,
     pub model: String,
+    // Accept both snake_case (our writes) and camelCase (some legacy/external
+    // models.json files use baseUrl). Without the alias, camelCase entries are
+    // silently dropped during deserialization -> "No Models" or missing models.
+    #[serde(alias = "baseUrl")]
+    #[serde(default)]
     pub base_url: String,
     pub api_mode: Option<String>,
+    #[serde(alias = "createdAt")]
     pub created_at: i64,
     // Capability flags (populated from discovery). Used to gate steer UI controls.
     #[serde(default)]
@@ -166,4 +172,40 @@ fn write_models(hermes_home: &Path, models: &[SavedModel]) -> Result<(), String>
         .map_err(|e| format!("Serialization error: {}", e))?;
     fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_snake_case_model() {
+        let json = r#"[{"id":"1","name":"main","provider":"openrouter","model":"deepseek-v4","base_url":"https://openrouter.ai/api/v1","api_mode":null,"created_at":123}]"#;
+        let models: Vec<SavedModel> = serde_json::from_str(json).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn deserialize_camel_case_model() {
+        // Legacy/external models.json uses baseUrl/createdAt (camelCase).
+        // Without serde alias these are silently dropped.
+        let json = r#"[{"id":"2","name":"free","provider":"kilocode","model":"kilo-auto/free","baseUrl":"https://api.kilo.ai/api/gateway","api_mode":null,"createdAt":456}]"#;
+        let models: Vec<SavedModel> = serde_json::from_str(json).unwrap();
+        assert_eq!(models.len(), 1, "camelCase model must deserialize, got {} models", models.len());
+        assert_eq!(models[0].base_url, "https://api.kilo.ai/api/gateway");
+        assert_eq!(models[0].created_at, 456);
+    }
+
+    #[test]
+    fn deserialize_mixed_casing_array() {
+        // Real models.json has BOTH styles in one array.
+        let json = r#"[
+            {"id":"1","name":"a","provider":"p","model":"m","base_url":"u1","api_mode":null,"created_at":1},
+            {"id":"2","name":"b","provider":"p","model":"m","baseUrl":"u2","api_mode":null,"createdAt":2}
+        ]"#;
+        let models: Vec<SavedModel> = serde_json::from_str(json).unwrap();
+        assert_eq!(models.len(), 2, "both models must deserialize, got {}", models.len());
+        assert_eq!(models[1].base_url, "u2");
+    }
 }
