@@ -954,11 +954,65 @@ async fn list_feed_cmd(
 #[tauri::command]
 async fn generate_smart_briefing_cmd(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
     days: Option<i64>,
     profile: Option<String>,
 ) -> Result<briefing::BriefingResult, String> {
     let hermes_home = home_or_resolve(&state)?;
-    briefing::generate_smart_briefing(&hermes_home, profile.as_deref(), days.unwrap_or(7))
+    let days = days.unwrap_or(7);
+
+    // Build the briefing prompt and send it through the WS transport — the
+    // agent has direct access to email (himalaya MCP), Jira MCP, chat
+    // sessions in state.db, and the LLM for analysis. No separate Python
+    // briefing server needed (replaces mcp-smart-briefing/server.py).
+    let prompt = briefing::briefing_prompt(days);
+
+    let port = gateway::get_gateway_port(&state.gateway, None)
+        .ok_or("Gateway not available for briefing")?;
+    let token = gateway::get_gateway_session_token(&state.gateway, None)
+        .ok_or("No session token for briefing")?;
+    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
+
+    // Send via WS — streaming tokens arrive as chat_event (frontend ChatView
+    // picks them up if visible, otherwise they're in the session transcript).
+    let result = crate::ws_transport::send_message_via_ws(
+        &ws_url,
+        None, // fresh session for each briefing
+        &prompt,
+        &app_handle,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Persist as a briefing session for the dashboard cache.
+    let session_id = format!("smart_briefing:{}", profile.as_deref().unwrap_or("default"));
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let title = format!("Briefing {}d (agent)", days);
+
+    let profile_path = config::profile_home(&hermes_home, profile.as_deref());
+    let db_path = sessions::state_db_path(&profile_path, None);
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = rusqlite::Connection::open(&db_path).and_then(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, source, started_at, title, preview)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![&session_id, "briefing_agent", started_at, &title, "See chat session"],
+        )
+    });
+
+    Ok(briefing::BriefingResult {
+        session_id,
+        source: "briefing_agent".into(),
+        started_at,
+        title,
+        preview: format!("Briefing generated in session {}. See chat for full analysis.", result),
+        formatted: prompt,
+    })
 }
 
 /// Dashboard-only channel feed: strictly whitelisted user-facing sources
