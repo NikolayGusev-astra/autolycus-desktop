@@ -120,11 +120,17 @@ where
         + Unpin,
 {
     let id = next_rpc_id();
+    // params match the Electron desktop reference (use-session-actions:221):
+    // source:"desktop" + cols:96 (rendering width). Model/provider/effort live
+    // in config.yaml (read by the backend), not per-session here.
     let req = json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": "session.create",
-        "params": {},
+        "params": {
+            "source": "desktop",
+            "cols": 96,
+        },
     });
     send_json(ws, &req).await?;
 

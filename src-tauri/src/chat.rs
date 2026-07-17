@@ -104,6 +104,37 @@ pub struct HistoryItem {
 // parse_gateway_event() below is retained — it is the core of parse_ws_message
 // (the live WS wire-envelope dispatcher).
 
+// ── Payload extraction helpers (real wire format, server.py _emit) ────────
+//
+// The upstream backend stamps every event as:
+//   {jsonrpc:"2.0", method:"event", params:{type, session_id, payload:{...}}}
+// Content fields (text, name, tool_id, output) live INSIDE params.payload,
+// not at the params top level. These helpers read payload.<field> with a
+// fallback to params.<field> for backward compat with older event shapes.
+
+/// Read the "text" field from an event — checks params.payload.text first
+/// (real wire format), then params.text (legacy fallback).
+fn payload_text(value: &Value) -> Option<&str> {
+    payload_field(value, "text")
+}
+
+/// Read a named field from params.payload.<field>, falling back to params.<field>.
+fn payload_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get("params")
+        .and_then(|p| p.get("payload"))
+        .and_then(|pl| pl.get(field))
+        .or_else(|| value.get("params").and_then(|p| p.get(field)))
+        .and_then(|v| v.as_str())
+}
+
+/// Read tool name + tool_id from payload (or fallback to params top-level).
+fn payload_tool_id(value: &Value) -> (&str, &str) {
+    let name = payload_field(value, "name").unwrap_or("tool");
+    let tool_id = payload_field(value, "tool_id").unwrap_or("");
+    (name, tool_id)
+}
+
 fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
     let event_type = value
         .get("params")
@@ -113,13 +144,9 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
 
     match event_type {
         "message.chunk" | "token" | "message.delta" => {
-            // message.delta is the real token stream from upstream; content
-            // may be in "delta" or "text" field depending on the event.
-            let content = value
-                .get("params")
-                .and_then(|p| p.get("delta").or_else(|| p.get("text")))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            // Real wire format (server.py _emit): params.payload.text
+            // Legacy/fallback: params.text or params.delta
+            let content = payload_text(value).unwrap_or("");
             if !content.is_empty() {
                 Some(ChatEvent::Token {
                     content: content.to_string(),
@@ -129,11 +156,7 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
             }
         }
         "reasoning.delta" | "thinking.delta" => {
-            let content = value
-                .get("params")
-                .and_then(|p| p.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let content = payload_text(value).unwrap_or("");
             if !content.is_empty() {
                 Some(ChatEvent::Reasoning {
                     content: content.to_string(),
@@ -143,37 +166,15 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
             }
         }
         "tool.start" => {
-            let name = value
-                .get("params")
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("tool");
-            let tool_id = value
-                .get("params")
-                .and_then(|p| p.get("tool_id"))
-                .and_then(|id| id.as_str())
-                .unwrap_or("");
+            let (name, tool_id) = payload_tool_id(value);
             Some(ChatEvent::ToolStart {
                 name: name.to_string(),
                 tool_call_id: tool_id.to_string(),
             })
         }
         "tool.complete" => {
-            let name = value
-                .get("params")
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("tool");
-            let tool_id = value
-                .get("params")
-                .and_then(|p| p.get("tool_id"))
-                .and_then(|id| id.as_str())
-                .unwrap_or("");
-            let output = value
-                .get("params")
-                .and_then(|p| p.get("output"))
-                .and_then(|o| o.as_str())
-                .unwrap_or("");
+            let (name, tool_id) = payload_tool_id(value);
+            let output = payload_field(value, "output").unwrap_or("");
             Some(ChatEvent::ToolComplete {
                 name: name.to_string(),
                 tool_call_id: tool_id.to_string(),
@@ -549,8 +550,9 @@ mod tests {
 
     #[test]
     fn ws_message_delta_is_token() {
+        // Real wire format: params.payload.text (legacy params.delta fallback still works)
         let ev = ws_event(
-            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","delta":"Hi there"}}"#,
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","payload":{"text":"Hi there"}}}"#,
         );
         match ev {
             Some(ChatEvent::Token { content }) => assert_eq!(content, "Hi there"),
@@ -567,6 +569,44 @@ mod tests {
         match ev {
             Some(ChatEvent::Token { content }) => assert_eq!(content, "alt"),
             other => panic!("expected Token, got {:?}", other),
+        }
+    }
+
+    // ── Real wire format: params.payload.text (server.py _emit, confirmed) ──
+    // The actual backend frame is:
+    //   {"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s1","payload":{"text":"<token>"}}}
+    // Text lives in params.payload.text — NOT params.text, NOT params.delta.
+
+    #[test]
+    fn ws_message_delta_real_wire_format_payload_text() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s1","payload":{"text":"Hello world"}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "Hello world"),
+            other => panic!("expected Token with payload.text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_reasoning_delta_real_wire_format_payload_text() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.delta","session_id":"s1","payload":{"text":"thinking..."}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Reasoning { content }) => assert_eq!(content, "thinking..."),
+            other => panic!("expected Reasoning with payload.text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_complete_real_wire_format() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"s1","payload":{"text":"full response","usage":{}}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Done { session_id }) => assert_eq!(session_id.as_deref(), Some("s1")),
+            other => panic!("expected Done, got {:?}", other),
         }
     }
 
