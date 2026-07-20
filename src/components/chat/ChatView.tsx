@@ -305,10 +305,15 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
             savedPaths.push(att.path);
           } else if (att.file) {
             try {
+              // P1-AUDIT: pass the raw Uint8Array directly. Tauri v2 serializes
+              // a Uint8Array argument as a binary buffer (not a JSON number
+              // array), so we must NOT wrap it with Array.from — that would
+              // expand every byte into a separate JS number and JSON element,
+              // causing O(n) memory blow-up and UI blocking for large files.
               const buf = new Uint8Array(await att.file.arrayBuffer());
               const ext = att.file.name.split(".").pop() || "bin";
               const path = await invoke<string>("save_media_blob_cmd", {
-                data: Array.from(buf),
+                data: buf,
                 ext,
               });
               savedPaths.push(path);

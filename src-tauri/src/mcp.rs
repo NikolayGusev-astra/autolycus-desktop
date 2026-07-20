@@ -149,94 +149,6 @@ pub(crate) fn read_mcp_servers_yaml(hermes_home: &Path, profile: Option<&str>) -
     out
 }
 
-/// Serialize the full `mcp_servers:` map back into config.yaml, preserving the
-/// rest of the file. Uses yaml-rust2 round-trip: load → replace the
-/// `mcp_servers` key → emit.
-///
-/// **WARNING:** This rewrites the ENTIRE file via YamlEmitter, which drops
-/// comments and any fields not in McpServerConfig (headers, timeout, etc.).
-/// It is kept only for `add_mcp_server` (which needs to create a brand-new
-/// block and is rare). All other operations use line-based editing via
-/// `set_yaml_block_scalars` to avoid clobbering the user's config.
-fn write_mcp_servers_yaml(
-    hermes_home: &Path,
-    profile: Option<&str>,
-    servers: &HashMap<String, McpServerConfig>,
-) -> Result<(), String> {
-    use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
-
-    let path = config_yaml_path(hermes_home, profile);
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-
-    // Load the existing YAML doc (or start fresh).
-    let mut docs = YamlLoader::load_from_str(&content)
-        .map_err(|e| format!("config.yaml parse error: {}", e))?;
-    let mut root = docs.pop().unwrap_or(Yaml::Hash(yaml_rust2::yaml::Hash::new()));
-
-    // Build the mcp_servers hash.
-    let mut mcp_hash = yaml_rust2::yaml::Hash::new();
-    for (name, cfg) in servers {
-        let mut entry = yaml_rust2::yaml::Hash::new();
-        if let Some(url) = &cfg.url {
-            entry.insert(Yaml::String("url".into()), Yaml::String(url.clone()));
-        }
-        if let Some(cmd) = &cfg.command {
-            entry.insert(Yaml::String("command".into()), Yaml::String(cmd.clone()));
-        }
-        if let Some(args) = &cfg.args {
-            entry.insert(
-                Yaml::String("args".into()),
-                Yaml::Array(args.iter().map(|a| Yaml::String(a.clone())).collect()),
-            );
-        }
-        if let Some(env) = &cfg.env {
-            let mut env_hash = yaml_rust2::yaml::Hash::new();
-            for (k, v) in env {
-                env_hash.insert(Yaml::String(k.clone()), Yaml::String(v.clone()));
-            }
-            entry.insert(Yaml::String("env".into()), Yaml::Hash(env_hash));
-        }
-        if let Some(auth) = &cfg.auth {
-            entry.insert(Yaml::String("auth".into()), Yaml::String(auth.clone()));
-        }
-        if let Some(enabled) = cfg.enabled {
-            entry.insert(Yaml::String("enabled".into()), Yaml::Boolean(enabled));
-        }
-        mcp_hash.insert(Yaml::String(name.clone()), Yaml::Hash(entry));
-    }
-
-    if let Yaml::Hash(ref mut h) = root {
-        if mcp_hash.is_empty() {
-            h.remove(&Yaml::String("mcp_servers".into()));
-        } else {
-            h.insert(Yaml::String("mcp_servers".into()), Yaml::Hash(mcp_hash));
-        }
-    } else {
-        // root is null/empty — wrap in a hash.
-        let mut h = yaml_rust2::yaml::Hash::new();
-        if !mcp_hash.is_empty() {
-            h.insert(Yaml::String("mcp_servers".into()), Yaml::Hash(mcp_hash));
-        }
-        root = Yaml::Hash(h);
-    }
-
-    // Emit. yaml-rust2 YamlEmitter drops comments (known trade-off, documented
-    // in T3 prompt). Acceptable: the rest of the structure + keys are preserved.
-    let mut out = String::new();
-    {
-        let mut emitter = YamlEmitter::new(&mut out);
-        emitter
-            .dump(&root)
-            .map_err(|e| format!("config.yaml emit error: {}", e))?;
-    }
-    // YamlEmitter prepends "---\n"; strip the leading document marker to keep
-    // config.yaml a plain mapping (matches how Hermes writes it).
-    let out = out.strip_prefix("---\n").unwrap_or(&out).to_string();
-
-    std::fs::write(&path, out).map_err(|e| format!("Write config.yaml error: {}", e))?;
-    Ok(())
-}
-
 // ── List MCP servers ──────────────────────────────────────────────────────
 
 pub fn list_mcp_servers(hermes_home: &Path, profile: Option<&str>) -> Vec<McpServer> {
@@ -391,7 +303,6 @@ pub fn remove_mcp_server(
     let lines: Vec<&str> = content.lines().collect();
 
     // Find the server block start: `  <name>:` at 2-space indent inside mcp_servers.
-    let header_pat = format!("  {}:", name);
     let server_idx = lines.iter().position(|l| l.trim_start() == format!("{}:", name) && l.starts_with("  ") && !l.starts_with("   "));
 
     let server_idx = match server_idx {
@@ -473,7 +384,6 @@ fn update_server_env_linebased(
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
 
     // Phase 1: locate the `  <server_name>:` line inside mcp_servers.
-    let server_line_pat = format!("  {}:", server_name);
     let server_idx = lines.iter().position(|l| l.trim_start() == format!("{}:", server_name) && l.starts_with("  ") && !l.starts_with("   "));
 
     let server_idx = match server_idx {
@@ -570,17 +480,14 @@ pub fn test_mcp_server(
     _profile: Option<&str>,
     _name: &str,
 ) -> Result<(bool, Option<String>, Option<Vec<McpToolInfo>>), String> {
-    // In a real implementation, this would connect to the MCP server and list tools
-    Ok((
-        true,
-        None,
-        Some(vec![
-            McpToolInfo {
-                name: "example_tool".to_string(),
-                description: "An example tool".to_string(),
-            },
-        ]),
-    ))
+    // Not yet implemented — real probe would:
+    // 1. spawn/connect to MCP server
+    // 2. send initialize request
+    // 3. send notifications/initialized
+    // 4. send tools/list
+    // 5. controlled shutdown with timeout
+    // Using McpStdioClient as the transport layer.
+    Err("NotImplemented: MCP server test probe not yet implemented".to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -596,6 +503,9 @@ pub fn list_mcp_catalog(
     _profile: Option<&str>,
 ) -> Result<Vec<McpCatalogEntry>, String> {
     // Return empty catalog — in real implementation this would scan a catalog
+    // (local registry, remote index, or embedded manifest) and return available
+    // MCP servers with metadata.
+    // For now, return empty to avoid fake data.
     Ok(Vec::new())
 }
 
@@ -607,7 +517,12 @@ pub fn install_mcp_catalog_entry(
     _name: &str,
     _env: Option<HashMap<String, String>>,
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
-    Ok((true, None, Some("installed".to_string()), None))
+    // Not yet implemented — real implementation would:
+    // 1. Fetch catalog entry metadata
+    // 2. Install dependencies (npm, pip, binary)
+    // 3. Write config.yaml mcp_servers entry with env
+    // 4. Return installation status, command path, and any post-install instructions
+    Err("NotImplemented: MCP catalog install not yet implemented".to_string())
 }
 
 /// Sync MCP credentials into config.yaml mcp_servers.<name>.env: blocks
@@ -784,10 +699,8 @@ mod tests {
 
     // ── Round-trip preservation tests ───────────────────────────────────────
     //
-    // The old write_mcp_servers_yaml used YamlEmitter::dump(), which rewrote
-    // the ENTIRE file — dropping comments and fields not in McpServerConfig
-    // (headers, timeout, connect_timeout). These tests prove the line-based
-    // operations preserve everything.
+    // The line-based operations preserve everything: comments, unknown fields
+    // (headers, timeout, connect_timeout), and other servers.
 
     /// A realistic config.yaml fixture with comments + unknown fields (headers,
     /// timeout, connect_timeout) that McpServerConfig doesn't model.

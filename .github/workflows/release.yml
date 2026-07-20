@@ -5,12 +5,62 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
+  ci:
+    name: CI (PR checks)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run lint
+
+      - run: npm run test
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo test --all-targets
+
   build-linux:
+    needs: ci
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -37,13 +87,32 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - run: npm install
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - run: npm ci
 
       - name: Build
         shell: bash
         run: |
           rm -rf node_modules/.vite || true
-          npx vite build
           npx tauri build --target x86_64-unknown-linux-gnu
 
       - name: Upload AppImage
@@ -59,6 +128,7 @@ jobs:
           path: src-tauri/target/*/release/bundle/deb/*.deb
 
   build-windows:
+    needs: ci
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,13 +144,32 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y
 
-      - run: npm install
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - run: npm ci
 
       - name: Build
         shell: bash
         run: |
           rm -rf node_modules/.vite || true
-          npx vite build
           npx tauri build --target x86_64-pc-windows-msvc
 
       - name: Upload MSI
@@ -106,6 +195,7 @@ jobs:
           generate_release_notes: true
 
   build-macos:
+    needs: ci
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,13 +208,32 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - run: npm install
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - run: npm ci
 
       - name: Build (Universal Binary)
         shell: bash
         run: |
           rm -rf node_modules/.vite || true
-          npx vite build
           npx tauri build --target universal-apple-darwin
 
       - name: Upload .dmg
@@ -141,6 +250,7 @@ jobs:
 
   publish-release:
     needs: [build-linux, build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -150,7 +260,9 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.dmg" -o -name "*.app" \) -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
+          # .app is a directory, need to zip it
+          find artifacts -type d -name "*.app" -exec zip -r {}.zip {} \; -exec mv {}.zip release-assets/ \;
           ls -la release-assets/
 
       - name: Upload to GitHub Release

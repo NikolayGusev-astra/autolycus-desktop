@@ -202,7 +202,7 @@ pub fn test_ssh_connection(config: &SshConfig) -> Result<bool, String> {
 
 // ── SSH remote exec ───────────────────────────────────────────────────────
 
-pub fn ssh_exec(config: &SshConfig, command: &str, _timeout_secs: u64) -> Result<String, String> {
+pub fn ssh_exec(config: &SshConfig, command: &str, timeout_secs: u64) -> Result<String, String> {
     let key_path = expand_tilde(&config.key_path);
 
     let output = Command::new("ssh")
@@ -211,7 +211,7 @@ pub fn ssh_exec(config: &SshConfig, command: &str, _timeout_secs: u64) -> Result
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
-        .arg("ConnectTimeout=15")
+        .arg(format!("ConnectTimeout={}", timeout_secs))
         .arg("-i")
         .arg(&key_path)
         .arg("-p")

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::config::{self, SshConfig};
 use crate::gateway::{self, GatewayState};
@@ -358,12 +358,12 @@ async fn send_via_ws_remote(
 /// Builds the WS URL from the spawned gateway's port and reads the auth token
 /// from `HERMES_DASHBOARD_SESSION_TOKEN`. Returns the URL + None if the gateway
 /// is not yet running.
-fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, String> {
-    let port = gateway::get_gateway_port(gateway_state, None)
+async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, String> {
+    let port = gateway::get_gateway_port(gateway_state, None).await
         .ok_or("Gateway not available (no port)")?;
     // Token: prefer the one Steersman generated for the spawned process (P1);
     // fall back to HERMES_DASHBOARD_SESSION_TOKEN env for Phase 0 compatibility.
-    let token = gateway::get_gateway_session_token(gateway_state, None)
+    let token = gateway::get_gateway_session_token(gateway_state, None).await
         .or_else(|| {
             std::env::var("HERMES_DASHBOARD_SESSION_TOKEN")
                 .ok()
@@ -391,7 +391,7 @@ pub async fn send_via_ws_persistent_local(
     request: &SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
-    let ws_url = build_local_ws_url(gateway_state)?;
+    let ws_url = build_local_ws_url(gateway_state).await?;
 
     // Ensure the persistent connection is open (idempotent).
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
@@ -426,46 +426,6 @@ pub async fn send_via_ws_persistent_local(
     Ok(session_id)
 }
 
-/// Builds the WS URL from the spawned gateway's port and reads the auth token
-/// from `HERMES_DASHBOARD_SESSION_TOKEN` (Phase 0: the token is supplied by the
-/// already-running `hermes serve` process; Phase 1 will have Steersman spawn
-/// `hermes serve` itself and generate the token).
-async fn send_via_ws_local(
-    gateway_state: &GatewayState,
-    request: &SendMessageRequest,
-    app_handle: &AppHandle,
-) -> Result<String, String> {
-    let port = gateway::get_gateway_port(gateway_state, None)
-        .ok_or("Gateway not available (no port)")?;
-    // Token: prefer the one Steersman generated for the spawned process (P1);
-    // fall back to HERMES_DASHBOARD_SESSION_TOKEN env for Phase 0 compatibility.
-    let token = gateway::get_gateway_session_token(gateway_state, None)
-        .or_else(|| {
-            std::env::var("HERMES_DASHBOARD_SESSION_TOKEN")
-                .ok()
-                .filter(|v| !v.is_empty())
-        })
-        .ok_or_else(|| {
-            "No dashboard session token: gateway not spawned by Steersman, \
-             and HERMES_DASHBOARD_SESSION_TOKEN env is unset."
-                .to_string()
-        })?;
-    // The session token is base64url (secrets.token_urlsafe in upstream),
-    // whose alphabet [A-Za-z0-9_-] needs no percent-encoding in a query string.
-    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
-    // send_message_via_ws returns Result<_, WsError> (typed); convert to String
-    // at the Tauri-command boundary. Full Result<_,String> -> typed migration
-    // across chat.rs is out of P3.3 scope (only the WS path is typed here).
-    crate::ws_transport::send_message_via_ws(
-        &ws_url,
-        request.session_id.as_deref(),
-        &request.text,
-        app_handle,
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
 pub async fn send_message(
     gateway_state: &GatewayState,
     ssh_state: &SshState,
@@ -484,9 +444,9 @@ pub async fn send_message(
     match connection_mode {
         ConnectionMode::Local => {
             // Check if gateway is running
-            if !gateway::is_gateway_running(gateway_state, None) {
+            if !gateway::is_gateway_running(gateway_state, None).await {
                 // Try to start gateway
-                let result = gateway::start_gateway(gateway_state, hermes_home, None);
+                let result = gateway::start_gateway(gateway_state, hermes_home, None).await;
                 if !result.success {
                     return Err(result.error.unwrap_or("Failed to start gateway".to_string()));
                 }

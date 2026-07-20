@@ -16,6 +16,7 @@ mod memory;
 mod model_discovery;
 mod models;
 mod mcp;
+mod process_supervisor;
 mod profiles;
 mod productivity;
 mod provider_registry;
@@ -454,7 +455,7 @@ async fn auto_connect_local_cmd(
     let gateway_running = if instance.gateway_running {
         true
     } else {
-        let result = gateway::start_gateway(&state.gateway, &home, None);
+        let result = gateway::start_gateway(&state.gateway, &home, None).await;
         result.success
     };
 
@@ -832,7 +833,7 @@ async fn start_gateway_cmd(
         &state.gateway,
         &hermes_home,
         profile.as_deref(),
-    ))
+    ).await)
 }
 
 /// Stop gateway
@@ -841,7 +842,7 @@ async fn stop_gateway_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    gateway::stop_gateway(&state.gateway, profile.as_deref())?;
+    gateway::stop_gateway(&state.gateway, profile.as_deref()).await?;
     Ok(true)
 }
 
@@ -851,7 +852,7 @@ async fn gateway_status_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    Ok(gateway::is_gateway_running(&state.gateway, profile.as_deref()))
+    Ok(gateway::is_gateway_running(&state.gateway, profile.as_deref()).await)
 }
 
 /// Fetch available models from the gateway's /v1/models endpoint.
@@ -877,7 +878,7 @@ async fn get_gateway_port_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<Option<u16>, String> {
-    Ok(gateway::get_gateway_port(&state.gateway, profile.as_deref()))
+    Ok(gateway::get_gateway_port(&state.gateway, profile.as_deref()).await)
 }
 
 /// Start gateway on remote machine via SSH
@@ -1103,9 +1104,9 @@ async fn generate_smart_briefing_cmd(
     // briefing server needed (replaces mcp-smart-briefing/server.py).
     let prompt = briefing::briefing_prompt(days);
 
-    let port = gateway::get_gateway_port(&state.gateway, None)
+    let port = gateway::get_gateway_port(&state.gateway, None).await
         .ok_or("Gateway not available for briefing")?;
-    let token = gateway::get_gateway_session_token(&state.gateway, None)
+    let token = gateway::get_gateway_session_token(&state.gateway, None).await
         .ok_or("No session token for briefing")?;
     let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
 
@@ -1324,10 +1325,10 @@ async fn generate_meeting_briefing_cmd(
     );
     eprintln!("[meeting_briefing] Prompt length: {} chars", prompt.len());
 
-    let port = gateway::get_gateway_port(&state.gateway, None)
+    let port = gateway::get_gateway_port(&state.gateway, None).await
         .ok_or("Gateway not available for meeting briefing")?;
     eprintln!("[meeting_briefing] Gateway port: {}", port);
-    let token = gateway::get_gateway_session_token(&state.gateway, None)
+    let token = gateway::get_gateway_session_token(&state.gateway, None).await
         .ok_or("No session token for meeting briefing")?;
     eprintln!("[meeting_briefing] Got session token");
     let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);

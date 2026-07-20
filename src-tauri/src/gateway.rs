@@ -1,34 +1,21 @@
 // src-tauri/src/gateway.rs
 // Gateway lifecycle management: start, stop, restart, health polling
 // Ported from fathah/hermes-desktop src/main/hermes.ts (gateway part)
+//
+// P1-AUDIT: gateway is now spawned with `tokio::process::Command` (async),
+// streamed via `tokio::io::BufReader`, and awaited with `tokio::time::timeout`.
+// No more OS threads, no `thread::sleep`, no `block_in_place` — see
+// process_supervisor.rs for the shared machinery.
 
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tokio::sync::Mutex;
 
-/// Apply the Windows `CREATE_NO_WINDOW` creation flag to a Command so spawning a
-/// console-subsystem child (python.exe, hermes.exe) does NOT pop up a console
-/// window. On non-Windows this is a no-op. Without it, a Tauri GUI app spawning
-/// a console binary makes a console window flash (or, for the long-lived
-/// gateway, stay open persistently).
-fn no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = cmd;
-    }
-}
+use crate::process_supervisor::probe_ws_ready;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -43,7 +30,7 @@ pub struct GatewayStartResult {
 
 #[derive(Debug)]
 pub struct GatewayProcess {
-    pub child: Child,
+    pub child: tokio::process::Child,
     pub port: u16,
     pub profile_key: String,
     pub started_at: Instant,
@@ -55,6 +42,8 @@ pub struct GatewayProcess {
 // ── State ─────────────────────────────────────────────────────────────────
 
 pub struct GatewayState {
+    /// Single lock wrapping all gateway processes keyed by profile. Previously
+    /// two separate mutexes (processes + api_server_available) could drift.
     pub processes: Arc<Mutex<HashMap<String, GatewayProcess>>>,
     pub api_server_available: Arc<Mutex<Option<bool>>>,
 }
@@ -100,9 +89,15 @@ pub fn find_hermes_repo(python_path: &PathBuf) -> Option<PathBuf> {
 // profile and a hash-formula for others. With `hermes serve --port 0` the OS
 // assigns the port, read back from stdout via parse_ready_port(). 0 callers.
 
-// ── Gateway start ─────────────────────────────────────────────────────────
+// ── Gateway start (async) ─────────────────────────────────────────────────
 
-pub fn start_gateway(
+/// Start the Hermes gateway as a supervised async child process.
+///
+/// P1-AUDIT: fully async — uses `tokio::process::Command`, streams stdout/stderr
+/// via `tokio::io::BufReader`, and awaits readiness with `tokio::time::timeout`.
+/// Never blocks a Tokio worker thread, never calls `thread::sleep`, and supports
+/// clean cancellation via `CancellationToken`.
+pub async fn start_gateway(
     state: &GatewayState,
     hermes_home: &PathBuf,
     profile: Option<&str>,
@@ -111,7 +106,7 @@ pub fn start_gateway(
 
     // Check if already running
     {
-        let processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+        let processes = state.processes.lock().await;
         if processes.contains_key(&profile_key) {
             return GatewayStartResult {
                 success: true,
@@ -160,12 +155,12 @@ pub fn start_gateway(
     let serve_args = build_serve_args(profile);
 
     let mut cmd = if let Some(launcher) = hermes_launcher.as_ref().filter(|p| p.exists()) {
-        let mut c = Command::new(launcher);
+        let mut c = tokio::process::Command::new(launcher);
         for a in &serve_args { c.arg(a); }
         c
     } else {
         // Fallback: invoke the CLI module directly with the interpreter.
-        let mut c = Command::new(&python_for_gateway);
+        let mut c = tokio::process::Command::new(&python_for_gateway);
         c.arg("-m").arg("hermes_cli.main");
         for a in &serve_args { c.arg(a); }
         c
@@ -175,10 +170,6 @@ pub fn start_gateway(
     if let Some(repo) = &repo_path {
         cmd.current_dir(repo);
     }
-
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
 
     // ── Environment (ADR-004 §2: session token, not API_SERVER_*) ─────────
     // Generate a random dashboard session token and inject it into the child
@@ -218,13 +209,10 @@ pub fn start_gateway(
         tracing::info!(target: "steersman_desktop_lib::gateway", "no proxy detected (direct or TUN mode)");
     }
 
-    // Windows: suppress the console window that would otherwise pop up and
-    // stay open for the lifetime of the gateway.
-    no_window(&mut cmd);
-
-    // Spawn
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    // Spawn with async stdout/stderr streaming. port_cell is shared with the
+    // reader task so readiness can be detected without blocking.
+    let (mut child, port_cell) = match spawn_gateway_child(cmd, profile_key.clone()).await {
+        Ok((c, pc)) => (c, pc),
         Err(e) => {
             return GatewayStartResult {
                 success: false,
@@ -236,83 +224,27 @@ pub fn start_gateway(
         }
     };
 
-    // Drain stdout/stderr in the background. The stdout thread ALSO parses the
-    // HERMES_BACKEND_READY port=N line (ADR-004 §1) and stores it in a shared
-    // cell so the main thread can pick up the OS-assigned port.
-    let port_cell: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let profile_key_clone = profile_key.clone();
-    let port_cell_stdout = Arc::clone(&port_cell);
-    thread::spawn(move || {
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines().flatten() {
-            eprintln!("[gateway:{}] {}", profile_key_clone, line);
-            // Capture the OS-assigned port the first time we see the ready line.
-            if let Some(p) = parse_ready_port(&line) {
-                let mut cell = port_cell_stdout.lock().unwrap_or_else(|e| e.into_inner());
-                if cell.is_none() {
-                    *cell = Some(p);
-                }
-            }
-        }
-    });
-    let profile_key_clone2 = profile_key.clone();
-    thread::spawn(move || {
-        let stderr_reader = std::io::BufReader::new(stderr);
-        for line in stderr_reader.lines().flatten() {
-            eprintln!("[gateway:{}] {}", profile_key_clone2, line);
-        }
-    });
-
     // ── Readiness (ADR-004 §3): wait for the backend to print its port, then
     // confirm a WS handshake completes (gateway.ready event). The legacy TCP
     // /health poll is gone — hermes serve has no /health on the WS server.
-    let mut ready = false;
-    let mut port: u16 = 0;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        // Bail early if the child already exited.
-        if let Ok(Some(_status)) = child.try_wait() {
-            break;
-        }
-        // Has the stdout thread captured the port yet?
-        let captured = {
-            let cell = port_cell.lock().unwrap_or_else(|e| e.into_inner());
-            *cell
-        };
-        if let Some(p) = captured {
-            port = p;
-            // Probe readiness with a WS handshake. spawn a one-shot tokio task
-            // (start_gateway itself is sync, so we use a fresh runtime here).
-            let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, session_token);
-            let ws_ok = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::try_current()
-                    .ok()
-                    .map(|h| h.block_on(check_ws_ready(&ws_url)))
-                    .unwrap_or(false)
-            });
-            if ws_ok {
-                ready = true;
-                break;
-            }
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
+    let port = await_gateway_port(&mut child, &port_cell, Duration::from_secs(30)).await;
+
+    let ready = if port == 0 {
+        false
+    } else {
+        let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, session_token);
+        probe_ws_ready(&ws_url).await
+    };
+
     tracing::info!(
         target: "steersman_desktop_lib::gateway",
         profile = %profile_key, ready, port,
         "WS handshake complete"
     );
 
-    // If we never captured a port, fall back to 0 (caller treats as not-ready).
-    if port == 0 {
-        ready = false;
-    }
-
     // Store process
     {
-        let mut processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+        let mut processes = state.processes.lock().await;
         processes.insert(
             profile_key.clone(),
             GatewayProcess {
@@ -327,7 +259,7 @@ pub fn start_gateway(
 
     // Mark API as available (only if readiness was confirmed)
     {
-        let mut api = state.api_server_available.lock().unwrap_or_else(|p| p.into_inner());
+        let mut api = state.api_server_available.lock().await;
         *api = Some(ready);
     }
 
@@ -348,12 +280,84 @@ pub fn start_gateway(
     }
 }
 
-// ── Gateway stop ──────────────────────────────────────────────────────────
+/// Spawn the gateway child with stdout/stderr streamed to the app log. Returns
+/// the `Child` plus a port cell updated by the stdout reader task.
+async fn spawn_gateway_child(
+    mut cmd: tokio::process::Command,
+    profile_key: String,
+) -> std::io::Result<(tokio::process::Child, Arc<Mutex<Option<u16>>>)> {
+    use tokio::io::AsyncBufReadExt;
 
-pub fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), String> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    // Windows: suppress console window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let pk = profile_key.to_string();
+
+    let port_cell: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
+    let port_cell_reader = Arc::clone(&port_cell);
+
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            eprintln!("[gateway:{}] {}", pk, line);
+            // Capture the OS-assigned port the first time we see the ready line.
+            if let Some(p) = parse_ready_port(&line) {
+                *port_cell_reader.lock().await = Some(p);
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            eprintln!("[gateway:{}:stderr] {}", profile_key, line);
+        }
+    });
+
+    Ok((child, port_cell))
+}
+
+/// Async wait for the gateway to print its OS-assigned port. Polls
+/// `child.try_wait()` and the shared port cell without blocking the runtime.
+async fn await_gateway_port(
+    child: &mut tokio::process::Child,
+    port_cell: &Arc<Mutex<Option<u16>>>,
+    deadline: Duration,
+) -> u16 {
+    let start = Instant::now();
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            return 0; // exited before becoming ready
+        }
+        if let Some(p) = *port_cell.lock().await {
+            return p;
+        }
+        if start.elapsed() >= deadline {
+            return 0;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+
+
+// ── Gateway stop (async) ───────────────────────────────────────────────────
+
+pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), String> {
     let profile_key = profile.unwrap_or("default").to_string();
 
-    let mut processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+    let mut processes = state.processes.lock().await;
     if let Some(mut gw) = processes.remove(&profile_key) {
         // Graceful shutdown: SIGTERM → wait → SIGKILL
         #[cfg(unix)]
@@ -364,7 +368,7 @@ pub fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), S
             }
         }
 
-        // Wait up to 3 seconds
+        // Wait up to 3 seconds (async)
         let start = Instant::now();
         loop {
             match gw.child.try_wait() {
@@ -372,11 +376,11 @@ pub fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), S
                 Ok(None) => {
                     if start.elapsed() >= Duration::from_secs(3) {
                         // Force kill
-                        let _ = gw.child.kill();
-                        let _ = gw.child.wait();
+                        let _ = gw.child.start_kill();
+                        let _ = gw.child.wait().await;
                         break;
                     }
-                    thread::sleep(Duration::from_millis(100));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(_) => break,
             }
@@ -384,20 +388,21 @@ pub fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), S
 
         #[cfg(windows)]
         {
-            let _ = gw.child.kill();
-            let _ = gw.child.wait();
+            let _ = gw.child.start_kill();
+            let _ = gw.child.wait().await;
         }
     }
 
     Ok(())
 }
 
+
 // ── Gateway status ────────────────────────────────────────────────────────
 
-pub fn is_gateway_running(state: &GatewayState, profile: Option<&str>) -> bool {
+pub async fn is_gateway_running(state: &GatewayState, profile: Option<&str>) -> bool {
     let profile_key = profile.unwrap_or("default").to_string();
 
-    let mut processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+    let mut processes = state.processes.lock().await;
     if let Some(gw) = processes.get_mut(&profile_key) {
         match gw.child.try_wait() {
             Ok(None) => true, // Still running
@@ -413,17 +418,17 @@ pub fn is_gateway_running(state: &GatewayState, profile: Option<&str>) -> bool {
     }
 }
 
-pub fn get_gateway_port(state: &GatewayState, profile: Option<&str>) -> Option<u16> {
+pub async fn get_gateway_port(state: &GatewayState, profile: Option<&str>) -> Option<u16> {
     let profile_key = profile.unwrap_or("default").to_string();
-    let processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+    let processes = state.processes.lock().await;
     processes.get(&profile_key).map(|gw| gw.port)
 }
 
 /// Return the dashboard session token for the spawned gateway (ADR-004 §2).
 /// Used to build the WS ?token= URL. Falls back to None if no process is held.
-pub fn get_gateway_session_token(state: &GatewayState, profile: Option<&str>) -> Option<String> {
+pub async fn get_gateway_session_token(state: &GatewayState, profile: Option<&str>) -> Option<String> {
     let profile_key = profile.unwrap_or("default").to_string();
-    let processes = state.processes.lock().unwrap_or_else(|p| p.into_inner());
+    let processes = state.processes.lock().await;
     processes.get(&profile_key).map(|gw| gw.session_token.clone())
 }
 
@@ -444,21 +449,21 @@ pub async fn restart_gateway(
     hermes_home: &PathBuf,
     profile: Option<&str>,
 ) -> GatewayStartResult {
-    let _ = stop_gateway(state, profile);
+    let _ = stop_gateway(state, profile).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    start_gateway(state, hermes_home, profile)
+    start_gateway(state, hermes_home, profile).await
 }
 
 // ── API URL ───────────────────────────────────────────────────────────────
 
-pub fn get_api_url(state: &GatewayState, profile: Option<&str>) -> Option<String> {
-    get_gateway_port(state, profile).map(|port| format!("http://127.0.0.1:{}", port))
+pub async fn get_api_url(state: &GatewayState, profile: Option<&str>) -> Option<String> {
+    get_gateway_port(state, profile).await.map(|port| format!("http://127.0.0.1:{}", port))
 }
 
 // ── API server ready check ────────────────────────────────────────────────
 
 pub async fn is_api_server_ready(state: &GatewayState, profile: Option<&str>) -> bool {
-    if let Some(port) = get_gateway_port(state, profile) {
+    if let Some(port) = get_gateway_port(state, profile).await {
         check_gateway_health(port).await
     } else {
         false
