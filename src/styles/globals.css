@@ -488,6 +488,57 @@
     letter-spacing: 0.3px;
   }
 
+  /* Briefing markdown — compact rendering inside dashboard tile */
+  .briefing-markdown h1 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin: 0 0 0.5rem;
+    color: var(--color-ac-ink);
+  }
+  .briefing-markdown h2 {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0.75rem 0 0.25rem;
+    color: var(--color-ac-brand);
+    border-bottom: 1px solid var(--color-ac-border);
+    padding-bottom: 2px;
+  }
+  .briefing-markdown h3 {
+    font-size: 0.7rem;
+    font-weight: 600;
+    margin: 0.5rem 0 0.25rem;
+    color: var(--color-ac-ink);
+  }
+  .briefing-markdown p {
+    margin: 0 0 0.25rem;
+    line-height: 1.4;
+  }
+  .briefing-markdown ul {
+    list-style: none;
+    padding-left: 0;
+    margin: 0 0 0.25rem;
+  }
+  .briefing-markdown ul > li {
+    padding-left: 0.75rem;
+    text-indent: -0.75rem;
+    margin-bottom: 0.1rem;
+    line-height: 1.35;
+  }
+  .briefing-markdown ul > li::before {
+    content: "•";
+    color: var(--color-ac-muted);
+    margin-right: 0.35rem;
+  }
+  .briefing-markdown strong {
+    font-weight: 700;
+    color: var(--color-ac-ink);
+  }
+  .briefing-markdown code {
+    font-size: 0.7rem;
+  }
+
   /* Modal overlay */
   .ac-modal-overlay {
     position: fixed;

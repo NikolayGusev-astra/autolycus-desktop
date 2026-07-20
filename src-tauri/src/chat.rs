@@ -87,85 +87,9 @@ pub struct HistoryItem {
 }
 
 // ── SSE Parser ────────────────────────────────────────────────────────────
-
-pub struct SseParser {
-    pub has_content: bool,
-    pub last_error: String,
-}
-
-impl SseParser {
-    pub fn new() -> Self {
-        Self {
-            has_content: false,
-            last_error: String::new(),
-        }
-    }
-
-    /// Process a single SSE data line
-    pub fn process_data(&mut self, data: &str) -> Option<ChatEvent> {
-        if data == "[DONE]" {
-            return Some(ChatEvent::Done { session_id: None });
-        }
-
-        let parsed: Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return None,
-        };
-
-        // Check for error
-        if let Some(err) = parsed.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error");
-            self.last_error = msg.to_string();
-            return Some(ChatEvent::Error {
-                message: msg.to_string(),
-            });
-        }
-
-        // Extract delta
-        let delta = parsed.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta"));
-
-        // Extract usage
-        if let Some(_usage) = parsed.get("usage") {
-            // Usage is typically in the final chunk
-        }
-
-        if let Some(delta) = delta {
-            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                if !content.is_empty() {
-                    self.has_content = true;
-                    return Some(ChatEvent::Token {
-                        content: content.to_string(),
-                    });
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Parse a full SSE block (may contain event: and data: lines)
-    pub fn parse_block(block: &str) -> Option<(String, String)> {
-        let mut event_type = String::new();
-        let mut data_line = String::new();
-
-        for line in block.lines() {
-            if line.starts_with("event: ") {
-                event_type = line[7..].trim().to_string();
-            } else if line.starts_with("data: ") {
-                data_line = line[6..].to_string();
-            }
-        }
-
-        if data_line.is_empty() {
-            None
-        } else {
-            Some((event_type, data_line))
-        }
-    }
-}
+// REMOVED (P2.1 cleanup follow-up): SseParser was the HTTP /v1/chat/completions
+// SSE-stream parser. With the WS migration (ADR-004/005) all transports use
+// parse_ws_message / parse_gateway_event; SseParser had 0 callers.
 
 // ── API-based chat (remote mode) ──────────────────────────────────────────
 // REMOVED (ADR-004, P2.1): send_message_via_api() targeted the HTTP
@@ -180,6 +104,37 @@ impl SseParser {
 // parse_gateway_event() below is retained — it is the core of parse_ws_message
 // (the live WS wire-envelope dispatcher).
 
+// ── Payload extraction helpers (real wire format, server.py _emit) ────────
+//
+// The upstream backend stamps every event as:
+//   {jsonrpc:"2.0", method:"event", params:{type, session_id, payload:{...}}}
+// Content fields (text, name, tool_id, output) live INSIDE params.payload,
+// not at the params top level. These helpers read payload.<field> with a
+// fallback to params.<field> for backward compat with older event shapes.
+
+/// Read the "text" field from an event — checks params.payload.text first
+/// (real wire format), then params.text (legacy fallback).
+fn payload_text(value: &Value) -> Option<&str> {
+    payload_field(value, "text")
+}
+
+/// Read a named field from params.payload.<field>, falling back to params.<field>.
+fn payload_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get("params")
+        .and_then(|p| p.get("payload"))
+        .and_then(|pl| pl.get(field))
+        .or_else(|| value.get("params").and_then(|p| p.get(field)))
+        .and_then(|v| v.as_str())
+}
+
+/// Read tool name + tool_id from payload (or fallback to params top-level).
+fn payload_tool_id(value: &Value) -> (&str, &str) {
+    let name = payload_field(value, "name").unwrap_or("tool");
+    let tool_id = payload_field(value, "tool_id").unwrap_or("");
+    (name, tool_id)
+}
+
 fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
     let event_type = value
         .get("params")
@@ -188,12 +143,10 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
         .and_then(|t| t.as_str())?;
 
     match event_type {
-        "message.chunk" | "token" => {
-            let content = value
-                .get("params")
-                .and_then(|p| p.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+        "message.chunk" | "token" | "message.delta" => {
+            // Real wire format (server.py _emit): params.payload.text
+            // Legacy/fallback: params.text or params.delta
+            let content = payload_text(value).unwrap_or("");
             if !content.is_empty() {
                 Some(ChatEvent::Token {
                     content: content.to_string(),
@@ -203,11 +156,7 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
             }
         }
         "reasoning.delta" | "thinking.delta" => {
-            let content = value
-                .get("params")
-                .and_then(|p| p.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let content = payload_text(value).unwrap_or("");
             if !content.is_empty() {
                 Some(ChatEvent::Reasoning {
                     content: content.to_string(),
@@ -217,47 +166,36 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
             }
         }
         "tool.start" => {
-            let name = value
-                .get("params")
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("tool");
-            let tool_id = value
-                .get("params")
-                .and_then(|p| p.get("tool_id"))
-                .and_then(|id| id.as_str())
-                .unwrap_or("");
+            let (name, tool_id) = payload_tool_id(value);
             Some(ChatEvent::ToolStart {
                 name: name.to_string(),
                 tool_call_id: tool_id.to_string(),
             })
         }
         "tool.complete" => {
-            let name = value
+            let (name, tool_id) = payload_tool_id(value);
+            let output = payload_field(value, "output").unwrap_or("");
+            // Backend (server.py:3695) emits `duration_s` as a float (seconds).
+            // The frontend ChatEvent contract expects `duration_ms`. Convert
+            // seconds → milliseconds; fall back to 0 if absent.
+            let duration_ms = value
                 .get("params")
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("tool");
-            let tool_id = value
-                .get("params")
-                .and_then(|p| p.get("tool_id"))
-                .and_then(|id| id.as_str())
-                .unwrap_or("");
-            let output = value
-                .get("params")
-                .and_then(|p| p.get("output"))
-                .and_then(|o| o.as_str())
-                .unwrap_or("");
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("duration_s"))
+                .or_else(|| value.get("params").and_then(|p| p.get("duration_s")))
+                .and_then(|d| d.as_f64())
+                .map(|secs| (secs * 1000.0) as u64)
+                .unwrap_or(0);
             Some(ChatEvent::ToolComplete {
                 name: name.to_string(),
                 tool_call_id: tool_id.to_string(),
                 output: output.to_string(),
-                duration_ms: 0,
+                duration_ms,
             })
         }
-        "message.end" | "done" => {
-            // upstream emits session_id in params on message.end; the frontend
-            // pins currentSessionId from it (ChatView.tsx:201-203).
+        "message.end" | "message.complete" | "message.done" | "done" => {
+            // upstream emits session_id in params on message.complete (the real
+            // terminal event); the frontend pins currentSessionId from it.
             let session_id = value
                 .get("params")
                 .and_then(|p| p.get("session_id"))
@@ -265,6 +203,9 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .map(|s| s.to_string());
             Some(ChatEvent::Done { session_id })
         }
+        "message.start" => Some(ChatEvent::Status {
+            status: "streaming".to_string(),
+        }),
         "error" => {
             let msg = value
                 .get("params")
@@ -285,6 +226,33 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .unwrap_or("unknown");
             Some(ChatEvent::Status {
                 status: status.to_string(),
+            })
+        }
+        "approval.request" => {
+            // Backend (_emit_approval_request, server.py:1147-1166) emits a
+            // payload with: command (redacted), choices, smart_denied,
+            // allow_permanent, and the tool context. Map to ChatEvent fields
+            // the frontend ChatView.tsx:229 expects.
+            let request_id = payload_field(value, "request_id")
+                .or_else(|| payload_field(value, "tool_id"))
+                .unwrap_or("");
+            let tool_name = payload_field(value, "name")
+                .or_else(|| payload_field(value, "tool_name"))
+                .unwrap_or("tool");
+            let tool_input = payload_field(value, "command")
+                .or_else(|| payload_field(value, "tool_input"))
+                .unwrap_or("");
+            let action = payload_field(value, "action")
+                .or_else(|| payload_field(value, "message"))
+                .unwrap_or("");
+            let command_class = payload_field(value, "command_class")
+                .unwrap_or("write");
+            Some(ChatEvent::ApprovalRequest {
+                request_id: request_id.to_string(),
+                tool_name: tool_name.to_string(),
+                tool_input: tool_input.to_string(),
+                action: action.to_string(),
+                command_class: command_class.to_string(),
             })
         }
         _ => None,
@@ -388,6 +356,77 @@ async fn send_via_ws_remote(
 /// Local-mode WebSocket transport (ADR-004, Phase 0).
 ///
 /// Builds the WS URL from the spawned gateway's port and reads the auth token
+/// from `HERMES_DASHBOARD_SESSION_TOKEN`. Returns the URL + None if the gateway
+/// is not yet running.
+fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, String> {
+    let port = gateway::get_gateway_port(gateway_state, None)
+        .ok_or("Gateway not available (no port)")?;
+    // Token: prefer the one Steersman generated for the spawned process (P1);
+    // fall back to HERMES_DASHBOARD_SESSION_TOKEN env for Phase 0 compatibility.
+    let token = gateway::get_gateway_session_token(gateway_state, None)
+        .or_else(|| {
+            std::env::var("HERMES_DASHBOARD_SESSION_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            "No dashboard session token: gateway not spawned by Steersman, \
+             and HERMES_DASHBOARD_SESSION_TOKEN env is unset."
+                .to_string()
+        })?;
+    // The session token is base64url (secrets.token_urlsafe in upstream),
+    // whose alphabet [A-Za-z0-9_-] needs no percent-encoding in a query string.
+    Ok(format!("ws://127.0.0.1:{}/api/ws?token={}", port, token))
+}
+
+/// ADR-006: Send a chat message over the PERSISTENT local WS connection.
+///
+/// Ensures the connection is open (connecting once, lazily), resolves the
+/// session_id (creating a session if the frontend didn't pass one), and
+/// submits the prompt via the reader task's mpsc channel. Streaming events
+/// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
+pub async fn send_via_ws_persistent_local(
+    gateway_state: &GatewayState,
+    ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    request: &SendMessageRequest,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    let ws_url = build_local_ws_url(gateway_state)?;
+
+    // Ensure the persistent connection is open (idempotent).
+    let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
+    crate::ws_transport::ensure_ws_connection(&ws_url, emit_fn, ws_state)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Resolve session_id: prefer the frontend-supplied one, then the cached
+    // one in WsState. Create a new session only if both are absent.
+    let session_id = if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+        sid.to_string()
+    } else {
+        let cached = ws_state.session_id.lock().await.clone();
+        match cached {
+            Some(sid) if !sid.is_empty() => sid,
+            _ => {
+                // Create a new "desktop" session (the default chat surface).
+                let sid = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                *ws_state.session_id.lock().await = Some(sid.clone());
+                sid
+            }
+        }
+    };
+
+    // Submit the prompt — events stream back via chat_event.
+    crate::ws_transport::submit_prompt_on_connection(ws_state, &session_id, &request.text)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(session_id)
+}
+
+/// Builds the WS URL from the spawned gateway's port and reads the auth token
 /// from `HERMES_DASHBOARD_SESSION_TOKEN` (Phase 0: the token is supplied by the
 /// already-running `hermes serve` process; Phase 1 will have Steersman spawn
 /// `hermes serve` itself and generate the token).
@@ -437,6 +476,7 @@ pub async fn send_message(
     ssh_config: &Option<SshConfig>,
     request: SendMessageRequest,
     app_handle: &AppHandle,
+    ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
 ) -> Result<String, String> {
     // Note: model_config is no longer fetched here — the WS transport sends
     // only {session_id, text}; reasoning_effort/verbosity/etc. live in the
@@ -452,11 +492,10 @@ pub async fn send_message(
                 }
             }
 
-            // ADR-004: the local backend is `hermes serve`, which exposes the
-            // WebSocket /api/ws transport. There is no HTTP fallback — the
-            // legacy /v1/chat/completions endpoint does not exist on a real
-            // backend and has been removed (P2.1).
-            send_via_ws_local(gateway_state, &request, app_handle).await
+            // ADR-006: Local mode uses the PERSISTENT WS connection (one
+            // socket for the app lifetime). Remote/SSH still use connect-per-
+            // message (separate migration, out of scope for ADR-006).
+            send_via_ws_persistent_local(gateway_state, ws_state, &request, app_handle).await
         }
         ConnectionMode::Remote => {
             // ADR-005: Remote talks to a remote `hermes serve` over the same
@@ -493,60 +532,15 @@ pub async fn send_message(
     }
 }
 
-/// Resolve an autonomy policy name to a compact system-prompt text (practice 3).
-/// Returns None for unknown/empty policies so no system message is injected.
-/// Each policy is ONE sentence — the GPT-5.6 guide warns against repetitive
-/// "ask first" boilerplate that annoys users on safe actions.
-pub fn autonomy_policy_text(policy: Option<&str>) -> Option<&'static str> {
-    match policy? {
-        "" | "auto" => None,
-        "readonly" => Some(
-            "You are in read-only mode: gather information and report. Do not create, modify, or delete anything.",
-        ),
-        "local" => Some(
-            "You may make local changes and run checks without asking. External writes (messages, tickets, purchases, deletions) require user confirmation.",
-        ),
-        "confirm-external" => Some(
-            "All actions that affect external systems require explicit user confirmation. Local analysis and reporting are autonomous.",
-        ),
-        _ => None,
-    }
-}
+// REMOVED (P2.1 cleanup follow-up): autonomy_policy_text() injected an
+// autonomy-policy system message into the HTTP /v1/chat/completions body.
+// The WS transport sends only {session_id, text}; steer settings (reasoning
+// effort, autonomy policy, verbosity) live in the backend's config.yaml
+// (ADR-004). 0 callers in production code; its 5 unit tests removed with it.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn readonly_policy_produces_restriction() {
-        let text = autonomy_policy_text(Some("readonly"));
-        assert!(text.is_some());
-        assert!(text.unwrap().contains("read-only mode"));
-    }
-
-    #[test]
-    fn local_policy_allows_local_actions() {
-        let text = autonomy_policy_text(Some("local"));
-        assert!(text.unwrap().contains("local changes"));
-    }
-
-    #[test]
-    fn confirm_external_requires_confirmation() {
-        let text = autonomy_policy_text(Some("confirm-external"));
-        assert!(text.unwrap().contains("explicit user confirmation"));
-    }
-
-    #[test]
-    fn empty_policy_returns_none() {
-        assert_eq!(autonomy_policy_text(None), None);
-        assert_eq!(autonomy_policy_text(Some("")), None);
-        assert_eq!(autonomy_policy_text(Some("auto")), None);
-    }
-
-    #[test]
-    fn unknown_policy_returns_none() {
-        assert_eq!(autonomy_policy_text(Some("bogus")), None);
-    }
 
     // ── ADR-004: WebSocket transport — parser tests (TDD) ──────────────────
     // Fixtures mirror the real events emitted by the upstream tui_gateway
@@ -658,6 +652,101 @@ mod tests {
         assert!(ws_event("").is_none());
     }
 
+    // ── Real upstream event vocabulary (discovered via live WS probe) ───────
+    // The backend emits message.start/message.delta/message.complete (not
+    // message.chunk/message.end as the old parser assumed). message.delta is
+    // the real token stream; message.complete is the terminal event.
+
+    #[test]
+    fn ws_message_delta_is_token() {
+        // Real wire format: params.payload.text (legacy params.delta fallback still works)
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","payload":{"text":"Hi there"}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "Hi there"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_delta_with_text_field() {
+        // Some events carry the content in "text" instead of "delta".
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","text":"alt"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "alt"),
+            other => panic!("expected Token, got {:?}", other),
+        }
+    }
+
+    // ── Real wire format: params.payload.text (server.py _emit, confirmed) ──
+    // The actual backend frame is:
+    //   {"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s1","payload":{"text":"<token>"}}}
+    // Text lives in params.payload.text — NOT params.text, NOT params.delta.
+
+    #[test]
+    fn ws_message_delta_real_wire_format_payload_text() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s1","payload":{"text":"Hello world"}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Token { content }) => assert_eq!(content, "Hello world"),
+            other => panic!("expected Token with payload.text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_reasoning_delta_real_wire_format_payload_text() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.delta","session_id":"s1","payload":{"text":"thinking..."}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Reasoning { content }) => assert_eq!(content, "thinking..."),
+            other => panic!("expected Reasoning with payload.text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_complete_real_wire_format() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"s1","payload":{"text":"full response","usage":{}}}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Done { session_id }) => assert_eq!(session_id.as_deref(), Some("s1")),
+            other => panic!("expected Done, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_complete_is_terminal_done() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"s42"}}"#,
+        );
+        match ev {
+            Some(ChatEvent::Done { session_id }) => assert_eq!(session_id.as_deref(), Some("s42")),
+            other => panic!("expected Done, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ws_message_start_is_status() {
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.start"}}"#,
+        );
+        assert!(matches!(ev, Some(ChatEvent::Status { .. })));
+    }
+
+    #[test]
+    fn ws_session_info_is_ignored() {
+        // session.info is informational, not a streaming event to display.
+        let ev = ws_event(
+            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info"}}"#,
+        );
+        assert!(ev.is_none());
+    }
+
     // ── ADR-005: Remote/SSH scheme conversion (P3.2) ────────────────────────
 
     #[test]
@@ -689,5 +778,48 @@ mod tests {
     fn to_ws_url_ssh_tunnel_localhost() {
         // SSH tunnel exposes a loopback http URL; must become ws://.
         assert_eq!(to_ws_url("http://127.0.0.1:18642"), "ws://127.0.0.1:18642");
+    }
+
+    // ── T5 (ADR-006 audit): event vocabulary fixes ──────────────────────────
+
+    #[test]
+    fn tool_complete_parses_duration_seconds() {
+        // Backend (server.py:3695) emits duration_s as a float (seconds), but
+        // the frontend contract expects duration_ms. The parser must convert.
+        let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"tc1","name":"read_file","duration_s":1.5,"result":"ok"}}}"#;
+        match parse_ws_message(raw) {
+            Some(ChatEvent::ToolComplete { name, duration_ms, .. }) => {
+                assert_eq!(name, "read_file");
+                // 1.5s → 1500ms
+                assert_eq!(duration_ms, 1500, "1.5s must convert to 1500ms");
+            }
+            other => panic!("expected ToolComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_complete_defaults_duration_to_zero_when_absent() {
+        let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"tc1","name":"search"}}}"#;
+        match parse_ws_message(raw) {
+            Some(ChatEvent::ToolComplete { duration_ms, .. }) => {
+                assert_eq!(duration_ms, 0, "missing duration_s must default to 0");
+            }
+            other => panic!("expected ToolComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn approval_request_event_parsed() {
+        // Wire format from _emit_approval_request (server.py:1147-1166).
+        let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s1","payload":{"request_id":"apr1","name":"bash","command":"rm -rf /tmp","command_class":"dangerous","choices":["once","deny"]}}}"#;
+        match parse_ws_message(raw) {
+            Some(ChatEvent::ApprovalRequest { request_id, tool_name, tool_input, command_class, .. }) => {
+                assert_eq!(request_id, "apr1");
+                assert_eq!(tool_name, "bash");
+                assert_eq!(tool_input, "rm -rf /tmp");
+                assert_eq!(command_class, "dangerous");
+            }
+            other => panic!("expected ApprovalRequest, got {:?}", other),
+        }
     }
 }

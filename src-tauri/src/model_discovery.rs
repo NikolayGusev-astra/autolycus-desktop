@@ -182,6 +182,19 @@ pub async fn discover_models(
     api_key: Option<&str>,
     use_proxy: bool,
 ) -> DiscoveryResult {
+    discover_models_with_home(provider, base_url, api_key, use_proxy, None).await
+}
+
+/// Discovery variant that resolves the proxy from a specific hermes_home
+/// (not a hardcoded ~/.hermes). When `hermes_home` is None, falls back to
+/// resolve_hermes_home() so existing callers work unchanged.
+pub async fn discover_models_with_home(
+    provider: &str,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    use_proxy: bool,
+    hermes_home: Option<&std::path::Path>,
+) -> DiscoveryResult {
     let p = provider.to_lowercase();
 
     if NON_DISCOVERABLE.contains(&p.as_str()) {
@@ -216,15 +229,13 @@ pub async fn discover_models(
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10));
         if use_proxy {
-            // Resolve the user's global proxy config. `resolve_url()` already
-            // honours `use_proxy == false` (returns "") and falls back to
-            // HTTP_PROXY/HTTPS_PROXY env vars, so no extra gating needed here.
-            // The previous code used `dirs::home_dir().unwrap_or_default()`
-            // which silently produced an empty path (".hermes") when HOME was
-            // unset — guard with `Some(...)` instead.
-            let proxy_url = dirs::home_dir()
-                .map(|h| crate::config::get_model_config(&h.join(".hermes"), None).proxy.resolve_url())
-                .unwrap_or_default();
+            // Resolve the proxy from the REAL hermes home (not a hardcoded
+            // ~/.hermes — that reads the wrong config on uv-managed Windows
+            // installs where HERMES_HOME points at AppData/Local/hermes).
+            let home = hermes_home
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| crate::config::resolve_hermes_home());
+            let proxy_url = crate::config::resolve_effective_proxy(&home, None);
             if !proxy_url.is_empty() {
                 // If the proxy URL is malformed, fall back to a direct client
                 // rather than failing the whole discovery call.
@@ -336,6 +347,25 @@ pub fn get_oauth_models(provider: &str) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live debug — run with:
+    ///   cargo test --lib live_discover_kilo -- --nocapture --ignored
+    /// Verifies discovery works against the real kilocode provider using
+    /// creds from the credential pool (auth.json) + proxy from config.yaml.
+    #[tokio::test]
+    #[ignore]
+    async fn live_discover_kilo() {
+        let home = crate::config::resolve_hermes_home();
+        eprintln!("hermes_home = {}", home.display());
+        let result = discover_models_with_home("kilo", None, None, true, Some(&home)).await;
+        eprintln!("success={}, models={}, error={:?}", result.success, result.models.len(), result.error);
+        if result.success {
+            for m in result.models.iter().take(5) {
+                eprintln!("  - {} (reasoning={}, vision={})", m.name, m.capabilities.supports_reasoning, m.capabilities.supports_vision);
+            }
+        }
+        assert!(result.success || result.error.is_some(), "should at least return a result");
+    }
 
     #[test]
     fn reasoning_models_detected() {

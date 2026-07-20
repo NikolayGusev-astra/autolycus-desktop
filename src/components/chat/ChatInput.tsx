@@ -94,8 +94,62 @@ export function ChatInput({ onSend, onStop, disabled, agentStatus = "idle" }: Ch
   useEffect(() => {
     invoke<any[]>("list_models_cmd")
       .then((models) => {
-        setSavedModels(models);
-        if (models.length > 0) setCurrentModel(models[0].id);
+        if (models.length > 0) {
+          setSavedModels(models);
+          setCurrentModel(models[0].id);
+        } else {
+          // models.json is empty — discover the FULL model list from the
+          // active provider (parity with Hermes Desktop's model.options).
+          // Falls back to config.yaml model.default if discovery is not
+          // supported for this provider (e.g. OAuth-only providers).
+          invoke<any>("get_model_config_cmd", { profile: null })
+            .then(async (config) => {
+              if (!config?.model) return;
+              const fallback = [{
+                id: `${config.provider}/${config.model}`,
+                name: config.model,
+                provider: config.provider,
+                model: config.model,
+                base_url: config.base_url ?? "",
+                api_mode: null,
+                created_at: Date.now(),
+              }];
+              // Try live discovery for the active provider to populate the
+              // dropdown with ALL available models (not just the default).
+              try {
+                const discovered = await invoke<any>("discover_models_cmd", {
+                  provider: config.provider,
+                  baseUrl: config.base_url ?? null,
+                  apiKey: null,
+                  useProxy: true,
+                });
+                if (discovered?.success && discovered.models?.length > 0) {
+                  const discoveredModels = discovered.models.map((m: any) => ({
+                    id: `${config.provider}/${m.id ?? m.name}`,
+                    name: m.name ?? m.id,
+                    provider: config.provider,
+                    model: m.id ?? m.name,
+                    base_url: config.base_url ?? "",
+                    api_mode: null,
+                    created_at: Date.now(),
+                    supports_reasoning: m.capabilities?.reasoning ?? false,
+                    supports_vision: m.capabilities?.vision ?? false,
+                    supports_tools: m.capabilities?.tools ?? false,
+                  }));
+                  setSavedModels(discoveredModels);
+                  // Keep the current model selected.
+                  setCurrentModel(`${config.provider}/${config.model}`);
+                  return;
+                }
+              } catch (e) {
+                console.warn("model discovery failed, using config default", e);
+              }
+              // Discovery not supported or failed — use the single default.
+              setSavedModels(fallback);
+              setCurrentModel(fallback[0].id);
+            })
+            .catch(() => {});
+        }
       })
       .catch(() => {});
     invoke<any>("get_model_config_cmd", { profile: null })

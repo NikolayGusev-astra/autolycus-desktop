@@ -131,3 +131,49 @@ export interface AgentEvent {
   payload: Record<string, unknown>;
   session_id?: string;
 }
+
+// ── ADR-009: Cross-linking types (external_refs + session_links) ─────────
+
+export interface ExternalRef {
+  id: number;
+  source: "jira" | "email" | "confluence";
+  external_id: string;
+  external_url: string;
+  title: string;
+  task_id: number | null;
+  project_id: number | null;
+  goal_id: number | null;
+  created_at: number | null;
+}
+
+export interface SessionLink {
+  id: number;
+  session_id: string;
+  task_id: number | null;
+  project_id: number | null;
+  goal_id: number | null;
+  linked_at: number | null;
+  linked_by: string;
+  note: string;
+}
+
+export interface CreateTaskFromExternalInput {
+  source: "jira" | "email" | "confluence";
+  external_id: string;
+  external_url?: string;
+  title: string;
+  priority: number;
+  due_date?: string;
+  project_id?: number;
+  goal_id?: number;
+  assignee: string;
+}
+
+export interface LinkSessionInput {
+  session_id: string;
+  task_id?: number;
+  project_id?: number;
+  goal_id?: number;
+  linked_by?: "manual" | "agent";
+  note?: string;
+}

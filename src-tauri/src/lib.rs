@@ -23,6 +23,7 @@ mod registry;
 mod secrets;
 mod sessions;
 mod briefing;
+mod meeting_briefing;
 mod skills;
 mod sources;
 mod ssh;
@@ -31,6 +32,9 @@ mod telegram;
 mod terminal;
 mod validation;
 mod ws_transport;
+mod mcp_client;
+mod feed_sources;
+pub mod mcp_server;
 
 use std::path::PathBuf;
 
@@ -59,6 +63,11 @@ pub struct AppState {
     /// no mutex to poison.
     pub hermes_home: arc_swap::ArcSwapOption<PathBuf>,
     pub auth: auth::AuthState,
+    /// ADR-006: persistent WS connection to the local Hermes backend. One
+    /// long-lived socket + reader task for the entire app lifetime, replacing
+    /// connect-per-message. Remote/SSH modes bypass this (they use their own
+    /// transport path in chat.rs).
+    pub ws: std::sync::Arc<ws_transport::WsState>,
 }
 
 impl AppState {
@@ -68,6 +77,7 @@ impl AppState {
             ssh: SshState::new(),
             hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
+            ws: std::sync::Arc::new(ws_transport::WsState::new()),
         }
     }
 
@@ -122,12 +132,137 @@ async fn init_app(state: State<'_, AppState>) -> Result<InitResult, String> {
     // skipped; non-unix platforms are no-ops.
     harden_secret_files(&hermes_home);
 
+    // ADR-008: ensure AGENTS.md + assistant skill are installed so the Hermes
+    // agent knows its executive-assistant role. We do NOT auto-register the
+    // Steersman MCP server in config.yaml here — that corrupted user configs
+    // (YAML emitter rewrites the whole file + Windows backslash quoting bug).
+    let _ = ensure_agents_md(&hermes_home);
+    let _ = ensure_bundled_skill(&hermes_home);
+
     state.hermes_home.store(Some(std::sync::Arc::new(hermes_home.clone())));
 
     Ok(InitResult {
         hermes_home: hermes_home.to_string_lossy().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// ADR-008: Register the Steersman MCP server in config.yaml's mcp_servers
+/// block so the Hermes agent discovers steersman_* tools at startup. Idempotent
+/// — if already present (by name "steersman"), no-op. Uses line-based editing
+/// to preserve the rest of config.yaml.
+fn ensure_steersman_mcp_registered(_hermes_home: &std::path::Path) -> Result<(), String> {
+    // DISABLED: auto-registering the Steersman MCP server in config.yaml on
+    // every init corrupted user configs (the YAML emitter rewrites the whole
+    // file, and Windows backslashes in the binary path break YAML quoting).
+    // Use the explicit `register_steersman_mcp_cmd` Tauri command instead,
+    // which uses line-based editing with proper escaping. This stub is kept
+    // only so the call site compiles; it's a no-op.
+    Ok(())
+}
+
+/// ADR-008: Ensure ~/.hermes/AGENTS.md exists with the Steersman assistant
+/// persona. If the user already has one, we do NOT overwrite (their content
+/// wins). If absent, we copy the bundled template.
+fn ensure_agents_md(hermes_home: &std::path::Path) -> Result<(), String> {
+    let agents_path = hermes_home.join("AGENTS.md");
+    if agents_path.exists() {
+        return Ok(()); // respect user's existing file
+    }
+    let template = include_str!("../templates/AGENTS.md");
+    std::fs::write(&agents_path, template)
+        .map_err(|e| format!("write AGENTS.md: {}", e))?;
+    tracing::info!(target: "steersman_desktop_lib::init", "created AGENTS.md from template");
+    Ok(())
+}
+
+/// ADR-008 Phase 3: Ensure the steersman-assistant skill is installed in
+/// ~/.hermes/skills/ so the agent knows its executive-assistant role and
+/// the steersman_* tool patterns. Idempotent — skips if the user has a
+/// custom version (we only install if absent, never overwrite).
+fn ensure_bundled_skill(hermes_home: &std::path::Path) -> Result<(), String> {
+    let skill_dir = hermes_home.join("skills").join("steersman-assistant");
+    let skill_md = skill_dir.join("SKILL.md");
+    if skill_md.exists() {
+        return Ok(()); // respect user's existing skill
+    }
+    std::fs::create_dir_all(&skill_dir)
+        .map_err(|e| format!("create skill dir: {}", e))?;
+    let template = include_str!("../templates/skills/steersman-assistant/SKILL.md");
+    std::fs::write(&skill_md, template)
+        .map_err(|e| format!("write SKILL.md: {}", e))?;
+    tracing::info!(target: "steersman_desktop_lib::init", "installed steersman-assistant skill");
+    Ok(())
+}
+
+/// Register the Steersman MCP server in config.yaml via SAFE line-based
+/// editing (not YAML emitter — which rewrites the whole file and corrupts
+/// Windows paths). Idempotent: checks for an existing `  steersman:` line
+/// before inserting. Escapes backslashes in the command path for YAML.
+///
+/// Called explicitly by the UI (Settings → MCP "Register Steersman"), never
+/// automatically on init.
+#[tauri::command]
+async fn register_steersman_mcp_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<bool, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    let config_path = match profile.as_deref() {
+        Some(p) if p != "default" && !p.is_empty() => {
+            hermes_home.join("profiles").join(p).join("config.yaml")
+        }
+        _ => hermes_home.join("config.yaml"),
+    };
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {}", e))?
+        .parent()
+        .ok_or("cannot resolve exe dir")?
+        .to_path_buf();
+    let mcp_bin = exe_dir.join(if cfg!(windows) {
+        "steersman-mcp-server.exe"
+    } else {
+        "steersman-mcp-server"
+    });
+    register_steersman_mcp_linebased(&config_path, &mcp_bin.to_string_lossy())
+}
+
+/// Pure line-based editor for the steersman MCP entry. Testable without Tauri
+/// State. Returns Ok(true) if inserted, Ok(false) if already present.
+fn register_steersman_mcp_linebased(
+    config_path: &std::path::Path,
+    mcp_bin: &str,
+) -> Result<bool, String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("read config.yaml: {}", e))?;
+
+    // Idempotency: check for an existing `  steersman:` entry (line-based —
+    // survives quoting quirks, unlike a YAML parse).
+    if content.lines().any(|l| l.trim_start() == "steersman:" && l.starts_with("  ")) {
+        return Ok(false);
+    }
+
+    // Escape backslashes for YAML double-quoted string (Windows paths).
+    let bin_escaped = mcp_bin.replace('\\', "/");
+    let block = format!("  steersman:\n    command: \"{}\"\n    args: []", bin_escaped);
+
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let mcp_idx = lines.iter().position(|l| l.trim_start() == "mcp_servers:");
+    match mcp_idx {
+        Some(idx) => {
+            lines.insert(idx + 1, block);
+        }
+        None => {
+            if !lines.is_empty() && !lines.last().map(|l| l.is_empty()).unwrap_or(true) {
+                lines.push(String::new());
+            }
+            lines.push("mcp_servers:".to_string());
+            lines.push(block);
+        }
+    }
+    let out = lines.join("\n") + "\n";
+    std::fs::write(config_path, out).map_err(|e| format!("write config.yaml: {}", e))?;
+    Ok(true)
 }
 
 /// Ensure files that may hold secrets are owner-only (0600) on unix.
@@ -148,16 +283,16 @@ fn harden_secret_files(hermes_home: &std::path::Path) {
                     &path,
                     std::fs::Permissions::from_mode(0o600),
                 ) {
-                    eprintln!(
-                        "[steersman] warning: could not tighten permissions on {}: {}",
-                        path.display(),
-                        e
+                    tracing::warn!(
+                        target: "steersman_desktop_lib",
+                        path = %path.display(), error = %e,
+                        "could not tighten permissions"
                     );
                 } else {
-                    eprintln!(
-                        "[steersman] hardened '{}' to 0600 (was {:o})",
-                        path.display(),
-                        mode & 0o777
+                    tracing::info!(
+                        target: "steersman_desktop_lib",
+                        path = %path.display(), prev_mode = format!("{:o}", mode & 0o777),
+                        "hardened to 0600"
                     );
                 }
             }
@@ -722,36 +857,18 @@ async fn gateway_status_cmd(
 /// Fetch available models from the gateway's /v1/models endpoint.
 #[tauri::command]
 async fn list_models_api_cmd(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let port = gateway::get_gateway_port(&state.gateway, None);
-    if port.is_none() {
-        return Ok(Vec::new());
-    }
-    let port = port.unwrap();
+    // ADR-004: the backend is `hermes serve`, which has NO /v1/models HTTP
+    // endpoint (it's a WS-only server). The single source of truth for the
+    // configured model is config.yaml `model.default` — read it directly.
+    // Previously this hit http://127.0.0.1:{port}/v1/models, which 404'd on
+    // hermes serve and returned an empty list -> UI showed "No Models".
     let hermes_home = state.hermes_home().unwrap_or_else(|_| config::resolve_hermes_home());
-    let key = config::get_api_server_key(&hermes_home, None)
-        .or_else(|| {
-            dirs::home_dir().and_then(|h| config::get_api_server_key(&h.join(".hermes"), None))
-        })
-        .unwrap_or_default();
-    let url = format!("http://127.0.0.1:{}/v1/models", port);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client: {}", e))?;
-    let mut req = client.get(&url);
-    if !key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", key));
+    let model_config = config::get_model_config(&hermes_home, None);
+    if model_config.model.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(vec![model_config.model])
     }
-    let resp = req.send().await.map_err(|e| format!("models request: {}", e))?;
-    if !resp.status().is_success() {
-        return Ok(Vec::new());
-    }
-    let v: serde_json::Value = resp.json().await.unwrap_or_default();
-    let models: Vec<String> = v.get("data")
-        .and_then(|d| d.as_array())
-        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string())).collect())
-        .unwrap_or_default();
-    Ok(models)
 }
 
 /// Get gateway port
@@ -844,6 +961,7 @@ async fn send_message_cmd(
         &Some(conn_cfg.ssh),
         request,
         &app_handle,
+        &state.ws,
     )
     .await
 }
@@ -972,11 +1090,89 @@ async fn list_feed_cmd(
 #[tauri::command]
 async fn generate_smart_briefing_cmd(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
     days: Option<i64>,
     profile: Option<String>,
 ) -> Result<briefing::BriefingResult, String> {
     let hermes_home = home_or_resolve(&state)?;
-    briefing::generate_smart_briefing(&hermes_home, profile.as_deref(), days.unwrap_or(7))
+    let days = days.unwrap_or(7);
+
+    // Build the briefing prompt and send it through the WS transport — the
+    // agent has direct access to email (himalaya MCP), Jira MCP, chat
+    // sessions in state.db, and the LLM for analysis. No separate Python
+    // briefing server needed (replaces mcp-smart-briefing/server.py).
+    let prompt = briefing::briefing_prompt(days);
+
+    let port = gateway::get_gateway_port(&state.gateway, None)
+        .ok_or("Gateway not available for briefing")?;
+    let token = gateway::get_gateway_session_token(&state.gateway, None)
+        .ok_or("No session token for briefing")?;
+    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
+
+    // Send via WS — streaming tokens arrive as chat_event (frontend ChatView
+    // picks them up if visible). The buffered variant also accumulates the
+    // full assistant reply so we can persist it as the briefing text.
+    //
+    // ADR-006 NOTE: the briefing intentionally uses connect-per-message
+    // (send_message_via_ws_buffered), NOT the persistent connection. The
+    // persistent connection is for interactive chat (many turns, low latency).
+    // A briefing is a one-shot batch operation (runs every 30 min, needs the
+    // full reply synchronously). Routing it through the reader task would
+    // require a per-session token buffer + completion signal — complexity not
+    // justified for a non-interactive path.
+    //
+    // source="briefing_smart" is critical: the backend persists it verbatim
+    // into state.db sessions.source, and sessions.rs list/feed queries filter
+    // it out. Without this, each briefing session would appear as a normal
+    // "desktop" chat that the NEXT briefing would pick up and analyse →
+    // "briefing-of-briefing" infinite loop.
+    let (real_session_id, briefing_text) =
+        crate::ws_transport::send_message_via_ws_buffered(
+            &ws_url,
+            None,
+            &prompt,
+            &app_handle,
+            "briefing_smart",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Persist as a briefing session for the dashboard cache.
+    let cache_session_id = format!("smart_briefing:{}", profile.as_deref().unwrap_or("default"));
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let title = format!("Briefing {}d (agent)", days);
+
+    let profile_path = config::profile_home(&hermes_home, profile.as_deref());
+    let db_path = sessions::state_db_path(&profile_path, None);
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Store the ACTUAL agent reply (not the prompt) as the preview, so the
+    // dashboard tile and get_cached_briefing show the generated briefing.
+    let stored_text = if briefing_text.trim().is_empty() {
+        "(пустой ответ агента — проверьте chat-сессию {})".to_string()
+    } else {
+        briefing_text
+    };
+    let _ = rusqlite::Connection::open(&db_path).and_then(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, source, started_at, title, preview)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![&cache_session_id, "briefing_agent", started_at, &title, &stored_text],
+        )
+    });
+
+    Ok(briefing::BriefingResult {
+        session_id: real_session_id,
+        source: "briefing_agent".into(),
+        started_at,
+        title,
+        preview: stored_text.lines().take(4).collect::<Vec<_>>().join("\n"),
+        formatted: stored_text,
+    })
 }
 
 /// Dashboard-only channel feed: strictly whitelisted user-facing sources
@@ -990,6 +1186,213 @@ async fn list_feed_channels_cmd(
     let hermes_home = home_or_resolve(&state)?;
     sessions::list_feed_channels(&hermes_home, profile.as_deref(), limit_per_source.unwrap_or(5))
         .map_err(|e| format!("SQLite error: {}", e))
+}
+
+/// ADR-007: Live source card — unread email from the configured email MCP
+/// server. Spawns the MCP server as a subprocess, calls list_inbox, returns
+/// message summaries. Returns an error string (shown as "not configured" in
+/// the UI) if email isn't set up or the MCP server fails.
+#[tauri::command]
+async fn list_email_unread_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<feed_sources::EmailMessage>, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::list_email_unread(&hermes_home, profile.as_deref()).await
+}
+
+/// ADR-007 v2: Live source card — active Jira issues assigned to the current
+/// user (statusCategory != Done). Fetches via the jira MCP server.
+#[tauri::command]
+async fn list_jira_my_active_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<feed_sources::JiraIssue>, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::list_jira_my_active(&hermes_home, profile.as_deref()).await
+}
+
+/// ADR-007 v2: Live source card — today's calendar events from the
+/// rupost_calendar MCP server (CalDAV).
+#[tauri::command]
+async fn list_calendar_today_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<feed_sources::CalendarEvent>, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::list_calendar_today(&hermes_home, profile.as_deref()).await
+}
+
+/// L8.3: meetings starting within `reminder_minutes` (default 15). Frontend
+/// polls this to surface a "встреча через N мин" reminder card.
+#[tauri::command]
+async fn list_meeting_reminders_cmd(
+    state: State<'_, AppState>,
+    reminder_minutes: Option<i64>,
+    profile: Option<String>,
+) -> Result<Vec<feed_sources::CalendarEvent>, String> {
+    let hermes_home = home_or_resolve(&state)?;
+    let mins = reminder_minutes.unwrap_or(15).clamp(1, 1440);
+    feed_sources::list_meeting_reminders(&hermes_home, profile.as_deref(), mins).await
+}
+
+/// ADR-008 Phase 2: actionable email card — mark a message read/unread.
+#[tauri::command]
+async fn mark_email_read_cmd(
+    state: State<'_, AppState>,
+    uid: String,
+    read: Option<bool>,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::mark_email_read(&hermes_home, profile.as_deref(), &uid, read.unwrap_or(true)).await
+}
+
+/// L8: generate a pre-meeting briefing for a calendar event.
+///
+/// Looks the event up by `event_uid` (from the calendar MCP), classifies it
+/// (daily / customer / other), gathers the engineer's related tasks and past
+/// chat sessions, then asks the Hermes agent (LLM) for a focused briefing.
+#[tauri::command]
+async fn generate_meeting_briefing_cmd(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    event_uid: String,
+    profile: Option<String>,
+) -> Result<meeting_briefing::MeetingBriefingResult, String> {
+    eprintln!("[meeting_briefing] START event_uid={} profile={:?}", event_uid, profile);
+    let hermes_home = home_or_resolve(&state)?;
+
+    // 1. Fetch the event by uid from the calendar MCP.
+    eprintln!("[meeting_briefing] Fetching calendar events...");
+    let events = feed_sources::list_calendar_today(&hermes_home, profile.as_deref()).await
+        .map_err(|e| {
+            eprintln!("[meeting_briefing] list_calendar_today error: {}", e);
+            e
+        })?;
+    eprintln!("[meeting_briefing] Got {} events", events.len());
+    let event = events
+        .iter()
+        .find(|e| e.uid == event_uid)
+        .ok_or_else(|| {
+            eprintln!("[meeting_briefing] Event not found: {}", event_uid);
+            format!("Meeting {} not found in calendar", event_uid)
+        })?;
+    eprintln!("[meeting_briefing] Found event: {} (uid={})", event.summary, event.uid);
+
+    // 2. Classify the meeting type.
+    let meeting_type = meeting_briefing::classify_meeting(&event.summary, &event.organizer);
+    eprintln!("[meeting_briefing] Meeting type: {}", meeting_type);
+
+    // 3. Gather related tasks (by title keyword match on organizer / summary)
+    //    and recent chat sessions for context.
+    let all_tasks = productivity::list_tasks(&hermes_home, profile.as_deref()).unwrap_or_default();
+    let keyword = event
+        .organizer
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let related_task_titles: Vec<String> = all_tasks
+        .iter()
+        .filter(|t| {
+            let s = t.title.to_lowercase();
+            s.contains(&event.summary.to_lowercase())
+                || (!keyword.is_empty() && s.contains(&keyword.to_lowercase()))
+        })
+        .map(|t| t.title.clone())
+        .collect();
+    eprintln!("[meeting_briefing] Related tasks: {:?}", related_task_titles);
+
+    let related_session_previews: Vec<String> = sessions::recent_session_previews(
+        &hermes_home,
+        profile.as_deref(),
+        20,
+    )
+    .unwrap_or_default();
+    eprintln!("[meeting_briefing] Related sessions: {}", related_session_previews.len());
+
+    // 4. Build the prompt and send via WS (same path as smart briefing).
+    let prompt = meeting_briefing::meeting_briefing_prompt(
+        &event.summary,
+        &event.description,
+        &event.organizer,
+        &event.attendees,
+        meeting_type,
+        &related_task_titles,
+        &related_session_previews,
+    );
+    eprintln!("[meeting_briefing] Prompt length: {} chars", prompt.len());
+
+    let port = gateway::get_gateway_port(&state.gateway, None)
+        .ok_or("Gateway not available for meeting briefing")?;
+    eprintln!("[meeting_briefing] Gateway port: {}", port);
+    let token = gateway::get_gateway_session_token(&state.gateway, None)
+        .ok_or("No session token for meeting briefing")?;
+    eprintln!("[meeting_briefing] Got session token");
+    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
+    eprintln!("[meeting_briefing] WS URL: {}", ws_url);
+
+    let (real_session_id, briefing_text) =
+        crate::ws_transport::send_message_via_ws_buffered(
+            &ws_url,
+            None,
+            &prompt,
+            &app_handle,
+            "meeting_briefing",
+        )
+        .await
+        .map_err(|e| {
+            eprintln!("[meeting_briefing] WS error: {}", e);
+            e.to_string()
+        })?;
+
+    eprintln!("[meeting_briefing] SUCCESS: session_id={}, text_len={}", real_session_id, briefing_text.len());
+
+    Ok(meeting_briefing::MeetingBriefingResult {
+        event_uid: event.uid.clone(),
+        meeting_type: meeting_type.to_string(),
+        briefing_text,
+        summary: event.summary.clone(),
+        session_id: real_session_id,
+    })
+}
+
+/// ADR-008 Phase 2: actionable email card — send a reply.
+#[tauri::command]
+async fn send_email_cmd(
+    state: State<'_, AppState>,
+    to: String,
+    subject: String,
+    body: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::send_email(&hermes_home, profile.as_deref(), &to, &subject, &body).await
+}
+
+/// ADR-008 Phase 2: actionable Jira card — transition an issue.
+#[tauri::command]
+async fn jira_transition_cmd(
+    state: State<'_, AppState>,
+    issue_key: String,
+    transition_name: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::jira_transition(&hermes_home, profile.as_deref(), &issue_key, &transition_name).await
+}
+
+/// ADR-008 Phase 2: actionable Jira card — add a comment.
+#[tauri::command]
+async fn jira_comment_cmd(
+    state: State<'_, AppState>,
+    issue_key: String,
+    body: String,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = home_or_resolve(&state)?;
+    feed_sources::jira_comment(&hermes_home, profile.as_deref(), &issue_key, &body).await
 }
 
 /// Read the most recent cached briefing from state.db. The dashboard calls
@@ -1168,6 +1571,46 @@ async fn set_model_config_cmd(
         autonomy_policy.as_deref(),
         prompt_cache,
         reasoning_context.as_deref(),
+    )
+}
+
+/// Set the default model by its `provider/model` id. Parses the id, looks up
+/// the saved model's base_url from models.json (or the active config), and
+/// writes it as the default. This is the command the frontend model selector
+/// calls when the user picks a model from the dropdown.
+#[tauri::command]
+async fn set_default_model_cmd(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    // Parse "provider/model" — the id format used by SavedModel and ChatInput.
+    let (provider, model) = match id.split_once('/') {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (p.to_string(), m.to_string()),
+        _ => return Err(format!("invalid model id '{}': expected 'provider/model'", id)),
+    };
+    // Look up base_url from saved models; fall back to current config.
+    let saved = models::list_models(&hermes_home);
+    let base_url = saved
+        .iter()
+        .find(|m| m.provider == provider && m.model == model)
+        .map(|m| m.base_url.clone())
+        .unwrap_or_default();
+    // Preserve the current config's steer settings (reasoning_effort etc.)
+    // by reading the existing config first.
+    let current = config::get_model_config(&hermes_home, None);
+    config::set_model_config(
+        &hermes_home,
+        None,
+        &provider,
+        &model,
+        &base_url,
+        None,
+        current.reasoning_effort.as_deref(),
+        current.verbosity.as_deref(),
+        current.autonomy_policy.as_deref(),
+        current.prompt_cache,
+        current.reasoning_context.as_deref(),
     )
 }
 
@@ -1610,14 +2053,22 @@ fn apply_sources_env(
     let env_vars = config.to_env_vars();
     for (key, value) in env_vars {
         if let Err(e) = config::write_env_value(hermes_home, profile, &key, &value) {
-            eprintln!("[sources] failed to write env {}={}: {}", key, key, e);
+            tracing::warn!(
+                target: "steersman_desktop_lib::sources",
+                key = %key, error = %e,
+                "failed to write env var"
+            );
         }
     }
     // Also sync MCP env blocks into config.yaml (ADR-002 §MCP env whitelist).
     // Hermes _build_safe_env() strips non-whitelisted env vars, so .env alone
     // doesn't reach MCP servers. The env: block in config.yaml is the ONLY way.
     if let Err(e) = mcp::sync_mcp_env_blocks(hermes_home, profile) {
-        eprintln!("[sources] failed to sync MCP env blocks: {}", e);
+        tracing::warn!(
+            target: "steersman_desktop_lib::sources",
+            error = %e,
+            "failed to sync MCP env blocks"
+        );
     }
 }
 
@@ -1693,6 +2144,20 @@ async fn test_mcp_server_cmd(
     mcp::test_mcp_server(&hermes_home, profile.as_deref(), &name)
 }
 
+/// Update environment variables for an MCP server. Generic — works for any
+/// server name and any env keys. Uses line-based editing to preserve the rest
+/// of config.yaml (comments, unknown fields, other servers).
+#[tauri::command]
+async fn update_mcp_server_env_cmd(
+    state: State<'_, AppState>,
+    server_name: String,
+    env: std::collections::HashMap<String, String>,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hermes_home = state.hermes_home()?;
+    mcp::update_mcp_server_env(&hermes_home, profile.as_deref(), &server_name, &env)
+}
+
 /// List MCP catalog
 #[tauri::command]
 async fn list_mcp_catalog_cmd(
@@ -1750,16 +2215,50 @@ async fn save_media_blob_cmd(
 
 // ── Model Discovery Commands ──────────────────────────────────────────────
 
-/// Discover models from provider
+/// Discover models from provider. When base_url or api_key are not supplied,
+/// fall back to the credential pool (auth.json) so providers like kilocode /
+/// copilot — which carry their base_url+key in the pool, not config.yaml —
+/// can be discovered without the frontend having to pass them explicitly.
 #[tauri::command]
 async fn discover_models_cmd(
+    state: State<'_, AppState>,
     provider: String,
     base_url: Option<String>,
     api_key: Option<String>,
     use_proxy: Option<bool>,
 ) -> Result<model_discovery::DiscoveryResult, String> {
     let use_proxy = use_proxy.unwrap_or(false);
-    Ok(model_discovery::discover_models(&provider, base_url.as_deref(), api_key.as_deref(), use_proxy).await)
+    let hermes_home = state.hermes_home()?;
+
+    // If base_url or api_key are missing, try the credential pool.
+    let (resolved_base_url, resolved_api_key) = if base_url.is_none() || api_key.is_none() {
+        match auth::get_credential_pool(&hermes_home).await {
+            Ok(pool) => {
+                // Look up the provider (try both the given id and common aliases).
+                let entry = pool.get(&provider)
+                    .or_else(|| pool.get(&provider.to_lowercase()))
+                    .and_then(|entries| entries.first());
+                match entry {
+                    Some(e) => (
+                        base_url.clone().or_else(|| e.base_url.clone()),
+                        api_key.clone().or_else(|| e.resolve_secret(&hermes_home)),
+                    ),
+                    _ => (base_url.clone(), api_key.clone()),
+                }
+            }
+            Err(_) => (base_url.clone(), api_key.clone()),
+        }
+    } else {
+        (base_url, api_key)
+    };
+
+    Ok(model_discovery::discover_models_with_home(
+        &provider,
+        resolved_base_url.as_deref(),
+        resolved_api_key.as_deref(),
+        use_proxy,
+        Some(&hermes_home),
+    ).await)
 }
 
 /// Check if provider supports model discovery
@@ -2142,6 +2641,100 @@ async fn set_credential_pool_cmd(
 
 // ── Productivity (tasks/goals/projects/protocols/self-checks) ─────────────
 
+// ── External refs (ADR-009: Jira/email → internal tasks/projects/goals) ─────
+
+#[tauri::command]
+async fn upsert_external_ref_cmd(
+    state: State<'_, AppState>,
+    source: String,
+    external_id: String,
+    external_url: Option<String>,
+    title: Option<String>,
+    task_id: Option<i64>,
+    project_id: Option<i64>,
+    goal_id: Option<i64>,
+    profile: Option<String>,
+) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::upsert_external_ref(&hh, profile.as_deref(), &source, &external_id, external_url.as_deref(), title.as_deref(), task_id, project_id, goal_id)
+}
+
+#[tauri::command]
+async fn get_external_ref_cmd(
+    state: State<'_, AppState>,
+    source: String,
+    external_id: String,
+    profile: Option<String>,
+) -> Result<Option<productivity::ExternalRef>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::get_external_ref(&hh, profile.as_deref(), &source, &external_id)
+}
+
+#[tauri::command]
+async fn create_task_from_external_cmd(
+    state: State<'_, AppState>,
+    source: String,
+    external_id: String,
+    external_url: Option<String>,
+    title: String,
+    priority: i64,
+    due_date: Option<String>,
+    project_id: Option<i64>,
+    goal_id: Option<i64>,
+    assignee: String,
+    profile: Option<String>,
+) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::create_task_from_external(&hh, profile.as_deref(), &source, &external_id, external_url.as_deref(), &title, priority, due_date.as_deref(), project_id, goal_id, &assignee)
+}
+
+// ── Session links (ADR-009: chat sessions → tasks/projects/goals) ────────────
+
+#[tauri::command]
+async fn link_session_cmd(
+    state: State<'_, AppState>,
+    session_id: String,
+    task_id: Option<i64>,
+    project_id: Option<i64>,
+    goal_id: Option<i64>,
+    linked_by: Option<String>,
+    note: Option<String>,
+    profile: Option<String>,
+) -> Result<i64, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::link_session(&hh, profile.as_deref(), &session_id, task_id, project_id, goal_id, linked_by.as_deref(), note.as_deref())
+}
+
+#[tauri::command]
+async fn unlink_session_cmd(
+    state: State<'_, AppState>,
+    link_id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::unlink_session(&hh, profile.as_deref(), link_id)
+}
+
+#[tauri::command]
+async fn get_session_links_cmd(
+    state: State<'_, AppState>,
+    session_id: String,
+    profile: Option<String>,
+) -> Result<Vec<productivity::SessionLink>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::get_session_links(&hh, profile.as_deref(), &session_id)
+}
+
+#[tauri::command]
+async fn get_links_for_task_cmd(
+    state: State<'_, AppState>,
+    task_id: i64,
+    profile: Option<String>,
+) -> Result<Vec<productivity::SessionLink>, String> {
+    let hh = home_or_resolve(&state)?;
+    productivity::get_links_for_task(&hh, profile.as_deref(), task_id)
+}
+
 #[tauri::command]
 async fn list_tasks_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Task>, String> {
     let hh = home_or_resolve(&state)?;
@@ -2373,7 +2966,11 @@ pub fn run() {
             })();
 
             if let Err(e) = tray_result {
-                eprintln!("[steersman] warning: tray icon unavailable on this platform, continuing without it: {}", e);
+                tracing::warn!(
+                    target: "steersman_desktop_lib",
+                    error = %e,
+                    "tray icon unavailable on this platform, continuing without it"
+                );
             }
 
             // ── Global shortcut: Ctrl+Shift+S (best-effort) ────────────
@@ -2393,9 +2990,10 @@ pub fn run() {
                     }
                 },
             ) {
-                eprintln!(
-                    "[steersman] warning: global shortcut Ctrl+Shift+S unavailable, continuing without it: {}",
-                    e
+                tracing::warn!(
+                    target: "steersman_desktop_lib",
+                    error = %e,
+                    "global shortcut Ctrl+Shift+S unavailable, continuing without it"
                 );
             }
 
@@ -2447,6 +3045,16 @@ pub fn run() {
             get_session_stats_cmd,
             list_feed_cmd,
             list_feed_channels_cmd,
+            list_email_unread_cmd,
+            list_jira_my_active_cmd,
+            list_calendar_today_cmd,
+            list_meeting_reminders_cmd,
+            mark_email_read_cmd,
+            generate_meeting_briefing_cmd,
+            send_email_cmd,
+            jira_transition_cmd,
+            jira_comment_cmd,
+            register_steersman_mcp_cmd,
             generate_smart_briefing_cmd,
             get_cached_briefing_cmd,
             // Profiles
@@ -2464,6 +3072,7 @@ pub fn run() {
             set_env_cmd,
             get_model_config_cmd,
             set_model_config_cmd,
+            set_default_model_cmd,
             set_model_routing_cmd,
             // Skills
             list_installed_skills_cmd,
@@ -2563,6 +3172,15 @@ pub fn run() {
             list_conn_profiles_cmd,
             create_conn_profile_cmd,
             delete_conn_profile_cmd,
+            // External refs (ADR-009)
+            upsert_external_ref_cmd,
+            get_external_ref_cmd,
+            create_task_from_external_cmd,
+            // Session links (ADR-009)
+            link_session_cmd,
+            unlink_session_cmd,
+            get_session_links_cmd,
+            get_links_for_task_cmd,
             // Sources (multiple connectors)
             list_sources_cmd,
             add_telegram_source_cmd,
@@ -2584,6 +3202,7 @@ pub fn run() {
             remove_mcp_server_cmd,
             set_mcp_server_enabled_cmd,
             test_mcp_server_cmd,
+            update_mcp_server_env_cmd,
             list_mcp_catalog_cmd,
             install_mcp_catalog_entry_cmd,
         ])
@@ -2640,5 +3259,104 @@ mod tests {
             .collect();
         auth::set_credential_pool(&hh, "groq", &real).await.unwrap();
         println!("cleaned up test entry");
+    }
+
+    // ── ADR-008: register_steersman_mcp_linebased (safe, idempotent) ────────
+
+    fn write_fixture(home: &std::path::Path, yaml: &str) {
+        std::fs::write(home.join("config.yaml"), yaml).unwrap();
+    }
+
+    fn tempdir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steersman-reg-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn register_steersman_mcp_inserts_after_header() {
+        let dir = tempdir();
+        write_fixture(
+            &dir,
+            "model:\n  default: m1\nmcp_servers:\n  jira:\n    command: jira.exe\n",
+        );
+        let inserted = register_steersman_mcp_linebased(
+            &dir.join("config.yaml"),
+            "C:\\path\\steersman-mcp-server.exe",
+        )
+        .unwrap();
+        assert!(inserted, "should have inserted on first call");
+
+        let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+        // steersman entry must be present.
+        assert!(after.contains("steersman:"), "steersman entry missing: {}", after);
+        // Backslashes must be escaped to forward slashes (the bug that
+        // corrupted configs).
+        assert!(
+            after.contains("C:/path/steersman-mcp-server.exe"),
+            "backslashes not escaped: {}",
+            after
+        );
+        // The existing jira entry must survive.
+        assert!(after.contains("jira.exe"), "existing server dropped: {}", after);
+        // The model block must survive (line-based, not YAML rewrite).
+        assert!(after.contains("default: m1"), "model block dropped: {}", after);
+    }
+
+    #[test]
+    fn register_steersman_mcp_is_idempotent() {
+        let dir = tempdir();
+        write_fixture(&dir, "mcp_servers:\n  steersman:\n    command: x\n");
+        let inserted = register_steersman_mcp_linebased(
+            &dir.join("config.yaml"),
+            "C:\\path\\mcp.exe",
+        )
+        .unwrap();
+        assert!(!inserted, "should NOT insert when steersman already exists");
+        // File unchanged — no duplicate.
+        let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert_eq!(after.matches("steersman:").count(), 1, "duplicate steersman entry");
+    }
+
+    #[test]
+    fn register_steersman_mcp_creates_block_if_absent() {
+        let dir = tempdir();
+        write_fixture(&dir, "model:\n  default: m1\n");
+        let inserted = register_steersman_mcp_linebased(
+            &dir.join("config.yaml"),
+            "/usr/bin/steersman-mcp-server",
+        )
+        .unwrap();
+        assert!(inserted);
+        let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(after.contains("mcp_servers:"), "mcp_servers block not created");
+        assert!(after.contains("steersman:"), "steersman entry missing");
+    }
+
+    #[test]
+    fn register_steersman_mcp_survives_quoting_quirks() {
+        // A config with tricky quoting must NOT break the line-based editor.
+        let dir = tempdir();
+        write_fixture(
+            &dir,
+            "model:\n  default: \"m1\"\nmcp_servers:\n  email:\n    env:\n      X: \"a\\b\"\n",
+        );
+        let inserted = register_steersman_mcp_linebased(
+            &dir.join("config.yaml"),
+            "C:\\mcp\\server.exe",
+        )
+        .unwrap();
+        assert!(inserted);
+        let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+        // The tricky email env block must survive verbatim.
+        assert!(after.contains("\"a\\b\""), "email env quoting corrupted: {}", after);
+        assert!(after.contains("steersman:"), "steersman missing");
     }
 }

@@ -15,7 +15,22 @@ use serde::{Deserialize, Serialize};
 /// 2. Override file in app data dir
 /// 3. Platform default (~/.hermes on Linux, %LOCALAPPDATA%\hermes on Windows)
 pub fn resolve_hermes_home() -> PathBuf {
-    // 1. Env var
+    // 1. Override file (set by discovery's "adopt instance" — explicit user choice)
+    if let Some(override_path) = read_override_file() {
+        if override_path.exists() {
+            return override_path;
+        }
+    }
+
+    // 2. HERMES_HOME env var — HIGHEST runtime priority.
+    //
+    // CRITICAL: the Hermes backend respects HERMES_HOME (hermes_constants.py).
+    // Whatever path the backend uses, Steersman MUST follow — otherwise the
+    // app reads one state.db while the backend writes another, splitting
+    // sessions/tasks/briefings into two disjoint worlds. The env var is how
+    // a uv-managed install points both CLI and backend at AppData/Local/hermes.
+    // Steersman spawns the backend with the same HERMES_HOME it resolves here,
+    // so they always agree.
     if let Ok(val) = std::env::var("HERMES_HOME") {
         let p = PathBuf::from(&val);
         if p.exists() {
@@ -23,16 +38,7 @@ pub fn resolve_hermes_home() -> PathBuf {
         }
     }
 
-    // 2. Override file (set by discovery's "adopt instance")
-    if let Some(override_path) = read_override_file() {
-        if override_path.exists() {
-            return override_path;
-        }
-    }
-
-    // 3a. Windows: %LOCALAPPDATA%\hermes (the real install location for a
-    // uv-managed Hermes checkout). The old code only looked at ~/.hermes, so
-    // sessions/memory/state.db under AppData\Local\hermes were invisible.
+    // 3. Windows: %LOCALAPPDATA%\hermes (uv-managed install location).
     if cfg!(windows) {
         if let Some(local) = dirs::data_local_dir() {
             let cand = local.join("hermes");
@@ -40,7 +46,6 @@ pub fn resolve_hermes_home() -> PathBuf {
                 return cand;
             }
         }
-        // Some installs live under %APPDATA%\hermes
         if let Some(appdata) = dirs::data_dir() {
             let cand = appdata.join("hermes");
             if cand.is_dir() && looks_like_hermes_home(&cand) {
@@ -49,15 +54,16 @@ pub fn resolve_hermes_home() -> PathBuf {
         }
     }
 
-    // 3b. Platform default ~/.hermes
+    // 4. ~/.hermes — canonical location per Hermes docs, checked last because
+    // an active install almost always has HERMES_HOME or AppData set.
     if let Some(home) = dirs::home_dir() {
         let default = home.join(".hermes");
-        if default.exists() {
+        if default.is_dir() && looks_like_hermes_home(&default) {
             return default;
         }
     }
 
-    // Fallback: ~/.hermes
+    // Fallback: ~/.hermes (may not exist yet — caller can create it)
     dirs::home_dir()
         .map(|h| h.join(".hermes"))
         .unwrap_or_else(|| PathBuf::from("/tmp/.hermes"))
@@ -921,9 +927,10 @@ pub fn get_api_server_key(hermes_home: &Path, profile: Option<&str>) -> Option<S
     env.get("API_SERVER_KEY").cloned()
 }
 
-pub fn generate_api_server_key() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
+// REMOVED (P2.1 cleanup follow-up): generate_api_server_key() generated a
+// UUID for the legacy HTTP API_SERVER_KEY auth. WS transport uses
+// HERMES_DASHBOARD_SESSION_TOKEN (generate_session_token in gateway.rs).
+// 0 callers.
 
 // ── Profile paths ─────────────────────────────────────────────────────────
 

@@ -41,6 +41,11 @@ import {
   Zap,
   Clock,
   BookOpen,
+  Eye,
+  EyeOff,
+  ChevronDown,
+  ChevronRight,
+  Save,
 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useConnectionStore, type ConnectionMode } from "../../stores/connectionStore";
@@ -1954,12 +1959,131 @@ function CronTab() {
 }
 
 // ── MCP Tab ─────────────────────────────────────────────────────────────────
+
+/// Check if an env-var key looks like a secret (for password masking).
+function isSecretKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return ["PASSWORD", "PAT", "TOKEN", "SECRET", "KEY", "CREDENTIAL", "API_KEY"].some((s) =>
+    upper.includes(s)
+  );
+}
+
+/// Reusable env-var editor. Renders a list of key→value pairs with add/remove.
+/// Secrets are masked with eye-toggle (like ProvidersScreen).
+function EnvVarEditor({
+  env,
+  onChange,
+}: {
+  env: Record<string, string>;
+  onChange: (env: Record<string, string>) => void;
+}) {
+  const { t } = useTranslation();
+  const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+
+  const entries = Object.entries(env);
+
+  const toggleVisibility = (key: string) => {
+    setVisibleKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const updateValue = (key: string, value: string) => {
+    onChange({ ...env, [key]: value });
+  };
+
+  const removeKey = (key: string) => {
+    const next = { ...env };
+    delete next[key];
+    onChange(next);
+  };
+
+  const addNew = () => {
+    if (!newKey.trim()) return;
+    onChange({ ...env, [newKey.trim()]: newValue });
+    setNewKey("");
+    setNewValue("");
+  };
+
+  return (
+    <div className="space-y-1.5">
+      {entries.length === 0 && (
+        <p className="text-xs text-ac-muted py-2">{t("settings.mcpEnvEmpty")}</p>
+      )}
+      {entries.map(([key, value]) => {
+        const isSecret = isSecretKey(key);
+        const isVisible = visibleKeys.has(key);
+        return (
+          <div key={key} className="flex items-center gap-1.5">
+            <span className="text-xs font-mono text-ac-muted w-40 shrink-0 truncate" title={key}>
+              {key}
+            </span>
+            <input
+              type={isSecret && !isVisible ? "password" : "text"}
+              className="ac-input flex-1 px-2 py-1 text-xs font-mono"
+              value={value}
+              onChange={(e) => updateValue(key, e.target.value)}
+            />
+            {isSecret && (
+              <button
+                onClick={() => toggleVisibility(key)}
+                className="p-1 text-ac-muted hover:text-ac-ink"
+                title={isVisible ? "Hide" : "Show"}
+              >
+                {isVisible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            )}
+            <button
+              onClick={() => removeKey(key)}
+              className="p-1 text-ac-red/60 hover:text-ac-red"
+              title="Remove"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        );
+      })}
+      {/* Add new row */}
+      <div className="flex items-center gap-1.5 pt-1">
+        <input
+          className="ac-input w-40 shrink-0 px-2 py-1 text-xs font-mono"
+          placeholder={t("settings.mcpEnvKey")}
+          value={newKey}
+          onChange={(e) => setNewKey(e.target.value)}
+        />
+        <input
+          className="ac-input flex-1 px-2 py-1 text-xs font-mono"
+          placeholder={t("settings.mcpEnvValue")}
+          value={newValue}
+          onChange={(e) => setNewValue(e.target.value)}
+        />
+        <button
+          onClick={addNew}
+          disabled={!newKey.trim()}
+          className="p-1 text-ac-brand disabled:opacity-30"
+          title={t("settings.mcpEnvAdd")}
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function McpTab() {
   const { t } = useTranslation();
   const [servers, setServers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
   const [showForm, setShowForm] = useState(false);
+  const [expandedServer, setExpandedServer] = useState<string | null>(null);
+  // Draft env being edited for each expanded server.
+  const [envDrafts, setEnvDrafts] = useState<Record<string, Record<string, string>>>({});
   const [formData, setFormData] = useState({
     name: "",
     server_type: "http",
@@ -1967,21 +2091,53 @@ function McpTab() {
     command: "",
     args: "",
     auth: "",
+    env: {} as Record<string, string>,
   });
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
-        setServers(result);
-      } catch (e) {
-        console.error("Failed to load MCP servers:", e);
-      } finally {
-        setLoading(false);
-      }
-    };
-    load();
+  const reload = useCallback(async () => {
+    try {
+      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
+      setServers(result);
+    } catch (e) {
+      console.error("Failed to load MCP servers:", e);
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const handleExpand = (server: any) => {
+    if (expandedServer === server.name) {
+      setExpandedServer(null);
+    } else {
+      setExpandedServer(server.name);
+      // Seed the draft from current server env.
+      setEnvDrafts((prev) => ({
+        ...prev,
+        [server.name]: { ...(server.env || {}) },
+      }));
+    }
+  };
+
+  const handleSaveEnv = async (serverName: string) => {
+    const draft = envDrafts[serverName];
+    if (!draft) return;
+    try {
+      await invoke("update_mcp_server_env_cmd", {
+        serverName,
+        env: draft,
+        profile: null,
+      });
+      setStatus("✓ " + t("settings.mcpEnvUpdated"));
+      setTimeout(() => setStatus(""), 2000);
+      await reload();
+    } catch (e: any) {
+      setStatus("✗ " + (e?.message || String(e)));
+    }
+  };
 
   const handleAdd = async () => {
     if (!formData.name.trim()) {
@@ -2004,7 +2160,7 @@ function McpTab() {
           url: formData.url || null,
           command: formData.command || null,
           args: formData.args ? formData.args.split(" ").filter(Boolean) : null,
-          env: null,
+          env: Object.keys(formData.env).length > 0 ? formData.env : null,
           auth: formData.auth || null,
         },
         profile: null,
@@ -2012,9 +2168,8 @@ function McpTab() {
       setStatus("✓ " + t("settings.mcpAdded"));
       setTimeout(() => setStatus(""), 2000);
       setShowForm(false);
-      setFormData({ name: "", server_type: "http", url: "", command: "", args: "", auth: "" });
-      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
-      setServers(result);
+      setFormData({ name: "", server_type: "http", url: "", command: "", args: "", auth: "", env: {} });
+      await reload();
     } catch (e: any) {
       setStatus("✗ " + (e?.message || String(e)));
     }
@@ -2026,8 +2181,7 @@ function McpTab() {
       await invoke("remove_mcp_server_cmd", { name, profile: null });
       setStatus("✓ " + t("settings.mcpRemoved"));
       setTimeout(() => setStatus(""), 2000);
-      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
-      setServers(result);
+      await reload();
     } catch (e: any) {
       setStatus("✗ " + (e?.message || String(e)));
     }
@@ -2038,23 +2192,7 @@ function McpTab() {
       await invoke("set_mcp_server_enabled_cmd", { name: server.name, enabled: !server.enabled, profile: null });
       setStatus("✓ " + t("settings.mcpToggled"));
       setTimeout(() => setStatus(""), 2000);
-      const result = await invoke<any[]>("list_mcp_servers_cmd", { profile: null });
-      setServers(result);
-    } catch (e: any) {
-      setStatus("✗ " + (e?.message || String(e)));
-    }
-  };
-
-  const handleTest = async (server: any) => {
-    try {
-      setStatus("⏳ " + t("settings.mcpTesting"));
-      const result = await invoke<[boolean, string | null, any[] | null]>("test_mcp_server_cmd", { name: server.name, profile: null });
-      if (result[0]) {
-        setStatus("✓ " + t("settings.mcpTestOk"));
-      } else {
-        setStatus("✗ " + t("settings.mcpTestFailed"));
-      }
-      setTimeout(() => setStatus(""), 2000);
+      await reload();
     } catch (e: any) {
       setStatus("✗ " + (e?.message || String(e)));
     }
@@ -2096,7 +2234,7 @@ function McpTab() {
           {formData.server_type === "http" && (
             <input
               className="ac-input w-full px-3 py-2 text-sm font-mono"
-              placeholder="http://localhost:8080/mcp"
+              placeholder={t("settings.mcpUrlPh")}
               value={formData.url}
               onChange={(e) => setFormData({ ...formData, url: e.target.value })}
             />
@@ -2105,7 +2243,7 @@ function McpTab() {
             <>
               <input
                 className="ac-input w-full px-3 py-2 text-sm"
-                placeholder="python"
+                placeholder={t("settings.mcpCommandPh")}
                 value={formData.command}
                 onChange={(e) => setFormData({ ...formData, command: e.target.value })}
               />
@@ -2119,13 +2257,18 @@ function McpTab() {
           )}
           <input
             className="ac-input w-full px-3 py-2 text-sm"
-            placeholder="API key or Bearer token (optional)"
+            placeholder={t("settings.mcpAuthPh")}
             value={formData.auth}
             onChange={(e) => setFormData({ ...formData, auth: e.target.value })}
           />
+          {/* Env editor for new server */}
+          <div>
+            <p className="text-xs font-medium text-ac-muted mb-1.5">{t("settings.mcpEnv")}</p>
+            <EnvVarEditor env={formData.env} onChange={(env) => setFormData({ ...formData, env })} />
+          </div>
           <div className="flex gap-2">
             <button onClick={handleAdd} className="ac-btn px-4 py-2 text-sm">{t("btn.save")}</button>
-            <button onClick={() => { setShowForm(false); setFormData({ name: "", server_type: "http", url: "", command: "", args: "", auth: "" }); }} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md">{t("btn.cancel")}</button>
+            <button onClick={() => { setShowForm(false); setFormData({ name: "", server_type: "http", url: "", command: "", args: "", auth: "", env: {} }); }} className="px-4 py-2 text-sm border border-ac-border text-ac-muted rounded-md">{t("btn.cancel")}</button>
           </div>
         </div>
       )}
@@ -2134,42 +2277,105 @@ function McpTab() {
         <p className="text-sm text-ac-muted text-center py-8">{t("settings.mcpEmpty")}</p>
       ) : (
         <div className="space-y-2">
-          {servers.map((server) => (
-            <div key={server.name} className="group p-3 border border-ac-border bg-ac-surface rounded-lg">
-              <div className="flex items-start justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+          {servers.map((server) => {
+            const isExpanded = expandedServer === server.name;
+            const rawFieldEntries: [string, string][] = Object.entries(server.raw_fields || {});
+            return (
+              <div key={server.name} className="border border-ac-border bg-ac-surface rounded-lg overflow-hidden">
+                {/* Collapsed header */}
+                <div className="flex items-start justify-between p-3">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <button
+                      onClick={() => handleExpand(server)}
+                      className="p-0.5 text-ac-muted hover:text-ac-ink shrink-0"
+                    >
+                      {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                    </button>
                     <span className="text-sm font-medium text-ac-ink truncate">{server.name}</span>
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${server.enabled ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full shrink-0 ${server.enabled ? "bg-green-500/15 text-green-500" : "bg-ac-surface-2 text-ac-muted"}`}>
                       {server.enabled ? t("settings.mcpEnabled") : t("settings.mcpDisabled")}
                     </span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-ac-brand-soft text-ac-brand">{server.server_type}</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-ac-brand-soft text-ac-brand shrink-0">{server.server_type}</span>
                   </div>
-                  <p className="text-xs text-ac-muted truncate">{server.detail || "—"}</p>
+                  <div className="flex gap-1 ml-4 shrink-0">
+                    <button
+                      onClick={() => handleToggle(server)}
+                      className="px-2 py-1 text-[10px] border border-ac-border text-ac-muted rounded hover:bg-ac-surface hover:text-ac-brand"
+                    >
+                      {server.enabled ? t("settings.mcpDisable") : t("settings.mcpEnable")}
+                    </button>
+                    <button
+                      onClick={() => handleRemove(server.name)}
+                      className="px-2 py-1 text-[10px] border border-ac-border text-ac-red/70 rounded hover:bg-ac-red/5"
+                    >
+                      <Trash2 className="w-3 h-3 inline" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex gap-1 ml-4">
-                  <button
-                    onClick={() => handleToggle(server)}
-                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-muted rounded hover:bg-ac-surface hover:text-ac-brand"
-                  >
-                    {server.enabled ? t("settings.mcpDisable") : t("settings.mcpEnable")}
-                  </button>
-                  <button
-                    onClick={() => handleTest(server)}
-                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-brand rounded hover:bg-ac-brand/10"
-                  >
-                    {t("settings.mcpTest")}
-                  </button>
-                  <button
-                    onClick={() => handleRemove(server.name)}
-                    className="px-2 py-1 text-[10px] border border-ac-border text-ac-red/70 rounded hover:bg-ac-red/5"
-                  >
-                    <Trash2 className="w-3 h-3 inline" />
-                  </button>
-                </div>
+
+                {/* Expanded details */}
+                {isExpanded && (
+                  <div className="border-t border-ac-border px-3 py-3 space-y-3 bg-ac-bg/30">
+                    {/* Read-only connection info */}
+                    <div className="space-y-1">
+                      {server.url && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-ac-muted w-20 shrink-0">URL</span>
+                          <span className="font-mono text-ac-ink truncate">{server.url}</span>
+                        </div>
+                      )}
+                      {server.command && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-ac-muted w-20 shrink-0">{t("settings.mcpCommand")}</span>
+                          <span className="font-mono text-ac-ink truncate">{server.command}</span>
+                        </div>
+                      )}
+                      {server.args && server.args.length > 0 && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-ac-muted w-20 shrink-0">{t("settings.mcpArgs")}</span>
+                          <span className="font-mono text-ac-ink truncate">{server.args.join(" ")}</span>
+                        </div>
+                      )}
+                      {rawFieldEntries.length > 0 && (
+                        <details className="mt-1">
+                          <summary className="text-[10px] text-ac-muted cursor-pointer hover:text-ac-ink">
+                            {t("settings.mcpRawFields")} ({rawFieldEntries.length})
+                          </summary>
+                          <div className="mt-1 space-y-0.5 pl-2">
+                            {rawFieldEntries.map(([k, v]) => (
+                              <div key={k} className="flex items-center gap-2 text-[11px]">
+                                <span className="text-ac-muted font-mono shrink-0">{k}</span>
+                                <span className="font-mono text-ac-ink/70 truncate">{v}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+
+                    {/* Env editor */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <p className="text-xs font-medium text-ac-muted">{t("settings.mcpEnv")}</p>
+                        <button
+                          onClick={() => handleSaveEnv(server.name)}
+                          className="ac-btn px-2 py-1 text-[10px] flex items-center gap-1"
+                        >
+                          <Save className="w-3 h-3" /> {t("btn.save")}
+                        </button>
+                      </div>
+                      <EnvVarEditor
+                        env={envDrafts[server.name] || {}}
+                        onChange={(env) =>
+                          setEnvDrafts((prev) => ({ ...prev, [server.name]: env }))
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

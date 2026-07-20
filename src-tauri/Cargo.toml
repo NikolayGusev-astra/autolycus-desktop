@@ -5,10 +5,16 @@ description = "Штурман Desktop — native desktop AI assistant"
 authors = ["Штурман Team"]
 license = "MIT"
 edition = "2021"
+# Two binaries now exist (steersman-desktop app + steersman-mcp-server).
+# Tauri's `cargo run` needs to know which is the default — the desktop app.
+default-run = "steersman-desktop"
 
 [lib]
 name = "steersman_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
