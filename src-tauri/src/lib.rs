@@ -11,6 +11,7 @@ mod cronjobs;
 mod discovery;
 mod feed_sources;
 mod gateway;
+mod hermes_protocol;
 mod install;
 mod kanban;
 mod mcp;

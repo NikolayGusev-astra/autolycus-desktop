@@ -177,3 +177,30 @@ export interface LinkSessionInput {
   linked_by?: "manual" | "agent";
   note?: string;
 }
+
+// ── Tauri IPC request/response types ────────────────────────────────────────
+
+export interface SendMessageRequest {
+  text: string;
+  session_id?: string;
+  history?: Array<{ role: string; content: string }>;
+  [key: string]: unknown;
+}
+
+export interface SshConfig {
+  host: string;
+  port: number;
+  username: string;
+  key_path: string;
+  remote_port: number;
+  local_port: number;
+  [key: string]: unknown;
+}
+
+export interface ConnectionConfig {
+  connectionMode: "local" | "remote" | "ssh";
+  remoteUrl: string;
+  remoteApiKey: string;
+  ssh: SshConfig;
+  [key: string]: unknown;
+}
