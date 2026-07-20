@@ -32,8 +32,12 @@ pub struct CachedBriefing {
     pub session_id: String,
     pub title: String,
     pub text: String,
-    pub started_at: i64,
-    pub age_secs: f64,
+    /// When the briefing was generated (unix epoch seconds). Matches the
+    /// `generated_at` field the frontend expects — do NOT rename (serde field
+    /// name is the wire contract).
+    pub generated_at: i64,
+    /// True when the cached briefing is older than max_age_secs.
+    pub stale: bool,
 }
 
 fn now_ts() -> i64 {
@@ -44,98 +48,81 @@ fn now_ts() -> i64 {
 }
 
 /// The briefing prompt sent to the agent. The agent uses its own tools
-/// (email, jira, sessions) to gather data, then the LLM analyzes and
-/// produces actionable suggestions.
+/// (email via himalaya MCP, Jira MCP, Telegram, calendar, Confluence,
+/// chat sessions in state.db) to gather data, then the LLM analyzes,
+/// cross-links tasks with discussions, and produces actionable suggestions.
+///
+/// The structure follows the user's reference Working Briefing format:
+/// statistics line + sections (Встречи, Ближайшие дни, Почта, Личные
+/// события, Блокеры, Без движения, Каналы, Confluence) + task↔chat
+/// cross-linking + suggested replies.
 pub fn briefing_prompt(days: i64) -> String {
     format!(
-        r#"Подготовь брифинг за последние {days} дней. Используй свои инструменты:
+        r#"Ты — персональный ИИ-ассистент руководителя. Подготовь «Рабочий брифинг» за последние {days} дней.
 
-1. **Email** — проверь входящие через email MCP. Найди срочные, важные, требующие ответа.
-2. **Jira** — проверь задачи через jira MCP. Найди просроченные, зависшие, изменившие статус.
-3. **Чат-сессии** — проанализируй недавние обсуждения. Свяжи с задачами:
-   - Если задача обсуждена и выполнена в чате → отметь, что нужна смена статуса
-   - Если задача ждёт ответа, но ответа не было → предложи, что ответить
-4. **Готовность** — общий обзор: что сделано, что в работе, что требует внимания.
+ШАГ 1. Собери сырые данные из ВСЕХ доступных тебе источников. Используй те инструменты (MCP), которые у тебя подключены — не пытайся вызывать несуществующие. Собери:
+- Почта — непрочитанные, требующие ответа, срочные за вчера и сегодня.
+- Задачи — просроченные, заблокированные, без движения, изменившие статус.
+- Личные упоминания и сообщения, где нужна твоя реакция (статусы «Ждёт вас», «Мяч у вас»).
+- Обновления в рабочих каналах/чатах.
+- Новости из базы знаний / Confluence.
+- Проанализируй недавние чат-сессии.
 
-Формат ответа:
-## Срочное
-- [кратко, с указанием источника: email/jira/chat]
+ШАГ 2. Перекрёстный анализ задач и обсуждений:
+- Если задача выполнена/обсуждена в чате, но статус в трекере не обновлён → предложи обновить статус.
+- Если в задаче есть статус, а в источнике (почта/мессенджер) она не решена и нет ответа → предложи готовый краткий ответ.
 
-## Важное
-- ...
+ШАГ 3. Сформируй брифинг СТРОГО по структуре ниже. Краткие выжимки, без длинных полотен.
 
-## Задачи — статус и связь с обсуждениями
-- Задача KEY: статус. Обсуждалась в чате: да/нет. Действие: отметить выполнено / нужен ответ
+# Рабочий брифинг
+**[День недели, Дата]**
 
-## Предложения ответов
-- На [письмо/сообщение от X]: предложенный краткий ответ
+📊 **Статистика дня:** Встреч: [N] | Задач в работе: [N] | Просрочено/Без движения: [N]
 
-## Общая готовность
-- Выполнено: N. В работе: M. Требует внимания: K."#,
+## ВСТРЕЧИ СЕГОДНЯ
+* [Время] — [Название встречи] (Организатор: [Имя])
+
+## БЛИЖАЙШИЕ ДНИ
+* [Дата] — [Краткое событие/задача]
+
+## ПОЧТА · ВЧЕРА И СЕГОДНЯ
+* [Имя отправителя] — [Тема письма] (Статус: требует ответа/ознакомления)
+
+## ЛИЧНЫЕ СОБЫТИЯ · ВЧЕРА И СЕГОДНЯ
+* [Имя контакта] — [Статус: «Ждёт вас» / «Мяч у вас»]. [Краткая суть].
+
+## БЛОКЕРЫ ЗАДАЧ
+* [ID задачи] — [Название задачи]. Причина блокировки: [Описание]. Кто блокирует: [Имя].
+
+## БЕЗ ДВИЖЕНИЯ
+* [ID задачи] — [Название задачи] (Просрочено на [X] дней / Без движения [X] дней).
+
+## ЗАДАЧИ — СВЯЗЬ С ОБСУЖДЕНИЯМИ
+* [ID задачи]: статус [статус]. Обсуждалась в чате: да/нет.
+  - Если выполнена в чате, но статус не обновлён → предложи обновить.
+  - Если ждёт ответа, но ответа не было → предложи, что ответить.
+
+## КАНАЛЫ · ВЧЕРА И СЕГОДНЯ
+* **[Название канала]**: [Краткое описание проблемы/апдейта].
+
+## CONFLUENCE · LIFE
+* [Краткая выжимка целей, апдейтов систем или важных анонсов].
+
+## ПРЕДЛОЖЕНИЯ ОТВЕТОВ
+* На [письмо/сообщение от X]: [краткий готовый ответ в 1–2 предложениях].
+
+## ОБЩАЯ ГОТОВНОСТЬ
+* Выполнено: N. В работе: M. Требует внимания: K.
+
+ПРАВИЛА ФОРМАТИРОВАНИЯ:
+1. Строгий деловой стиль, на русском языке.
+2. Выделяй **жирным** имена, статусы («Ждёт вас», «Мяч у вас», «БЕЗ ДВИЖЕНИЯ») и критичные проблемы.
+3. Если в блоке нет данных — выводи: «Нет критичных обновлений».
+4. Если источник недоступен (нет подключения, нет MCP, нет данных) — честно укажи «Источник недоступен: [причина]». НЕ ВЫДУМЫВАЙ данные.
+5. Указывай ID задач (например, PRX-123, AD-62485).
+6. Предложения ответов — краткие, готовые к отправке."#,
         days = days
     )
-}
-
-/// Generate a briefing by sending an analysis prompt to the running Hermes
-/// Agent via the WebSocket transport. The agent gathers data from its own
-/// connected sources (email, jira, sessions) and produces an LLM-analyzed
-/// briefing with actionable suggestions.
-///
-/// This replaces the old mcp-smart-briefing/server.py subprocess approach.
-pub async fn generate_smart_briefing(
-    hermes_home: &Path,
-    profile: Option<&str>,
-    days: i64,
-) -> Result<BriefingResult, String> {
-    let started_at = now_ts();
-    let prompt = briefing_prompt(days);
-
-    // The agent's response is streamed as chat_event Tauri events (tokens),
-    // but for the briefing we need the FULL text synchronously. We read it
-    // from the session transcript after the turn completes.
-    //
-    // The briefing is sent as a chat message via the WS transport, just like
-    // a regular user prompt. The frontend ChatView picks up the streaming
-    // tokens; here we persist the result and return a preview.
-    //
-    // NOTE: the actual WS call happens in the Tauri command layer
-    // (generate_smart_briefing_cmd in lib.rs), because it needs the AppHandle
-    // (for emit) and the GatewayState (for port/token). This function is the
-    // formatting + persistence layer.
-
-    let session_id = format!("smart_briefing:{}", profile.unwrap_or("default"));
-    let title = format!("Briefing {}d via agent", days);
-
-    // Persist a placeholder; the real text arrives via the WS stream and
-    // gets written when the turn completes (or the frontend reads it from
-    // the session messages).
-    let profile_path = profile_home(hermes_home, profile);
-    let db_path = state_db_path(&profile_path, None);
-    if let Some(parent) = db_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // Write the prompt as the user message so it shows in the transcript.
-    if let Err(e) = insert_briefing_session(
-        &db_path,
-        &session_id,
-        "briefing_agent",
-        started_at,
-        &title,
-        &prompt,
-        "(briefing generation in progress — see chat)",
-    ) {
-        tracing::warn!(target: "steersman_desktop_lib::briefing", error = %e, "persist failed");
-    }
-
-    Ok(BriefingResult {
-        session_id,
-        source: "briefing_agent".into(),
-        started_at,
-        title,
-        preview: prompt.lines().take(4).collect::<Vec<_>>().join("\n"),
-        formatted: prompt,
-    })
 }
 
 /// Read the most recent cached briefing from state.db.
@@ -148,10 +135,10 @@ pub fn get_cached_briefing(
     let profile_path = profile_home(hermes_home, profile);
     let db_path = state_db_path(&profile_path, None);
 
-    let now = now_ts() as f64;
+    let now = now_ts();
     let mut text = String::new();
     let mut title = String::new();
-    let mut started_at = 0i64;
+    let mut generated_at = 0i64;
 
     if db_path.exists() {
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -168,36 +155,22 @@ pub fn get_cached_briefing(
             ) {
                 title = row.0;
                 text = row.1;
-                started_at = row.2;
+                generated_at = row.2;
             }
         }
     }
 
+    let age = now - generated_at;
     CachedBriefing {
         session_id,
         title,
         text,
-        started_at,
-        age_secs: now - started_at as f64,
+        generated_at,
+        stale: age as f64 > max_age_secs,
     }
 }
 
 // ── state.db session insert ───────────────────────────────────────────────
-
-fn insert_briefing_session(
-    db_path: &Path,
-    session_id: &str,
-    source: &str,
-    started_at: i64,
-    title: &str,
-    user_msg: &str,
-    assistant_msg: &str,
-) -> rusqlite::Result<()> {
-    let conn = rusqlite::Connection::open(db_path)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO sessions (id, source, started_at, title, preview)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![session_id, source, started_at, title, assistant_msg],
-    )?;
-    Ok(())
-}
+// (Removed: insert_briefing_session was only used by the dead
+//  generate_smart_briefing; the live path in lib.rs does its own
+//  INSERT OR REPLACE directly into the sessions table.)

@@ -175,11 +175,22 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
         "tool.complete" => {
             let (name, tool_id) = payload_tool_id(value);
             let output = payload_field(value, "output").unwrap_or("");
+            // Backend (server.py:3695) emits `duration_s` as a float (seconds).
+            // The frontend ChatEvent contract expects `duration_ms`. Convert
+            // seconds → milliseconds; fall back to 0 if absent.
+            let duration_ms = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("duration_s"))
+                .or_else(|| value.get("params").and_then(|p| p.get("duration_s")))
+                .and_then(|d| d.as_f64())
+                .map(|secs| (secs * 1000.0) as u64)
+                .unwrap_or(0);
             Some(ChatEvent::ToolComplete {
                 name: name.to_string(),
                 tool_call_id: tool_id.to_string(),
                 output: output.to_string(),
-                duration_ms: 0,
+                duration_ms,
             })
         }
         "message.end" | "message.complete" | "message.done" | "done" => {
@@ -215,6 +226,33 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .unwrap_or("unknown");
             Some(ChatEvent::Status {
                 status: status.to_string(),
+            })
+        }
+        "approval.request" => {
+            // Backend (_emit_approval_request, server.py:1147-1166) emits a
+            // payload with: command (redacted), choices, smart_denied,
+            // allow_permanent, and the tool context. Map to ChatEvent fields
+            // the frontend ChatView.tsx:229 expects.
+            let request_id = payload_field(value, "request_id")
+                .or_else(|| payload_field(value, "tool_id"))
+                .unwrap_or("");
+            let tool_name = payload_field(value, "name")
+                .or_else(|| payload_field(value, "tool_name"))
+                .unwrap_or("tool");
+            let tool_input = payload_field(value, "command")
+                .or_else(|| payload_field(value, "tool_input"))
+                .unwrap_or("");
+            let action = payload_field(value, "action")
+                .or_else(|| payload_field(value, "message"))
+                .unwrap_or("");
+            let command_class = payload_field(value, "command_class")
+                .unwrap_or("write");
+            Some(ChatEvent::ApprovalRequest {
+                request_id: request_id.to_string(),
+                tool_name: tool_name.to_string(),
+                tool_input: tool_input.to_string(),
+                action: action.to_string(),
+                command_class: command_class.to_string(),
             })
         }
         _ => None,
@@ -318,6 +356,77 @@ async fn send_via_ws_remote(
 /// Local-mode WebSocket transport (ADR-004, Phase 0).
 ///
 /// Builds the WS URL from the spawned gateway's port and reads the auth token
+/// from `HERMES_DASHBOARD_SESSION_TOKEN`. Returns the URL + None if the gateway
+/// is not yet running.
+fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, String> {
+    let port = gateway::get_gateway_port(gateway_state, None)
+        .ok_or("Gateway not available (no port)")?;
+    // Token: prefer the one Steersman generated for the spawned process (P1);
+    // fall back to HERMES_DASHBOARD_SESSION_TOKEN env for Phase 0 compatibility.
+    let token = gateway::get_gateway_session_token(gateway_state, None)
+        .or_else(|| {
+            std::env::var("HERMES_DASHBOARD_SESSION_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            "No dashboard session token: gateway not spawned by Steersman, \
+             and HERMES_DASHBOARD_SESSION_TOKEN env is unset."
+                .to_string()
+        })?;
+    // The session token is base64url (secrets.token_urlsafe in upstream),
+    // whose alphabet [A-Za-z0-9_-] needs no percent-encoding in a query string.
+    Ok(format!("ws://127.0.0.1:{}/api/ws?token={}", port, token))
+}
+
+/// ADR-006: Send a chat message over the PERSISTENT local WS connection.
+///
+/// Ensures the connection is open (connecting once, lazily), resolves the
+/// session_id (creating a session if the frontend didn't pass one), and
+/// submits the prompt via the reader task's mpsc channel. Streaming events
+/// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
+pub async fn send_via_ws_persistent_local(
+    gateway_state: &GatewayState,
+    ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    request: &SendMessageRequest,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    let ws_url = build_local_ws_url(gateway_state)?;
+
+    // Ensure the persistent connection is open (idempotent).
+    let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
+    crate::ws_transport::ensure_ws_connection(&ws_url, emit_fn, ws_state)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Resolve session_id: prefer the frontend-supplied one, then the cached
+    // one in WsState. Create a new session only if both are absent.
+    let session_id = if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+        sid.to_string()
+    } else {
+        let cached = ws_state.session_id.lock().await.clone();
+        match cached {
+            Some(sid) if !sid.is_empty() => sid,
+            _ => {
+                // Create a new "desktop" session (the default chat surface).
+                let sid = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                *ws_state.session_id.lock().await = Some(sid.clone());
+                sid
+            }
+        }
+    };
+
+    // Submit the prompt — events stream back via chat_event.
+    crate::ws_transport::submit_prompt_on_connection(ws_state, &session_id, &request.text)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(session_id)
+}
+
+/// Builds the WS URL from the spawned gateway's port and reads the auth token
 /// from `HERMES_DASHBOARD_SESSION_TOKEN` (Phase 0: the token is supplied by the
 /// already-running `hermes serve` process; Phase 1 will have Steersman spawn
 /// `hermes serve` itself and generate the token).
@@ -367,6 +476,7 @@ pub async fn send_message(
     ssh_config: &Option<SshConfig>,
     request: SendMessageRequest,
     app_handle: &AppHandle,
+    ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
 ) -> Result<String, String> {
     // Note: model_config is no longer fetched here — the WS transport sends
     // only {session_id, text}; reasoning_effort/verbosity/etc. live in the
@@ -382,11 +492,10 @@ pub async fn send_message(
                 }
             }
 
-            // ADR-004: the local backend is `hermes serve`, which exposes the
-            // WebSocket /api/ws transport. There is no HTTP fallback — the
-            // legacy /v1/chat/completions endpoint does not exist on a real
-            // backend and has been removed (P2.1).
-            send_via_ws_local(gateway_state, &request, app_handle).await
+            // ADR-006: Local mode uses the PERSISTENT WS connection (one
+            // socket for the app lifetime). Remote/SSH still use connect-per-
+            // message (separate migration, out of scope for ADR-006).
+            send_via_ws_persistent_local(gateway_state, ws_state, &request, app_handle).await
         }
         ConnectionMode::Remote => {
             // ADR-005: Remote talks to a remote `hermes serve` over the same
@@ -669,5 +778,48 @@ mod tests {
     fn to_ws_url_ssh_tunnel_localhost() {
         // SSH tunnel exposes a loopback http URL; must become ws://.
         assert_eq!(to_ws_url("http://127.0.0.1:18642"), "ws://127.0.0.1:18642");
+    }
+
+    // ── T5 (ADR-006 audit): event vocabulary fixes ──────────────────────────
+
+    #[test]
+    fn tool_complete_parses_duration_seconds() {
+        // Backend (server.py:3695) emits duration_s as a float (seconds), but
+        // the frontend contract expects duration_ms. The parser must convert.
+        let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"tc1","name":"read_file","duration_s":1.5,"result":"ok"}}}"#;
+        match parse_ws_message(raw) {
+            Some(ChatEvent::ToolComplete { name, duration_ms, .. }) => {
+                assert_eq!(name, "read_file");
+                // 1.5s → 1500ms
+                assert_eq!(duration_ms, 1500, "1.5s must convert to 1500ms");
+            }
+            other => panic!("expected ToolComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_complete_defaults_duration_to_zero_when_absent() {
+        let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"tc1","name":"search"}}}"#;
+        match parse_ws_message(raw) {
+            Some(ChatEvent::ToolComplete { duration_ms, .. }) => {
+                assert_eq!(duration_ms, 0, "missing duration_s must default to 0");
+            }
+            other => panic!("expected ToolComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn approval_request_event_parsed() {
+        // Wire format from _emit_approval_request (server.py:1147-1166).
+        let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s1","payload":{"request_id":"apr1","name":"bash","command":"rm -rf /tmp","command_class":"dangerous","choices":["once","deny"]}}}"#;
+        match parse_ws_message(raw) {
+            Some(ChatEvent::ApprovalRequest { request_id, tool_name, tool_input, command_class, .. }) => {
+                assert_eq!(request_id, "apr1");
+                assert_eq!(tool_name, "bash");
+                assert_eq!(tool_input, "rm -rf /tmp");
+                assert_eq!(command_class, "dangerous");
+            }
+            other => panic!("expected ApprovalRequest, got {:?}", other),
+        }
     }
 }

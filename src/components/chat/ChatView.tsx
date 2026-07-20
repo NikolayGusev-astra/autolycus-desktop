@@ -61,6 +61,46 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     return () => unsub();
   }, [setPipelineStatus]);
 
+  // BUG-2 fix: when currentSessionId changes (e.g. user opened a session from
+  // the Feed), reload its history from the backend as the source of truth.
+  // This guards against store-timing races where messages set by the Feed's
+  // onOpenSession get clobbered by a subsequent reset or mount order.
+  const loadedSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentSessionId) {
+      loadedSessionRef.current = null;
+      return;
+    }
+    if (loadedSessionRef.current === currentSessionId) return;
+    loadedSessionRef.current = currentSessionId;
+    let cancelled = false;
+    (async () => {
+      try {
+        const msgs = await invoke<
+          Array<{ id: number; role: string; content: string; timestamp: number }>
+        >("get_session_messages_cmd", { sessionId: currentSessionId, profile: null });
+        if (cancelled) return;
+        const mapped = msgs
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({
+            id: `hist-${m.id}`,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            timestamp: m.timestamp,
+          }));
+        // Only replace if still on the same session (avoid clobbering a stream).
+        if (loadedSessionRef.current === currentSessionId) {
+          useGatewayStore.setState({ messages: mapped });
+        }
+      } catch (e) {
+        console.error("chat session load", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSessionId]);
+
   // Listen for chat events from Rust backend
   useEffect(() => {
     const unlisten = listen<{

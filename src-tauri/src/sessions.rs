@@ -74,7 +74,8 @@ pub fn list_sessions(
                 ) as preview
          FROM sessions s
          WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions
-           AND s.source NOT IN ('subagent', 'cli', 'api_server', 'tui', 'mcp', 'briefing_smart')  -- skip service sessions
+           AND s.id NOT LIKE 'cron_%'                                             -- skip scheduled cron jobs
+           AND s.source NOT IN ('subagent', 'cli', 'api_server', 'tui', 'mcp', 'briefing_smart', 'cron')  -- skip service sessions
          ORDER BY s.started_at DESC
          LIMIT ?1 OFFSET ?2",
     )?;
@@ -95,6 +96,43 @@ pub fn list_sessions(
         .collect::<SqliteResult<Vec<_>>>()?;
 
     Ok(sessions)
+}
+
+/// Return up to `limit` recent session "title — preview" strings. Used by the
+/// meeting-briefing command to give the agent chat context without re-querying
+/// message bodies. Skips briefing/cron/service sessions.
+pub fn recent_session_previews(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    limit: i64,
+) -> SqliteResult<Vec<String>> {
+    let db_path = state_db_path(hermes_home, profile);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT s.title,
+                COALESCE(
+                    (SELECT SUBSTR(m.content, 1, 160) FROM messages m
+                     WHERE m.session_id = s.id AND m.role = 'user'
+                     ORDER BY m.timestamp ASC LIMIT 1), '')
+         FROM sessions s
+         WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'
+           AND s.id NOT LIKE 'cron_%'
+           AND s.source NOT IN ('subagent','cli','api_server','tui','mcp','briefing_smart','cron')
+         ORDER BY s.started_at DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            let title: Option<String> = row.get(0)?;
+            let preview: String = row.get(1)?;
+            let t = title.filter(|s| !s.is_empty()).unwrap_or_else(|| "(без темы)".to_string());
+            Ok(format!("{} — {}", t, preview))
+        })?
+        .collect::<SqliteResult<Vec<_>>>()?;
+    Ok(rows)
 }
 
 // ── Get session messages ──────────────────────────────────────────────────
@@ -337,8 +375,9 @@ pub fn list_feed(
                      ORDER BY m.timestamp ASC LIMIT 1), ''
                 ) as preview
          FROM sessions s
-         WHERE s.source NOT IN ('subagent', 'cli', 'api_server', 'tui', 'mcp', 'briefing_smart')  -- skip service sessions
+         WHERE s.source NOT IN ('subagent', 'cli', 'api_server', 'tui', 'mcp', 'briefing_smart', 'cron')  -- skip service sessions
            AND s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'    -- skip desktop-generated briefing sessions
+           AND s.id NOT LIKE 'cron_%'                                             -- skip scheduled cron jobs
          ORDER BY s.started_at DESC
          LIMIT ?1",
     )?;
@@ -385,7 +424,7 @@ pub fn list_feed_channels(
          FROM sessions s
          WHERE s.id NOT LIKE 'briefing:%' AND s.id NOT LIKE 'smart_briefing:%'
            AND s.id NOT LIKE 'cron_%'
-           AND s.source NOT IN ('subagent', 'briefing_smart')
+           AND s.source NOT IN ('subagent', 'briefing_smart', 'cron')
          ORDER BY s.started_at DESC
          LIMIT ?1",
     )?;

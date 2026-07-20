@@ -3,8 +3,9 @@
 // Supports drill-down: when projectId prop is set, only shows tasks for that project.
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, Trash2, Check, Loader, ChevronLeft, Pencil, Users } from "lucide-react";
+import { Plus, Trash2, Check, Loader, ChevronLeft, Pencil, Users, Eye } from "lucide-react";
 import { useTranslation } from "../../hooks/useTranslation";
+import { TaskDetailView } from "./TaskDetailView";
 
 interface Task {
   id: number;
@@ -33,6 +34,7 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [detailTaskId, setDetailTaskId] = useState<number | null>(null);
   // form state
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(3);
@@ -107,6 +109,10 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
+      {detailTaskId !== null ? (
+        <TaskDetailView taskId={detailTaskId} onBack={() => { setDetailTaskId(null); void load(); }} />
+      ) : (
+      <div>
       <div className="flex items-center gap-3 mb-6">
         {onBack && (
           <button onClick={onBack} className="p-1.5 rounded-md hover:bg-ac-surface text-ac-muted hover:text-ac-brand">
@@ -210,10 +216,13 @@ export function TasksView({ projectId, projectName, onBack }: { projectId?: numb
                 </span>
               ))}
               <button onClick={() => startEdit(task)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg"><Pencil className="w-3.5 h-3.5" /></button>
+              <button onClick={() => setDetailTaskId(task.id)} className="p-1 rounded text-ac-faint hover:text-ac-brand hover:bg-ac-bg" title={t("tasks.detailTitle")}><Eye className="w-3.5 h-3.5" /></button>
               <button onClick={() => void remove(task.id)} className="p-1 rounded text-ac-faint hover:text-ac-red hover:bg-ac-bg"><Trash2 className="w-3.5 h-3.5" /></button>
             </div>
           ))}
         </div>
+      )}
+      </div>
       )}
     </div>
   );

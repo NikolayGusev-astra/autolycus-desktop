@@ -28,6 +28,8 @@ pub fn canonical_base_url(provider: &str) -> Option<&'static str> {
         "ollama" => Some("http://localhost:11434/v1"),
         "vllm" => Some("http://localhost:8000/v1"),
         "llamacpp" => Some("http://localhost:8080/v1"),
+        "kilocode" | "kilo" => Some("https://api.kilo.ai/api/gateway"),
+        "copilot" => Some("https://api.githubcopilot.com"),
         _ => None,
     }
 }
@@ -38,7 +40,7 @@ pub fn all_provider_ids() -> Vec<&'static str> {
         "openai", "openrouter", "ollama-cloud", "deepseek", "groq", "mistral",
         "together", "fireworks", "atlascloud", "cerebras", "perplexity",
         "huggingface", "xiaomi", "zai", "anthropic", "lmstudio", "atomicchat",
-        "ollama", "vllm", "llamacpp",
+        "ollama", "vllm", "llamacpp", "kilocode", "copilot",
     ]
 }
 
@@ -66,6 +68,8 @@ pub fn all_provider_urls() -> HashMap<String, String> {
         ("ollama", "http://localhost:11434/v1"),
         ("vllm", "http://localhost:8000/v1"),
         ("llamacpp", "http://localhost:8080/v1"),
+        ("kilocode", "https://api.kilo.ai/api/gateway"),
+        ("copilot", "https://api.githubcopilot.com"),
     ] {
         map.insert(k.to_string(), v.to_string());
     }
@@ -135,7 +139,7 @@ mod tests {
     fn provider_count_is_stable() {
         // Lock the count so adding a provider forces a test update (and thus
         // a conscious check that the URL table is also updated).
-        assert_eq!(all_provider_ids().len(), 20);
-        assert_eq!(all_provider_urls().len(), 20);
+        assert_eq!(all_provider_ids().len(), 22);
+        assert_eq!(all_provider_urls().len(), 22);
     }
 }

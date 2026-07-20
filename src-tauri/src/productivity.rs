@@ -105,6 +105,54 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             api_key TEXT DEFAULT ''
         );",
     );
+    // ADR-009: external refs — link Jira/email/Confluence items to internal
+    // tasks/projects/goals. One external item (e.g. Jira DEVOS-3) can map to
+    // multiple internal tasks (subtasks). UNIQUE(source, external_id) prevents
+    // duplicate links for the SAME external item to the SAME target.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS external_refs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            external_url TEXT DEFAULT '',
+            title TEXT DEFAULT '',
+            task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+            created_at INTEGER DEFAULT (strftime('%s','now')),
+            UNIQUE(source, external_id)
+        );",
+    );
+    // ADR-009: session links — attach chat sessions (from state.db) to
+    // tasks/projects/goals. session_id is a plain string (no FK — it lives in
+    // a different SQLite DB owned by the Hermes backend). One session can link
+    // to multiple targets; orphan links (session deleted in state.db) are
+    // filtered out at render time.
+    // Note: we do NOT add a UNIQUE constraint at the table level because
+    // SQLite treats NULL != NULL in UNIQUE indexes, which would allow
+    // duplicate links when project_id/goal_id are NULL. Idempotency is
+    // enforced in link_session() via application-level check.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+            project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+            goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+            linked_at INTEGER DEFAULT (strftime('%s','now')),
+            linked_by TEXT DEFAULT 'manual',
+            note TEXT DEFAULT ''
+        );",
+    );
+    // Partial unique index: only enforce uniqueness when all FK columns are non-NULL.
+    // For cases with NULLs (session→task only, session→project only), we handle
+    // deduplication in application code (link_session).
+    let _ = conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_links_unique_full
+         ON session_links (session_id, task_id, project_id, goal_id)
+         WHERE task_id IS NOT NULL AND project_id IS NOT NULL AND goal_id IS NOT NULL",
+        [],
+    );
     Ok(())
 }
 
@@ -655,3 +703,404 @@ pub fn dash_stats(hermes_home: &Path, profile: Option<&str>) -> Result<DashStats
         protocols,
     })
 }
+
+// ── ADR-009: External refs (Jira/email → internal tasks) ───────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalRef {
+    pub id: i64,
+    pub source: String,
+    pub external_id: String,
+    #[serde(default)]
+    pub external_url: String,
+    #[serde(default)]
+    pub title: String,
+    pub task_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub goal_id: Option<i64>,
+    pub created_at: Option<i64>,
+}
+
+/// Link an external item (Jira key, email Message-ID, Confluence page) to an
+/// internal task/project/goal. UPSERT by (source, external_id) so re-linking
+/// updates the target instead of erroring.
+pub fn upsert_external_ref(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    source: &str,
+    external_id: &str,
+    external_url: Option<&str>,
+    title: Option<&str>,
+    task_id: Option<i64>,
+    project_id: Option<i64>,
+    goal_id: Option<i64>,
+) -> Result<i64, String> {
+    let conn = open(hermes_home, profile)?;
+    conn.execute(
+        "INSERT INTO external_refs (source, external_id, external_url, title, task_id, project_id, goal_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(source, external_id) DO UPDATE SET
+            external_url = COALESCE(excluded.external_url, external_refs.external_url),
+            title = COALESCE(excluded.title, external_refs.title),
+            task_id = COALESCE(excluded.task_id, external_refs.task_id),
+            project_id = COALESCE(excluded.project_id, external_refs.project_id),
+            goal_id = COALESCE(excluded.goal_id, external_refs.goal_id)",
+        params![source, external_id, external_url, title, task_id, project_id, goal_id],
+    )
+    .map_err(|e| format!("upsert external_ref: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Look up whether an external item is already linked to an internal entity.
+pub fn get_external_ref(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    source: &str,
+    external_id: &str,
+) -> Result<Option<ExternalRef>, String> {
+    let conn = open(hermes_home, profile)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, source, external_id, external_url, title, task_id, project_id, goal_id, created_at
+             FROM external_refs WHERE source = ?1 AND external_id = ?2",
+        )
+        .map_err(|e| format!("prepare: {}", e))?;
+    let row = stmt
+        .query_row(params![source, external_id], |r| {
+            Ok(ExternalRef {
+                id: r.get(0)?,
+                source: r.get(1)?,
+                external_id: r.get(2)?,
+                external_url: r.get(3).unwrap_or_default(),
+                title: r.get(4).unwrap_or_default(),
+                task_id: r.get(5)?,
+                project_id: r.get(6)?,
+                goal_id: r.get(7)?,
+                created_at: r.get(8).ok(),
+            })
+        })
+        .ok();
+    Ok(row)
+}
+
+// ── ADR-009: Session links (chat sessions → tasks/projects/goals) ──────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLink {
+    pub id: i64,
+    pub session_id: String,
+    pub task_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub goal_id: Option<i64>,
+    pub linked_at: Option<i64>,
+    #[serde(default)]
+    pub linked_by: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// Link a chat session to a task/project/goal. Idempotent: checks for existing
+/// link first (SQLite UNIQUE constraint treats NULL != NULL, so we handle
+/// idempotency in application logic instead of relying solely on the index).
+pub fn link_session(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    session_id: &str,
+    task_id: Option<i64>,
+    project_id: Option<i64>,
+    goal_id: Option<i64>,
+    linked_by: Option<&str>,
+    note: Option<&str>,
+) -> Result<i64, String> {
+    if task_id.is_none() && project_id.is_none() && goal_id.is_none() {
+        return Err("at least one of task_id/project_id/goal_id is required".to_string());
+    }
+    let conn = open(hermes_home, profile)?;
+    
+    // Check if link already exists (handles NULLs correctly where UNIQUE index doesn't)
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM session_links WHERE session_id = ?1 AND task_id IS ?2 AND project_id IS ?3 AND goal_id IS ?4 LIMIT 1",
+            params![session_id, task_id, project_id, goal_id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    
+    if exists {
+        // Return the existing link's id
+        let existing_id: i64 = conn
+            .query_row(
+                "SELECT id FROM session_links WHERE session_id = ?1 AND task_id IS ?2 AND project_id IS ?3 AND goal_id IS ?4 LIMIT 1",
+                params![session_id, task_id, project_id, goal_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("get existing link: {}", e))?;
+        return Ok(existing_id);
+    }
+    
+    conn.execute(
+        "INSERT INTO session_links (session_id, task_id, project_id, goal_id, linked_by, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            session_id,
+            task_id,
+            project_id,
+            goal_id,
+            linked_by.unwrap_or("manual"),
+            note.unwrap_or("")
+        ],
+    )
+    .map_err(|e| format!("link_session: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Remove a session link by id.
+pub fn unlink_session(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    link_id: i64,
+) -> Result<(), String> {
+    let conn = open(hermes_home, profile)?;
+    conn.execute("DELETE FROM session_links WHERE id = ?1", params![link_id])
+        .map_err(|e| format!("unlink_session: {}", e))?;
+    Ok(())
+}
+
+/// Get all links for a given session (to show badges in the session list).
+pub fn get_session_links(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    session_id: &str,
+) -> Result<Vec<SessionLink>, String> {
+    let conn = open(hermes_home, profile)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, task_id, project_id, goal_id, linked_at, linked_by, note
+             FROM session_links WHERE session_id = ?1 ORDER BY linked_at DESC",
+        )
+        .map_err(|e| format!("prepare: {}", e))?;
+    let rows = stmt
+        .query_map(params![session_id], |r| {
+            Ok(SessionLink {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                task_id: r.get(2)?,
+                project_id: r.get(3)?,
+                goal_id: r.get(4)?,
+                linked_at: r.get(5).ok(),
+                linked_by: r.get(6).unwrap_or_default(),
+                note: r.get(7).unwrap_or_default(),
+            })
+        })
+        .map_err(|e| format!("query: {}", e))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("row: {}", e))
+}
+
+/// Get all session_ids linked to a given task (for the task detail view).
+pub fn get_links_for_task(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    task_id: i64,
+) -> Result<Vec<SessionLink>, String> {
+    let conn = open(hermes_home, profile)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, task_id, project_id, goal_id, linked_at, linked_by, note
+             FROM session_links WHERE task_id = ?1 ORDER BY linked_at DESC",
+        )
+        .map_err(|e| format!("prepare: {}", e))?;
+    let rows = stmt
+        .query_map(params![task_id], |r| {
+            Ok(SessionLink {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                task_id: r.get(2)?,
+                project_id: r.get(3)?,
+                goal_id: r.get(4)?,
+                linked_at: r.get(5).ok(),
+                linked_by: r.get(6).unwrap_or_default(),
+                note: r.get(7).unwrap_or_default(),
+            })
+        })
+        .map_err(|e| format!("query: {}", e))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("row: {}", e))
+}
+
+/// Create an internal task AND link it to an external item in one transaction.
+/// Used by "Jira → В задачу": atomically create_task + upsert_external_ref.
+pub fn create_task_from_external(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    source: &str,
+    external_id: &str,
+    external_url: Option<&str>,
+    title: &str,
+    priority: i64,
+    due_date: Option<&str>,
+    project_id: Option<i64>,
+    goal_id: Option<i64>,
+    assignee: &str,
+) -> Result<i64, String> {
+    let mut conn = open(hermes_home, profile)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin tx: {}", e))?;
+    tx.execute(
+        "INSERT INTO tasks (title, priority, due_date, project_id, assignee) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![title, priority, due_date, project_id, assignee],
+    )
+    .map_err(|e| format!("insert task: {}", e))?;
+    let task_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO external_refs (source, external_id, external_url, title, task_id, project_id, goal_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(source, external_id) DO UPDATE SET task_id = ?5, project_id = ?6, goal_id = ?7, title = ?4",
+        params![source, external_id, external_url, title, task_id, project_id, goal_id],
+    )
+    .map_err(|e| format!("insert external_ref: {}", e))?;
+    tx.commit().map_err(|e| format!("commit: {}", e))?;
+    Ok(task_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tempdir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steersman-prod-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn external_refs_table_created_by_migrate() {
+        let dir = tempdir();
+        // Opening the DB runs migrate(); the tables must exist after.
+        let conn = open(&dir, None).unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(tables.contains(&"external_refs".to_string()), "external_refs missing: {:?}", tables);
+        assert!(tables.contains(&"session_links".to_string()), "session_links missing: {:?}", tables);
+    }
+
+    #[test]
+    fn upsert_external_ref_inserts_then_updates() {
+        let dir = tempdir();
+        // Create a task first (FK target).
+        let task_id = create_task(&dir, None, "Test task", 3, None, None, "", None).unwrap();
+        // Create a project to link to (FK target for project_id).
+        let project_id = create_project(&dir, None, "Test Project", "#888", None).unwrap();
+        // First insert: link DEVOS-3 to the task.
+        upsert_external_ref(&dir, None, "jira", "DEVOS-3", Some("https://jira/DEVOS-3"), Some("Fix bug"), Some(task_id), None, None).unwrap();
+        let r1 = get_external_ref(&dir, None, "jira", "DEVOS-3").unwrap().unwrap();
+        assert_eq!(r1.task_id, Some(task_id));
+        assert_eq!(r1.title, "Fix bug");
+
+        // Upsert again with a project link — should UPDATE, not duplicate.
+        upsert_external_ref(&dir, None, "jira", "DEVOS-3", None, Some("Fix bug v2"), Some(task_id), Some(project_id), None).unwrap();
+        let r2 = get_external_ref(&dir, None, "jira", "DEVOS-3").unwrap().unwrap();
+        assert_eq!(r2.project_id, Some(project_id), "project_id should update");
+        assert_eq!(r2.title, "Fix bug v2", "title should update");
+
+        // Only one row for (jira, DEVOS-3).
+        let count: i64 = open(&dir, None).unwrap()
+            .query_row("SELECT count(*) FROM external_refs WHERE source='jira' AND external_id='DEVOS-3'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "should be exactly 1 row after upsert");
+    }
+
+    #[test]
+    fn get_external_ref_returns_none_for_unknown() {
+        let dir = tempdir();
+        let r = get_external_ref(&dir, None, "jira", "NONEXIST-1").unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn link_session_requires_at_least_one_target() {
+        let dir = tempdir();
+        let result = link_session(&dir, None, "sess1", None, None, None, None, None);
+        assert!(result.is_err(), "must error when no task/project/goal");
+    }
+
+    #[test]
+    fn link_session_and_get_round_trip() {
+        let dir = tempdir();
+        // Create a task first (FK target).
+        let task_id = create_task(&dir, None, "Test task", 3, None, None, "", None).unwrap();
+        // Link a session to it.
+        link_session(&dir, None, "sess-abc", Some(task_id), None, None, Some("manual"), Some("discussed")).unwrap();
+        // Query back.
+        let links = get_session_links(&dir, None, "sess-abc").unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].task_id, Some(task_id));
+        assert_eq!(links[0].linked_by, "manual");
+        assert_eq!(links[0].note, "discussed");
+    }
+
+    #[test]
+    fn link_session_is_idempotent() {
+        let dir = tempdir();
+        let task_id = create_task(&dir, None, "T", 3, None, None, "", None).unwrap();
+        link_session(&dir, None, "s1", Some(task_id), None, None, None, None).unwrap();
+        // Same link again — no error, no duplicate.
+        link_session(&dir, None, "s1", Some(task_id), None, None, None, None).unwrap();
+        let links = get_session_links(&dir, None, "s1").unwrap();
+        assert_eq!(links.len(), 1, "duplicate link must be deduped");
+    }
+
+    #[test]
+    fn get_links_for_task_returns_sessions() {
+        let dir = tempdir();
+        let task_id = create_task(&dir, None, "T", 3, None, None, "", None).unwrap();
+        link_session(&dir, None, "sess-1", Some(task_id), None, None, None, None).unwrap();
+        link_session(&dir, None, "sess-2", Some(task_id), None, None, None, None).unwrap();
+        let links = get_links_for_task(&dir, None, task_id).unwrap();
+        assert_eq!(links.len(), 2, "both sessions should be linked to the task");
+        let session_ids: Vec<&str> = links.iter().map(|l| l.session_id.as_str()).collect();
+        assert!(session_ids.contains(&"sess-1"));
+        assert!(session_ids.contains(&"sess-2"));
+    }
+
+    #[test]
+    fn create_task_from_external_is_atomic() {
+        let dir = tempdir();
+        // Create a task from a Jira issue — both task and external_ref must exist.
+        let task_id = create_task_from_external(
+            &dir, None, "jira", "INT-6515", Some("https://jira/INT-6515"),
+            "Настроить MCP", 3, None, None, None, "ngusev",
+        ).unwrap();
+        assert!(task_id > 0);
+        // The task exists.
+        let tasks = list_tasks(&dir, None).unwrap();
+        assert!(tasks.iter().any(|t| t.id == task_id && t.title == "Настроить MCP"));
+        // The external_ref exists and points to the task.
+        let r = get_external_ref(&dir, None, "jira", "INT-6515").unwrap().unwrap();
+        assert_eq!(r.task_id, Some(task_id));
+        assert_eq!(r.title, "Настроить MCP");
+    }
+
+    #[test]
+    fn unlink_session_removes_link() {
+        let dir = tempdir();
+        let task_id = create_task(&dir, None, "T", 3, None, None, "", None).unwrap();
+        let link_id = link_session(&dir, None, "s1", Some(task_id), None, None, None, None).unwrap();
+        unlink_session(&dir, None, link_id).unwrap();
+        let links = get_session_links(&dir, None, "s1").unwrap();
+        assert!(links.is_empty(), "link should be removed");
+    }
+}
+
