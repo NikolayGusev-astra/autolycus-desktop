@@ -1,29 +1,27 @@
-name: Build
+name: CI and Release
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+    branches: [main]
+    tags: ['v*']
   pull_request:
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
-    name: CI (PR checks)
-    runs-on: ubuntu-22.04
+    name: CI (lint, typecheck, test, clippy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -37,55 +35,58 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Cache npm
-        uses: actions/cache@v4
+      - name: Check formatting
+        run: cargo fmt --check --manifest-path Cargo.toml
+
+      - name: Run clippy
+        run: cargo clippy --manifest-path Cargo.toml --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --manifest-path Cargo.toml --all-targets
+
+  frontend-ci:
+    name: Frontend CI (lint, typecheck, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          node-version: "22"
+          cache: "npm"
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - run: npm run typecheck
+      - name: Run lint
+        run: npm run lint
 
-      - run: npm run lint
+      - name: Run typecheck
+        run: npm run typecheck
 
-      - run: npm run test
-
-      - run: cargo fmt --check
-
-      - run: cargo clippy --all-targets -- -D warnings
-
-      - run: cargo test --all-targets
+      - name: Run tests
+        run: npm run test
 
   build-linux:
-    needs: ci
-    runs-on: ubuntu-22.04
+    name: Build Linux
+    needs: [ci, frontend-ci]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: "npm"
 
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libssl-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            libayatana-appindicator3-dev \
-            patchelf \
-            pkg-config
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -94,8 +95,8 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -107,42 +108,38 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-npm-
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build
+      - name: Build (Linux)
         shell: bash
         run: |
-          rm -rf node_modules/.vite || true
           npx tauri build --target x86_64-unknown-linux-gnu
 
-      - name: Upload AppImage
+      - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-appimage
-          path: src-tauri/target/*/release/bundle/appimage/*.AppImage
-
-      - name: Upload .deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-deb
-          path: src-tauri/target/*/release/bundle/deb/*.deb
+          name: linux-artifacts
+          path: |
+            src-tauri/target/*/release/bundle/appimage/*.AppImage
+            src-tauri/target/*/release/bundle/deb/*.deb
 
   build-windows:
-    needs: ci
+    name: Build Windows
+    needs: [ci, frontend-ci]
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: "npm"
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install NSIS
-        run: choco install nsis -y
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -151,8 +148,8 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -164,47 +161,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-npm-
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build
-        shell: bash
-        run: |
-          rm -rf node_modules/.vite || true
-          npx tauri build --target x86_64-pc-windows-msvc
+      - name: Build (Windows)
+        shell: powershell
+        run: npx tauri build --target x86_64-pc-windows-msvc
 
-      - name: Upload MSI
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-msi
-          path: src-tauri/target/*/release/bundle/msi/*.msi
-
-      - name: Upload NSIS
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-nsis
-          path: src-tauri/target/*/release/bundle/nsis/*.exe
-
-      - name: Publish to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            src-tauri/target/*/release/bundle/nsis/*.exe
+          name: windows-artifacts
+          path: |
             src-tauri/target/*/release/bundle/msi/*.msi
-          draft: true
-          generate_release_notes: true
+            src-tauri/target/*/release/bundle/nsis/*.exe
 
   build-macos:
-    needs: ci
+    name: Build macOS
+    needs: [ci, frontend-ci]
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
@@ -215,8 +201,8 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -228,7 +214,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-npm-
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
       - name: Build (Universal Binary)
         shell: bash
@@ -236,22 +223,21 @@ jobs:
           rm -rf node_modules/.vite || true
           npx tauri build --target universal-apple-darwin
 
-      - name: Upload .dmg
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-dmg
-          path: src-tauri/target/*/release/bundle/dmg/*.dmg
-
-      - name: Upload .app
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-app
-          path: src-tauri/target/*/release/bundle/macos/*.app
+          name: macos-artifacts
+          path: |
+            src-tauri/target/*/release/bundle/dmg/*.dmg
+            src-tauri/target/*/release/bundle/macos/*.app
 
   publish-release:
+    name: Publish Release
     needs: [build-linux, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
