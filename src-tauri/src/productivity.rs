@@ -77,10 +77,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate: {}", e))?;
     // Additive migrations: link projects → goals (epic hierarchy: Goal →
     // Projects → Tasks). ALTER TABLE ... ADD COLUMN is idempotent via try/catch.
-    let _ = conn.execute("ALTER TABLE projects ADD COLUMN goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL", []);
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN labels TEXT DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT DEFAULT ''", []);
+    let _ = conn.execute(
+        "ALTER TABLE tasks ADD COLUMN session_id TEXT DEFAULT ''",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN section_id INTEGER", []);
     // Sections within projects (like Todoist).
     let _ = conn.execute_batch(
@@ -269,14 +275,37 @@ pub fn update_task(
     let conn = open(hermes_home, profile)?;
     let mut sets: Vec<String> = Vec::new();
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(t) = title { sets.push("title = ?".into()); binds.push(Box::new(t.to_string())); }
-    if let Some(p) = priority { sets.push("priority = ?".into()); binds.push(Box::new(p)); }
-    if let Some(d) = due_date { sets.push("due_date = ?".into()); binds.push(Box::new(d.to_string())); }
-    if let Some(pi) = project_id { sets.push("project_id = ?".into()); binds.push(Box::new(pi)); }
-    if let Some(a) = assignee { sets.push("assignee = ?".into()); binds.push(Box::new(a.to_string())); }
-    if let Some(l) = labels { sets.push("labels = ?".into()); binds.push(Box::new(l.to_string())); }
-    if let Some(sid) = section_id { sets.push("section_id = ?".into()); binds.push(Box::new(sid)); }
-    if sets.is_empty() { return Ok(()); }
+    if let Some(t) = title {
+        sets.push("title = ?".into());
+        binds.push(Box::new(t.to_string()));
+    }
+    if let Some(p) = priority {
+        sets.push("priority = ?".into());
+        binds.push(Box::new(p));
+    }
+    if let Some(d) = due_date {
+        sets.push("due_date = ?".into());
+        binds.push(Box::new(d.to_string()));
+    }
+    if let Some(pi) = project_id {
+        sets.push("project_id = ?".into());
+        binds.push(Box::new(pi));
+    }
+    if let Some(a) = assignee {
+        sets.push("assignee = ?".into());
+        binds.push(Box::new(a.to_string()));
+    }
+    if let Some(l) = labels {
+        sets.push("labels = ?".into());
+        binds.push(Box::new(l.to_string()));
+    }
+    if let Some(sid) = section_id {
+        sets.push("section_id = ?".into());
+        binds.push(Box::new(sid));
+    }
+    if sets.is_empty() {
+        return Ok(());
+    }
     sets.push("id = id".into()); // no-op to ensure non-empty
     let sql = format!("UPDATE tasks SET {} WHERE id = ?", sets.join(", "));
     binds.push(Box::new(id));
@@ -353,10 +382,21 @@ pub fn update_goal(
     let conn = open(hermes_home, profile)?;
     let mut sets: Vec<String> = Vec::new();
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(v) = title { sets.push("title = ?".into()); binds.push(Box::new(v.to_string())); }
-    if let Some(v) = target_date { sets.push("target_date = ?".into()); binds.push(Box::new(v.to_string())); }
-    if let Some(v) = progress { sets.push("progress = ?".into()); binds.push(Box::new(v)); }
-    if sets.is_empty() { return Ok(()); }
+    if let Some(v) = title {
+        sets.push("title = ?".into());
+        binds.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = target_date {
+        sets.push("target_date = ?".into());
+        binds.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = progress {
+        sets.push("progress = ?".into());
+        binds.push(Box::new(v));
+    }
+    if sets.is_empty() {
+        return Ok(());
+    }
     sets.push("id = id".into());
     let sql = format!("UPDATE goals SET {} WHERE id = ?", sets.join(", "));
     binds.push(Box::new(id));
@@ -383,14 +423,18 @@ pub struct Project {
 pub fn list_projects(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Project>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
-        .prepare("SELECT id, name, color, description, goal_id, created_at FROM projects ORDER BY name")
+        .prepare(
+            "SELECT id, name, color, description, goal_id, created_at FROM projects ORDER BY name",
+        )
         .map_err(|e| format!("prepare: {}", e))?;
     let rows = stmt
         .query_map([], |r| {
             Ok(Project {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                color: r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "#888".into()),
+                color: r
+                    .get::<_, Option<String>>(2)?
+                    .unwrap_or_else(|| "#888".into()),
                 description: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 goal_id: r.get(4).ok().flatten(),
                 created_at: r.get(5)?,
@@ -433,27 +477,47 @@ pub struct Section {
     pub position: i64,
 }
 
-pub fn list_sections(hermes_home: &Path, profile: Option<&str>, project_id: i64) -> Result<Vec<Section>, String> {
+pub fn list_sections(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    project_id: i64,
+) -> Result<Vec<Section>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
         .prepare("SELECT id, project_id, name, position FROM sections WHERE project_id = ?1 ORDER BY position")
         .map_err(|e| format!("prepare: {}", e))?;
-    let rows = stmt.query_map(params![project_id], |r| {
-        Ok(Section { id: r.get(0)?, project_id: r.get(1)?, name: r.get(2)?, position: r.get(3)? })
-    }).map_err(|e| format!("query: {}", e))?;
+    let rows = stmt
+        .query_map(params![project_id], |r| {
+            Ok(Section {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                name: r.get(2)?,
+                position: r.get(3)?,
+            })
+        })
+        .map_err(|e| format!("query: {}", e))?;
     Ok(rows.flatten().collect())
 }
 
-pub fn create_section(hermes_home: &Path, profile: Option<&str>, project_id: i64, name: &str) -> Result<i64, String> {
+pub fn create_section(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    project_id: i64,
+    name: &str,
+) -> Result<i64, String> {
     let conn = open(hermes_home, profile)?;
-    conn.execute("INSERT INTO sections (project_id, name) VALUES (?1, ?2)", params![project_id, name])
-        .map_err(|e| format!("insert: {}", e))?;
+    conn.execute(
+        "INSERT INTO sections (project_id, name) VALUES (?1, ?2)",
+        params![project_id, name],
+    )
+    .map_err(|e| format!("insert: {}", e))?;
     Ok(conn.last_insert_rowid())
 }
 
 pub fn delete_section(hermes_home: &Path, profile: Option<&str>, id: i64) -> Result<(), String> {
     let conn = open(hermes_home, profile)?;
-    conn.execute("DELETE FROM sections WHERE id = ?1", params![id]).map_err(|e| format!("delete: {}", e))?;
+    conn.execute("DELETE FROM sections WHERE id = ?1", params![id])
+        .map_err(|e| format!("delete: {}", e))?;
     Ok(())
 }
 
@@ -473,22 +537,44 @@ pub struct ConnectionProfile {
     pub api_key: String,
 }
 
-pub fn list_profiles(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<ConnectionProfile>, String> {
+pub fn list_profiles(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Result<Vec<ConnectionProfile>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
         .prepare("SELECT id, name, mode, host, port, username, key_path, api_url, api_key FROM connection_profiles ORDER BY name")
         .map_err(|e| format!("prepare: {}", e))?;
-    let rows = stmt.query_map([], |r| {
-        Ok(ConnectionProfile {
-            id: r.get(0)?, name: r.get(1)?, mode: r.get(2)?, host: r.get(3)?,
-            port: r.get(4)?, username: r.get(5)?, key_path: r.get(6)?,
-            api_url: r.get(7)?, api_key: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ConnectionProfile {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                mode: r.get(2)?,
+                host: r.get(3)?,
+                port: r.get(4)?,
+                username: r.get(5)?,
+                key_path: r.get(6)?,
+                api_url: r.get(7)?,
+                api_key: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            })
         })
-    }).map_err(|e| format!("query: {}", e))?;
+        .map_err(|e| format!("query: {}", e))?;
     Ok(rows.flatten().collect())
 }
 
-pub fn create_profile(hermes_home: &Path, profile: Option<&str>, name: &str, mode: &str, host: &str, port: i64, username: &str, key_path: &str, api_url: &str, api_key: &str) -> Result<i64, String> {
+pub fn create_profile(
+    hermes_home: &Path,
+    profile: Option<&str>,
+    name: &str,
+    mode: &str,
+    host: &str,
+    port: i64,
+    username: &str,
+    key_path: &str,
+    api_url: &str,
+    api_key: &str,
+) -> Result<i64, String> {
     let conn = open(hermes_home, profile)?;
     conn.execute(
         "INSERT INTO connection_profiles (name, mode, host, port, username, key_path, api_url, api_key) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -499,7 +585,8 @@ pub fn create_profile(hermes_home: &Path, profile: Option<&str>, name: &str, mod
 
 pub fn delete_profile(hermes_home: &Path, profile: Option<&str>, id: i64) -> Result<(), String> {
     let conn = open(hermes_home, profile)?;
-    conn.execute("DELETE FROM connection_profiles WHERE id = ?1", params![id]).map_err(|e| format!("delete: {}", e))?;
+    conn.execute("DELETE FROM connection_profiles WHERE id = ?1", params![id])
+        .map_err(|e| format!("delete: {}", e))?;
     Ok(())
 }
 
@@ -515,10 +602,21 @@ pub fn update_project(
     let conn = open(hermes_home, profile)?;
     let mut sets: Vec<String> = Vec::new();
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(v) = name { sets.push("name = ?".into()); binds.push(Box::new(v.to_string())); }
-    if let Some(v) = color { sets.push("color = ?".into()); binds.push(Box::new(v.to_string())); }
-    if let Some(v) = goal_id { sets.push("goal_id = ?".into()); binds.push(Box::new(v)); }
-    if sets.is_empty() { return Ok(()); }
+    if let Some(v) = name {
+        sets.push("name = ?".into());
+        binds.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = color {
+        sets.push("color = ?".into());
+        binds.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = goal_id {
+        sets.push("goal_id = ?".into());
+        binds.push(Box::new(v));
+    }
+    if sets.is_empty() {
+        return Ok(());
+    }
     sets.push("id = id".into());
     let sql = format!("UPDATE projects SET {} WHERE id = ?", sets.join(", "));
     binds.push(Box::new(id));
@@ -605,7 +703,10 @@ pub struct SelfCheck {
     pub created_at: Option<i64>,
 }
 
-pub fn list_self_checks(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<SelfCheck>, String> {
+pub fn list_self_checks(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Result<Vec<SelfCheck>, String> {
     let conn = open(hermes_home, profile)?;
     let mut stmt = conn
         .prepare("SELECT id, energy, joy, mood, notes, created_at FROM self_checks ORDER BY created_at DESC LIMIT 60")
@@ -665,15 +766,19 @@ pub fn dash_stats(hermes_home: &Path, profile: Option<&str>) -> Result<DashStats
         .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
         .unwrap_or(0);
     let tasks_done: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tasks WHERE status='done'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tasks WHERE status='done'", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(0);
     let active_tasks = tasks_total - tasks_done;
     // today = due_date is today (YYYY-MM-DD)
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let tasks_today: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tasks WHERE due_date = ?1 AND status != 'done'", params![today], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE due_date = ?1 AND status != 'done'",
+            params![today],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     // Overdue: due_date is set, in the past, and task not done.
     let overdue_tasks: i64 = conn
@@ -816,7 +921,7 @@ pub fn link_session(
         return Err("at least one of task_id/project_id/goal_id is required".to_string());
     }
     let conn = open(hermes_home, profile)?;
-    
+
     // Check if link already exists (handles NULLs correctly where UNIQUE index doesn't)
     let exists: bool = conn
         .query_row(
@@ -825,7 +930,7 @@ pub fn link_session(
             |_| Ok(true),
         )
         .unwrap_or(false);
-    
+
     if exists {
         // Return the existing link's id
         let existing_id: i64 = conn
@@ -837,7 +942,7 @@ pub fn link_session(
             .map_err(|e| format!("get existing link: {}", e))?;
         return Ok(existing_id);
     }
-    
+
     conn.execute(
         "INSERT INTO session_links (session_id, task_id, project_id, goal_id, linked_by, note)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -893,7 +998,8 @@ pub fn get_session_links(
             })
         })
         .map_err(|e| format!("query: {}", e))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("row: {}", e))
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("row: {}", e))
 }
 
 /// Get all session_ids linked to a given task (for the task detail view).
@@ -923,7 +1029,8 @@ pub fn get_links_for_task(
             })
         })
         .map_err(|e| format!("query: {}", e))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("row: {}", e))
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("row: {}", e))
 }
 
 /// Create an internal task AND link it to an external item in one transaction.
@@ -942,9 +1049,7 @@ pub fn create_task_from_external(
     assignee: &str,
 ) -> Result<i64, String> {
     let mut conn = open(hermes_home, profile)?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("begin tx: {}", e))?;
+    let tx = conn.transaction().map_err(|e| format!("begin tx: {}", e))?;
     tx.execute(
         "INSERT INTO tasks (title, priority, due_date, project_id, assignee) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![title, priority, due_date, project_id, assignee],
@@ -992,8 +1097,16 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        assert!(tables.contains(&"external_refs".to_string()), "external_refs missing: {:?}", tables);
-        assert!(tables.contains(&"session_links".to_string()), "session_links missing: {:?}", tables);
+        assert!(
+            tables.contains(&"external_refs".to_string()),
+            "external_refs missing: {:?}",
+            tables
+        );
+        assert!(
+            tables.contains(&"session_links".to_string()),
+            "session_links missing: {:?}",
+            tables
+        );
     }
 
     #[test]
@@ -1004,20 +1117,51 @@ mod tests {
         // Create a project to link to (FK target for project_id).
         let project_id = create_project(&dir, None, "Test Project", "#888", None).unwrap();
         // First insert: link DEVOS-3 to the task.
-        upsert_external_ref(&dir, None, "jira", "DEVOS-3", Some("https://jira/DEVOS-3"), Some("Fix bug"), Some(task_id), None, None).unwrap();
-        let r1 = get_external_ref(&dir, None, "jira", "DEVOS-3").unwrap().unwrap();
+        upsert_external_ref(
+            &dir,
+            None,
+            "jira",
+            "DEVOS-3",
+            Some("https://jira/DEVOS-3"),
+            Some("Fix bug"),
+            Some(task_id),
+            None,
+            None,
+        )
+        .unwrap();
+        let r1 = get_external_ref(&dir, None, "jira", "DEVOS-3")
+            .unwrap()
+            .unwrap();
         assert_eq!(r1.task_id, Some(task_id));
         assert_eq!(r1.title, "Fix bug");
 
         // Upsert again with a project link — should UPDATE, not duplicate.
-        upsert_external_ref(&dir, None, "jira", "DEVOS-3", None, Some("Fix bug v2"), Some(task_id), Some(project_id), None).unwrap();
-        let r2 = get_external_ref(&dir, None, "jira", "DEVOS-3").unwrap().unwrap();
+        upsert_external_ref(
+            &dir,
+            None,
+            "jira",
+            "DEVOS-3",
+            None,
+            Some("Fix bug v2"),
+            Some(task_id),
+            Some(project_id),
+            None,
+        )
+        .unwrap();
+        let r2 = get_external_ref(&dir, None, "jira", "DEVOS-3")
+            .unwrap()
+            .unwrap();
         assert_eq!(r2.project_id, Some(project_id), "project_id should update");
         assert_eq!(r2.title, "Fix bug v2", "title should update");
 
         // Only one row for (jira, DEVOS-3).
-        let count: i64 = open(&dir, None).unwrap()
-            .query_row("SELECT count(*) FROM external_refs WHERE source='jira' AND external_id='DEVOS-3'", [], |r| r.get(0))
+        let count: i64 = open(&dir, None)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM external_refs WHERE source='jira' AND external_id='DEVOS-3'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "should be exactly 1 row after upsert");
     }
@@ -1042,7 +1186,17 @@ mod tests {
         // Create a task first (FK target).
         let task_id = create_task(&dir, None, "Test task", 3, None, None, "", None).unwrap();
         // Link a session to it.
-        link_session(&dir, None, "sess-abc", Some(task_id), None, None, Some("manual"), Some("discussed")).unwrap();
+        link_session(
+            &dir,
+            None,
+            "sess-abc",
+            Some(task_id),
+            None,
+            None,
+            Some("manual"),
+            Some("discussed"),
+        )
+        .unwrap();
         // Query back.
         let links = get_session_links(&dir, None, "sess-abc").unwrap();
         assert_eq!(links.len(), 1);
@@ -1080,15 +1234,29 @@ mod tests {
         let dir = tempdir();
         // Create a task from a Jira issue — both task and external_ref must exist.
         let task_id = create_task_from_external(
-            &dir, None, "jira", "INT-6515", Some("https://jira/INT-6515"),
-            "Настроить MCP", 3, None, None, None, "ngusev",
-        ).unwrap();
+            &dir,
+            None,
+            "jira",
+            "INT-6515",
+            Some("https://jira/INT-6515"),
+            "Настроить MCP",
+            3,
+            None,
+            None,
+            None,
+            "ngusev",
+        )
+        .unwrap();
         assert!(task_id > 0);
         // The task exists.
         let tasks = list_tasks(&dir, None).unwrap();
-        assert!(tasks.iter().any(|t| t.id == task_id && t.title == "Настроить MCP"));
+        assert!(tasks
+            .iter()
+            .any(|t| t.id == task_id && t.title == "Настроить MCP"));
         // The external_ref exists and points to the task.
-        let r = get_external_ref(&dir, None, "jira", "INT-6515").unwrap().unwrap();
+        let r = get_external_ref(&dir, None, "jira", "INT-6515")
+            .unwrap()
+            .unwrap();
         assert_eq!(r.task_id, Some(task_id));
         assert_eq!(r.title, "Настроить MCP");
     }
@@ -1097,10 +1265,10 @@ mod tests {
     fn unlink_session_removes_link() {
         let dir = tempdir();
         let task_id = create_task(&dir, None, "T", 3, None, None, "", None).unwrap();
-        let link_id = link_session(&dir, None, "s1", Some(task_id), None, None, None, None).unwrap();
+        let link_id =
+            link_session(&dir, None, "s1", Some(task_id), None, None, None, None).unwrap();
         unlink_session(&dir, None, link_id).unwrap();
         let links = get_session_links(&dir, None, "s1").unwrap();
         assert!(links.is_empty(), "link should be removed");
     }
 }
-

@@ -9,7 +9,6 @@
 
 use std::time::Duration;
 
-
 /// Parse `HERMES_BACKEND_READY port=N` (or any `<marker> port=N`) out of a line.
 fn parse_port_marker(line: &str, marker: &str) -> Option<u16> {
     let idx = line.find(marker)?;
@@ -59,4 +58,3 @@ pub async fn probe_ws_ready(ws_url: &str) -> bool {
     let _ = ws.close(None).await;
     false
 }
-

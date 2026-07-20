@@ -32,8 +32,12 @@ pub fn classify_meeting(summary: &str, organizer: &str) -> &'static str {
     let s = summary.to_lowercase();
     let o = organizer.to_lowercase();
     // Daily / standup / scrum / утренний статус.
-    if s.contains("daily") || s.contains("standup") || s.contains("scrum")
-        || s.contains("дейли") || s.contains("стендап") || s.contains("утренний статус")
+    if s.contains("daily")
+        || s.contains("standup")
+        || s.contains("scrum")
+        || s.contains("дейли")
+        || s.contains("стендап")
+        || s.contains("утренний статус")
         || s.contains("статус-митинг")
     {
         return "daily";
@@ -159,8 +163,14 @@ mod tests {
 
     #[test]
     fn classify_meeting_detects_customer() {
-        assert_eq!(classify_meeting("Встреча с заказчиком Acme", "client@acme.com"), "customer");
-        assert_eq!(classify_meeting("Demo для клиента", "x@corp.ru"), "customer");
+        assert_eq!(
+            classify_meeting("Встреча с заказчиком Acme", "client@acme.com"),
+            "customer"
+        );
+        assert_eq!(
+            classify_meeting("Demo для клиента", "x@corp.ru"),
+            "customer"
+        );
         assert_eq!(classify_meeting("Презентация проекта", ""), "customer");
         assert_eq!(classify_meeting("1:1", "external@other.com"), "customer");
     }

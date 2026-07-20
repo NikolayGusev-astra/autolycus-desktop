@@ -24,8 +24,8 @@ pub struct TelegramResult {
 fn build_client(use_proxy: bool, proxy_url: &str) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
     if use_proxy && !proxy_url.is_empty() {
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| format!("Proxy config error: {}", e))?;
+        let proxy =
+            reqwest::Proxy::all(proxy_url).map_err(|e| format!("Proxy config error: {}", e))?;
         builder
             .proxy(proxy)
             .build()
@@ -52,10 +52,7 @@ pub async fn send_message(
         };
     }
 
-    let url = format!(
-        "https://api.telegram.org/bot{}/sendMessage",
-        bot_token
-    );
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 
     let mut params = HashMap::new();
     params.insert("chat_id", chat_id.to_string());
@@ -94,7 +91,11 @@ pub async fn send_message(
 }
 
 /// Validate a bot token by calling getMe.
-pub async fn validate_bot_token(bot_token: &str, use_proxy: bool, proxy_url: &str) -> TelegramResult {
+pub async fn validate_bot_token(
+    bot_token: &str,
+    use_proxy: bool,
+    proxy_url: &str,
+) -> TelegramResult {
     if bot_token.is_empty() {
         return TelegramResult {
             success: false,
@@ -102,10 +103,7 @@ pub async fn validate_bot_token(bot_token: &str, use_proxy: bool, proxy_url: &st
         };
     }
 
-    let url = format!(
-        "https://api.telegram.org/bot{}/getMe",
-        bot_token
-    );
+    let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);
 
     let client = match build_client(use_proxy, proxy_url) {
         Ok(c) => c,
@@ -143,12 +141,12 @@ pub async fn validate_bot_token(bot_token: &str, use_proxy: bool, proxy_url: &st
 /// The bot token is stored in the OS keyring; telegram.json keeps only
 /// `chat_id`/`enabled` (no secret). A one-time plaintext token still present
 /// on disk is migrated on load.
-pub fn save_config(
-    hermes_home: &std::path::Path,
-    config: &TelegramConfig,
-) -> Result<(), String> {
+pub fn save_config(hermes_home: &std::path::Path, config: &TelegramConfig) -> Result<(), String> {
     // Token → keyring.
-    crate::secrets::set(crate::secrets::account::TELEGRAM_BOT_TOKEN, &config.bot_token)?;
+    crate::secrets::set(
+        crate::secrets::account::TELEGRAM_BOT_TOKEN,
+        &config.bot_token,
+    )?;
 
     // Non-secret fields → telegram.json (still 0600 for consistency).
     let on_disk = TelegramConfig {
@@ -200,7 +198,10 @@ pub fn load_config(hermes_home: &std::path::Path) -> TelegramConfig {
 
     // One-time migration of a plaintext token into the keyring.
     if !on_disk.bot_token.is_empty() {
-        if crate::secrets::migrate(crate::secrets::account::TELEGRAM_BOT_TOKEN, &on_disk.bot_token) {
+        if crate::secrets::migrate(
+            crate::secrets::account::TELEGRAM_BOT_TOKEN,
+            &on_disk.bot_token,
+        ) {
             on_disk.bot_token.clear();
             // Persist the cleaned config immediately so the token is gone.
             let cleaned = TelegramConfig {

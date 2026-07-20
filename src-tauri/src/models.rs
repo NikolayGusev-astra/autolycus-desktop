@@ -168,8 +168,8 @@ pub fn update_model(
 
 fn write_models(hermes_home: &Path, models: &[SavedModel]) -> Result<(), String> {
     let path = models_file_path(hermes_home);
-    let json = serde_json::to_string_pretty(models)
-        .map_err(|e| format!("Serialization error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(models).map_err(|e| format!("Serialization error: {}", e))?;
     fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
@@ -192,7 +192,12 @@ mod tests {
         // Without serde alias these are silently dropped.
         let json = r#"[{"id":"2","name":"free","provider":"kilocode","model":"kilo-auto/free","baseUrl":"https://api.kilo.ai/api/gateway","api_mode":null,"createdAt":456}]"#;
         let models: Vec<SavedModel> = serde_json::from_str(json).unwrap();
-        assert_eq!(models.len(), 1, "camelCase model must deserialize, got {} models", models.len());
+        assert_eq!(
+            models.len(),
+            1,
+            "camelCase model must deserialize, got {} models",
+            models.len()
+        );
         assert_eq!(models[0].base_url, "https://api.kilo.ai/api/gateway");
         assert_eq!(models[0].created_at, 456);
     }
@@ -205,7 +210,12 @@ mod tests {
             {"id":"2","name":"b","provider":"p","model":"m","baseUrl":"u2","api_mode":null,"createdAt":2}
         ]"#;
         let models: Vec<SavedModel> = serde_json::from_str(json).unwrap();
-        assert_eq!(models.len(), 2, "both models must deserialize, got {}", models.len());
+        assert_eq!(
+            models.len(),
+            2,
+            "both models must deserialize, got {}",
+            models.len()
+        );
         assert_eq!(models[1].base_url, "u2");
     }
 }

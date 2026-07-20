@@ -57,7 +57,11 @@ pub fn list_profiles(hermes_home: &Path, active_profile: Option<&str>) -> Vec<Pr
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     profiles.push(ProfileInfo {
                         name: name.clone(),
                         path: path.to_string_lossy().to_string(),
@@ -94,7 +98,11 @@ fn count_skills(hermes_home: &Path, profile: Option<&str>) -> usize {
         return 0;
     }
     fs::read_dir(&skills_dir)
-        .map(|entries| entries.filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false)).count())
+        .map(|entries| {
+            entries
+                .filter(|e| e.as_ref().map(|e| e.path().is_dir()).unwrap_or(false))
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -117,8 +125,7 @@ pub fn create_profile(hermes_home: &Path, name: &str, clone: bool) -> Result<(),
             let src = hermes_home.join(file);
             if src.exists() {
                 let dst = profile_path.join(file);
-                fs::copy(&src, &dst)
-                    .map_err(|e| format!("Failed to copy {}: {}", file, e))?;
+                fs::copy(&src, &dst).map_err(|e| format!("Failed to copy {}: {}", file, e))?;
             }
         }
 
@@ -162,8 +169,7 @@ pub fn delete_profile(hermes_home: &Path, name: &str) -> Result<(), String> {
         return Err(format!("Profile '{}' not found", name));
     }
 
-    fs::remove_dir_all(&profile_path)
-        .map_err(|e| format!("Failed to delete profile: {}", e))?;
+    fs::remove_dir_all(&profile_path).map_err(|e| format!("Failed to delete profile: {}", e))?;
 
     Ok(())
 }

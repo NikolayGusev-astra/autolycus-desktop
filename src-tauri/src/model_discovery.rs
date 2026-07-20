@@ -47,13 +47,23 @@ pub struct DiscoveryResult {
 
 /// Providers whose /models we never call.
 const NON_DISCOVERABLE: &[&str] = &[
-    "auto", "custom", "google", "xai", "qwen", "minimax", "kimi-coding",
+    "auto",
+    "custom",
+    "google",
+    "xai",
+    "qwen",
+    "minimax",
+    "kimi-coding",
 ];
 
 /// OAuth/subscription providers — no static-key /v1/models endpoint.
 const OAUTH_PROVIDERS: &[&str] = &[
-    "openai-codex", "xai-oauth", "qwen-oauth", "google-gemini-cli",
-    "minimax-oauth", "nous",
+    "openai-codex",
+    "xai-oauth",
+    "qwen-oauth",
+    "google-gemini-cli",
+    "minimax-oauth",
+    "nous",
 ];
 
 /// Check if a provider supports model discovery.
@@ -82,16 +92,33 @@ fn infer_capabilities(provider: &str, model_id: &str) -> ModelCapabilities {
     // ── Reasoning ────────────────────────────────────────────────────────
     // o1, o3, o4, gpt-5.6-*, *-reasoning, *-thinking, deepseek-r1, gemini-*thinking
     let reasoning_patterns = [
-        "o1", "o3", "o4-", "reasoning", "thinking", "-r1", "r1-",
-        "gpt-5", "claude-3.7", "claude-4", "gemini-2.5",
+        "o1",
+        "o3",
+        "o4-",
+        "reasoning",
+        "thinking",
+        "-r1",
+        "r1-",
+        "gpt-5",
+        "claude-3.7",
+        "claude-4",
+        "gemini-2.5",
     ];
     caps.supports_reasoning = reasoning_patterns.iter().any(|p| id.contains(p));
 
     // ── Vision ───────────────────────────────────────────────────────────
     // gpt-4o, gpt-4-turbo, gpt-5, claude-3/4, gemini, *-vision, *-multimodal
     let vision_patterns = [
-        "gpt-4o", "gpt-4-turbo", "gpt-5", "claude-3", "claude-4",
-        "gemini", "vision", "multimodal", "llava", "bakllava",
+        "gpt-4o",
+        "gpt-4-turbo",
+        "gpt-5",
+        "claude-3",
+        "claude-4",
+        "gemini",
+        "vision",
+        "multimodal",
+        "llava",
+        "bakllava",
     ];
     caps.supports_vision = vision_patterns.iter().any(|p| id.contains(p));
 
@@ -114,7 +141,11 @@ fn infer_capabilities(provider: &str, model_id: &str) -> ModelCapabilities {
 /// - OpenAI: `capabilities` object with boolean fields
 /// - OpenRouter: `architecture.modality` + `supported_parameters` array
 /// - Generic: `context_length`, `max_tokens` top-level fields
-fn extract_capabilities(provider: &str, model_id: &str, item: &serde_json::Value) -> ModelCapabilities {
+fn extract_capabilities(
+    provider: &str,
+    model_id: &str,
+    item: &serde_json::Value,
+) -> ModelCapabilities {
     let mut caps = infer_capabilities(provider, model_id);
 
     // ── Context length / max tokens (common across providers) ────────────
@@ -156,10 +187,7 @@ fn extract_capabilities(provider: &str, model_id: &str, item: &serde_json::Value
             caps.supports_vision = true;
         }
     }
-    if let Some(params) = item
-        .get("supported_parameters")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(params) = item.get("supported_parameters").and_then(|v| v.as_array()) {
         for param in params {
             if let Some(s) = param.as_str() {
                 if s == "reasoning" || s == "reasoning_effort" {
@@ -201,7 +229,10 @@ pub async fn discover_models_with_home(
         return DiscoveryResult {
             success: false,
             models: Vec::new(),
-            error: Some(format!("Provider '{}' does not support model discovery", provider)),
+            error: Some(format!(
+                "Provider '{}' does not support model discovery",
+                provider
+            )),
         };
     }
 
@@ -209,7 +240,10 @@ pub async fn discover_models_with_home(
         return DiscoveryResult {
             success: false,
             models: Vec::new(),
-            error: Some(format!("Provider '{}' requires OAuth for model discovery", provider)),
+            error: Some(format!(
+                "Provider '{}' requires OAuth for model discovery",
+                provider
+            )),
         };
     }
 
@@ -226,8 +260,7 @@ pub async fn discover_models_with_home(
     };
 
     let client = {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10));
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
         if use_proxy {
             // Resolve the proxy from the REAL hermes home (not a hardcoded
             // ~/.hermes — that reads the wrong config on uv-managed Windows
@@ -298,10 +331,7 @@ pub async fn discover_models_with_home(
     if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
         for item in data {
             if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                let name = item
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or(id);
+                let name = item.get("name").and_then(|n| n.as_str()).unwrap_or(id);
                 models.push(DiscoveredModel {
                     id: id.to_string(),
                     name: name.to_string(),
@@ -332,10 +362,7 @@ pub fn get_oauth_models(provider: &str) -> Vec<DiscoveredModel> {
             mk("gpt-4o", "GPT-4o"),
             mk("gpt-4o-mini", "GPT-4o-mini"),
         ],
-        "xai-oauth" => vec![
-            mk("grok-3", "Grok 3"),
-            mk("grok-3-mini", "Grok 3 Mini"),
-        ],
+        "xai-oauth" => vec![mk("grok-3", "Grok 3"), mk("grok-3-mini", "Grok 3 Mini")],
         "google-gemini-cli" => vec![
             mk("gemini-2.5-pro", "Gemini 2.5 Pro"),
             mk("gemini-2.5-flash", "Gemini 2.5 Flash"),
@@ -358,13 +385,24 @@ mod tests {
         let home = crate::config::resolve_hermes_home();
         eprintln!("hermes_home = {}", home.display());
         let result = discover_models_with_home("kilo", None, None, true, Some(&home)).await;
-        eprintln!("success={}, models={}, error={:?}", result.success, result.models.len(), result.error);
+        eprintln!(
+            "success={}, models={}, error={:?}",
+            result.success,
+            result.models.len(),
+            result.error
+        );
         if result.success {
             for m in result.models.iter().take(5) {
-                eprintln!("  - {} (reasoning={}, vision={})", m.name, m.capabilities.supports_reasoning, m.capabilities.supports_vision);
+                eprintln!(
+                    "  - {} (reasoning={}, vision={})",
+                    m.name, m.capabilities.supports_reasoning, m.capabilities.supports_vision
+                );
             }
         }
-        assert!(result.success || result.error.is_some(), "should at least return a result");
+        assert!(
+            result.success || result.error.is_some(),
+            "should at least return a result"
+        );
     }
 
     #[test]

@@ -29,11 +29,18 @@ pub struct HealthSummary {
 
 impl Default for HealthSummary {
     fn default() -> Self {
-        Self { errors: 0, warnings: 0, infos: 0 }
+        Self {
+            errors: 0,
+            warnings: 0,
+            infos: 0,
+        }
     }
 }
 
-pub fn run_health_check(hermes_home: &PathBuf, profile: Option<&str>) -> Result<HealthReport, String> {
+pub fn run_health_check(
+    hermes_home: &PathBuf,
+    profile: Option<&str>,
+) -> Result<HealthReport, String> {
     let mut issues = Vec::new();
 
     // Check 1: Hermes home directory exists
@@ -83,7 +90,9 @@ pub fn run_health_check(hermes_home: &PathBuf, profile: Option<&str>) -> Result<
                 code: "VENV_MISSING".to_string(),
                 severity: "error".to_string(),
                 message: "Python virtual environment not found".to_string(),
-                fix: Some("Run: hermes setup (installs hermes-agent/venv automatically)".to_string()),
+                fix: Some(
+                    "Run: hermes setup (installs hermes-agent/venv automatically)".to_string(),
+                ),
             });
         }
     }
@@ -94,7 +103,8 @@ pub fn run_health_check(hermes_home: &PathBuf, profile: Option<&str>) -> Result<
         issues.push(HealthIssue {
             code: "DB_MISSING".to_string(),
             severity: "warning".to_string(),
-            message: "State database not found — will be created automatically on first chat".to_string(),
+            message: "State database not found — will be created automatically on first chat"
+                .to_string(),
             fix: None,
         });
     }
@@ -134,7 +144,11 @@ model:
 ";
 
 /// Attempt to auto-fix a specific config health issue
-pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) -> Result<String, String> {
+pub fn auto_fix_issue(
+    hermes_home: &PathBuf,
+    code: &str,
+    profile: Option<&str>,
+) -> Result<String, String> {
     match code {
         "ENV_MISSING" => {
             let env_path = hermes_home.join(".env");
@@ -154,7 +168,10 @@ pub fn auto_fix_issue(hermes_home: &PathBuf, code: &str, profile: Option<&str>) 
             }
             std::fs::write(&config_path, DEFAULT_CONFIG_TEMPLATE)
                 .map_err(|e| format!("Failed to create config: {}", e))?;
-            Ok(format!("Created default config at {}", config_path.display()))
+            Ok(format!(
+                "Created default config at {}",
+                config_path.display()
+            ))
         }
         "HERMES_HOME_MISSING" => {
             std::fs::create_dir_all(hermes_home)
@@ -187,8 +204,8 @@ mod tests {
         // read it. Check for the actual YAML key (indented, colon) rather than
         // the bare word, which legitimately appears in this explanatory comment.
         assert!(
-            !DEFAULT_CONFIG_TEMPLATE.contains("\n  api_server:") &&
-            !DEFAULT_CONFIG_TEMPLATE.contains("\napi_server:"),
+            !DEFAULT_CONFIG_TEMPLATE.contains("\n  api_server:")
+                && !DEFAULT_CONFIG_TEMPLATE.contains("\napi_server:"),
             "default config template must not define an api_server YAML block"
         );
     }

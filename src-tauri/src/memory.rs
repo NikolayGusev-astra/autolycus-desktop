@@ -48,10 +48,11 @@ pub fn read_memory(hermes_home: &Path, profile: Option<&str>) -> MemoryReadResul
 
     // Pull real counts from the agent's state.db (was hardcoded 0/0). Falls
     // back to zeros if the DB is absent (e.g. fresh install).
-    let stats = crate::sessions::get_session_stats(&home, None).unwrap_or(crate::sessions::SessionStats {
-        total_sessions: 0,
-        total_messages: 0,
-    });
+    let stats =
+        crate::sessions::get_session_stats(&home, None).unwrap_or(crate::sessions::SessionStats {
+            total_sessions: 0,
+            total_messages: 0,
+        });
 
     MemoryReadResult {
         memory: MemoryInfo {
@@ -98,8 +99,7 @@ pub fn add_memory_entry(
 
     let mut existing = String::new();
     if memory_path.exists() {
-        existing = fs::read_to_string(&memory_path)
-            .map_err(|e| format!("Read error: {}", e))?;
+        existing = fs::read_to_string(&memory_path).map_err(|e| format!("Read error: {}", e))?;
     }
 
     let entry = if existing.is_empty() {
@@ -108,8 +108,7 @@ pub fn add_memory_entry(
         format!("{}\n- {}", existing, content)
     };
 
-    fs::write(&memory_path, entry)
-        .map_err(|e| format!("Write error: {}", e))?;
+    fs::write(&memory_path, entry).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())
 }
@@ -129,8 +128,7 @@ pub fn update_memory_entry(
         return Err("memory.md not found".to_string());
     }
 
-    let existing = fs::read_to_string(&memory_path)
-        .map_err(|e| format!("Read error: {}", e))?;
+    let existing = fs::read_to_string(&memory_path).map_err(|e| format!("Read error: {}", e))?;
 
     let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
 
@@ -138,8 +136,7 @@ pub fn update_memory_entry(
         lines[index] = format!("- {}", content);
     }
 
-    fs::write(&memory_path, lines.join("\n"))
-        .map_err(|e| format!("Write error: {}", e))?;
+    fs::write(&memory_path, lines.join("\n")).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())
 }
@@ -158,16 +155,16 @@ pub fn remove_memory_entry(
         return Err("memory.md not found".to_string());
     }
 
-    let existing = fs::read_to_string(&memory_path)
-        .map_err(|e| format!("Read error: {}", e))?;
+    let existing = fs::read_to_string(&memory_path).map_err(|e| format!("Read error: {}", e))?;
 
-    let lines: Vec<&str> = existing.lines().enumerate()
+    let lines: Vec<&str> = existing
+        .lines()
+        .enumerate()
         .filter(|(i, _)| *i != index)
         .map(|(_, l)| l)
         .collect();
 
-    fs::write(&memory_path, lines.join("\n"))
-        .map_err(|e| format!("Write error: {}", e))?;
+    fs::write(&memory_path, lines.join("\n")).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())
 }
@@ -180,8 +177,7 @@ pub fn write_user_profile(
     content: &str,
 ) -> Result<(), String> {
     let home = profile_home(hermes_home, profile);
-    fs::write(&home.join("user.md"), content)
-        .map_err(|e| format!("Write error: {}", e))?;
+    fs::write(&home.join("user.md"), content).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
 
@@ -200,14 +196,9 @@ pub fn read_soul(hermes_home: &Path, profile: Option<&str>) -> String {
 
 // ── Write soul ────────────────────────────────────────────────────────────
 
-pub fn write_soul(
-    hermes_home: &Path,
-    profile: Option<&str>,
-    content: &str,
-) -> Result<(), String> {
+pub fn write_soul(hermes_home: &Path, profile: Option<&str>, content: &str) -> Result<(), String> {
     let home = profile_home(hermes_home, profile);
-    fs::write(&home.join("soul.md"), content)
-        .map_err(|e| format!("Write error: {}", e))?;
+    fs::write(&home.join("soul.md"), content).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
 

@@ -143,7 +143,10 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
     let home = hermes_home()?;
     match name {
         "steersman_list_tasks" => {
-            let status = args.get("status").and_then(|v| v.as_str()).unwrap_or("active");
+            let status = args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("active");
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
             let mut tasks = crate::productivity::list_tasks(&home, None)
                 .map_err(|e| format!("list_tasks: {}", e))?;
@@ -160,20 +163,27 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!(tasks))
         }
         "steersman_create_task" => {
-            let title = args.get("title").and_then(|v| v.as_str())
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
                 .ok_or("title required")?;
             let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(3);
             let due = args.get("due_date").and_then(|v| v.as_str());
             let assignee = args.get("assignee").and_then(|v| v.as_str()).unwrap_or("");
             let id = crate::productivity::create_task(
                 &home, None, title, priority, due, None, assignee, None,
-            ).map_err(|e| format!("create_task: {}", e))?;
+            )
+            .map_err(|e| format!("create_task: {}", e))?;
             Ok(json!({"id": id, "title": title, "status": "created"}))
         }
         "steersman_update_task_status" => {
-            let id = args.get("id").and_then(|v| v.as_i64())
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_i64())
                 .ok_or("id required")?;
-            let status = args.get("status").and_then(|v| v.as_str())
+            let status = args
+                .get("status")
+                .and_then(|v| v.as_str())
                 .ok_or("status required")?;
             crate::productivity::update_task_status(&home, None, id, status)
                 .map_err(|e| format!("update_task_status: {}", e))?;
@@ -185,7 +195,9 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!(goals))
         }
         "steersman_create_goal" => {
-            let title = args.get("title").and_then(|v| v.as_str())
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
                 .ok_or("title required")?;
             let target_date = args.get("target_date").and_then(|v| v.as_str());
             let id = crate::productivity::create_goal(&home, None, title, target_date)
@@ -193,7 +205,9 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!({"id": id, "title": title, "status": "created"}))
         }
         "steersman_search_sessions" => {
-            let query = args.get("query").and_then(|v| v.as_str())
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
                 .ok_or("query required")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(10);
             let results = crate::sessions::search_sessions(&home, None, query, limit)
@@ -201,7 +215,9 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!(results))
         }
         "steersman_link_session" => {
-            let session_id = args.get("session_id").and_then(|v| v.as_str())
+            let session_id = args
+                .get("session_id")
+                .and_then(|v| v.as_str())
                 .ok_or("session_id required")?;
             let task_id = args.get("task_id").and_then(|v| v.as_i64());
             let project_id = args.get("project_id").and_then(|v| v.as_i64());
@@ -211,12 +227,22 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
                 return Err("at least one of task_id/project_id/goal_id required".to_string());
             }
             let link_id = crate::productivity::link_session(
-                &home, None, session_id, task_id, project_id, goal_id, Some("agent"), note,
-            ).map_err(|e| format!("link_session: {}", e))?;
+                &home,
+                None,
+                session_id,
+                task_id,
+                project_id,
+                goal_id,
+                Some("agent"),
+                note,
+            )
+            .map_err(|e| format!("link_session: {}", e))?;
             Ok(json!({"id": link_id, "session_id": session_id, "linked": true}))
         }
         "steersman_get_meeting_context" => {
-            let event_uid = args.get("event_uid").and_then(|v| v.as_str())
+            let event_uid = args
+                .get("event_uid")
+                .and_then(|v| v.as_str())
                 .ok_or("event_uid required")?;
             // Fetch the event from the calendar MCP to get its summary/organizer.
             // run_loop is synchronous (blocking stdin read), so drive the async
@@ -228,30 +254,43 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value, String> {
             let events = rt
                 .block_on(crate::feed_sources::list_calendar_today(&home, None))
                 .map_err(|e| format!("calendar: {}", e))?;
-            let event = events.iter().find(|e| e.uid == event_uid)
+            let event = events
+                .iter()
+                .find(|e| e.uid == event_uid)
                 .ok_or("meeting not found in calendar")?;
-            let keyword = args.get("keyword").and_then(|v| v.as_str())
+            let keyword = args
+                .get("keyword")
+                .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
-                .or_else(|| event.organizer.split('@').next().map(|s: &str| s.to_string()))
+                .or_else(|| {
+                    event
+                        .organizer
+                        .split('@')
+                        .next()
+                        .map(|s: &str| s.to_string())
+                })
                 .unwrap_or_default();
             // Related tasks by title keyword match.
             let all_tasks = crate::productivity::list_tasks(&home, None).unwrap_or_default();
-            let related_tasks: Vec<Value> = all_tasks.iter()
+            let related_tasks: Vec<Value> = all_tasks
+                .iter()
                 .filter(|t| {
                     let s = t.title.to_lowercase();
                     s.contains(&event.summary.to_lowercase())
                         || (!keyword.is_empty() && s.contains(&keyword.to_lowercase()))
                 })
-                .map(|t| json!({
-                    "id": t.id,
-                    "title": t.title,
-                    "status": t.status,
-                    "priority": t.priority,
-                }))
+                .map(|t| {
+                    json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "status": t.status,
+                        "priority": t.priority,
+                    })
+                })
                 .collect();
             // Recent chat session previews for context.
-            let sessions = crate::sessions::recent_session_previews(&home, None, 20)
-                .unwrap_or_default();
+            let sessions =
+                crate::sessions::recent_session_previews(&home, None, 20).unwrap_or_default();
             Ok(json!({
                 "event_uid": event_uid,
                 "summary": event.summary,
@@ -281,11 +320,16 @@ pub fn handle_request(req: &Value) -> Option<Value> {
             }
         })),
         "tools/list" => {
-            let tool_list: Vec<Value> = tools().iter().map(|t| json!({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": t.input_schema,
-            })).collect();
+            let tool_list: Vec<Value> = tools()
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": t.input_schema,
+                    })
+                })
+                .collect();
             Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -293,11 +337,13 @@ pub fn handle_request(req: &Value) -> Option<Value> {
             }))
         }
         "tools/call" => {
-            let name = req.get("params")
+            let name = req
+                .get("params")
                 .and_then(|p| p.get("name"))
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
-            let args = req.get("params")
+            let args = req
+                .get("params")
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or(json!({}));
@@ -364,7 +410,12 @@ mod tests {
         let req = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
         let resp = handle_request(&req).unwrap();
         assert_eq!(resp.get("id"), Some(&json!(1)));
-        assert_eq!(resp.get("result").and_then(|r| r.get("protocolVersion")).and_then(|v| v.as_str()), Some("2024-11-05"));
+        assert_eq!(
+            resp.get("result")
+                .and_then(|r| r.get("protocolVersion"))
+                .and_then(|v| v.as_str()),
+            Some("2024-11-05")
+        );
         assert_eq!(resp["result"]["serverInfo"]["name"], "steersman-mcp");
     }
 
@@ -372,8 +423,15 @@ mod tests {
     fn tools_list_returns_all_steersman_tools() {
         let req = json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}});
         let resp = handle_request(&req).unwrap();
-        let tools = resp.get("result").and_then(|r| r.get("tools")).and_then(|t| t.as_array()).unwrap();
-        let names: Vec<&str> = tools.iter().map(|t| t.get("name").and_then(|n| n.as_str()).unwrap()).collect();
+        let tools = resp
+            .get("result")
+            .and_then(|r| r.get("tools"))
+            .and_then(|t| t.as_array())
+            .unwrap();
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|t| t.get("name").and_then(|n| n.as_str()).unwrap())
+            .collect();
         assert!(names.contains(&"steersman_list_tasks"));
         assert!(names.contains(&"steersman_create_task"));
         assert!(names.contains(&"steersman_update_task_status"));
@@ -398,7 +456,10 @@ mod tests {
         let req = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"bad","arguments":{}}});
         let resp = handle_request(&req).unwrap();
         assert_eq!(resp["result"]["isError"], json!(true));
-        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("ERROR"));
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ERROR"));
     }
 
     #[test]
@@ -413,7 +474,10 @@ mod tests {
         let req = json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"steersman_create_task","arguments":{}}});
         let resp = handle_request(&req).unwrap();
         assert_eq!(resp["result"]["isError"], json!(true));
-        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("title"));
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("title"));
     }
 
     #[test]
@@ -429,8 +493,11 @@ mod tests {
         let req = json!({"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}});
         let resp = handle_request(&req).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
-            .as_array().unwrap()
-            .iter().map(|t| t["name"].as_str().unwrap()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert!(names.contains(&"steersman_link_session"));
     }
 }

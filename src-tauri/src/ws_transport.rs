@@ -66,8 +66,7 @@ pub async fn send_message_via_ws_buffered(
     app_handle: &AppHandle,
     source: &str,
 ) -> Result<(String, String), WsError> {
-    send_message_via_ws_impl(ws_url, session_id, text, app_handle, source, true)
-        .await
+    send_message_via_ws_impl(ws_url, session_id, text, app_handle, source, true).await
 }
 
 /// Shared implementation. `source` → session.create `source` param.
@@ -266,7 +265,8 @@ where
                 Message::Text(text) => {
                     if let Some(event) = parse_ws_message(&text) {
                         let terminal = is_terminal(&event);
-                        if matches!(event, ChatEvent::Done { ref session_id } if session_id.is_some()) {
+                        if matches!(event, ChatEvent::Done { ref session_id } if session_id.is_some())
+                        {
                             let sid = if let ChatEvent::Done { session_id } = event.clone() {
                                 session_id
                             } else {
@@ -305,10 +305,7 @@ where
 }
 
 fn is_terminal(event: &ChatEvent) -> bool {
-    matches!(
-        event,
-        ChatEvent::Done { .. } | ChatEvent::Error { .. }
-    )
+    matches!(event, ChatEvent::Done { .. } | ChatEvent::Error { .. })
 }
 
 /// Like `read_events`, but appends every `Token`'s text into `buffer`.
@@ -334,7 +331,8 @@ where
                             buffer.push_str(content);
                         }
                         let terminal = is_terminal(&event);
-                        if matches!(event, ChatEvent::Done { ref session_id } if session_id.is_some()) {
+                        if matches!(event, ChatEvent::Done { ref session_id } if session_id.is_some())
+                        {
                             let sid = if let ChatEvent::Done { session_id } = event.clone() {
                                 session_id
                             } else {
@@ -373,7 +371,8 @@ async fn send_json<S>(ws: &mut S, value: &Value) -> Result<(), WsError>
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
-    let text = serde_json::to_string(value).map_err(|e| WsError::Protocol(format!("encode: {}", e)))?;
+    let text =
+        serde_json::to_string(value).map_err(|e| WsError::Protocol(format!("encode: {}", e)))?;
     ws.send(Message::Text(text))
         .await
         .map_err(|e| WsError::Protocol(format!("ws send: {}", e)))
@@ -452,10 +451,7 @@ pub enum WsCommand {
     /// Submit a prompt on the persistent connection. The reader task sends the
     /// `prompt.submit` JSON-RPC frame; the turn's events stream back as
     /// `chat_event` Tauri events (same as connect-per-message did).
-    SubmitPrompt {
-        session_id: String,
-        text: String,
-    },
+    SubmitPrompt { session_id: String, text: String },
     /// Create a new session. Blocks the caller (via oneshot) until the backend
     /// responds with `session_id`. `source` becomes the session's `source`
     /// field in state.db (e.g. "desktop" for chat, "briefing_smart" for
@@ -627,7 +623,11 @@ where
             Ok(Some(Ok(Message::Text(text)))) => {
                 if let Some(value) = serde_json::from_str::<Value>(&text).ok() {
                     let is_ready = value.get("method").and_then(|m| m.as_str()) == Some("event")
-                        && value.get("params").and_then(|p| p.get("type")).and_then(|t| t.as_str()) == Some("gateway.ready");
+                        && value
+                            .get("params")
+                            .and_then(|p| p.get("type"))
+                            .and_then(|t| t.as_str())
+                            == Some("gateway.ready");
                     if is_ready {
                         return ws;
                     }
@@ -844,7 +844,10 @@ mod tests {
     fn session_create_request_is_valid_jsonrpc() {
         let req = build_session_create_request(42, "desktop");
         assert_eq!(req.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
-        assert_eq!(req.get("method").and_then(|v| v.as_str()), Some("session.create"));
+        assert_eq!(
+            req.get("method").and_then(|v| v.as_str()),
+            Some("session.create")
+        );
         assert_eq!(req.get("id").and_then(|v| v.as_u64()), Some(42));
         // cols must be present (rendering width contract).
         assert!(req.get("params").and_then(|p| p.get("cols")).is_some());
@@ -894,14 +897,21 @@ mod tests {
         // upstream contract (server.py:8464 reads session_id + text).
         let req = build_prompt_submit_request(7, "sess123", "Hello world");
         assert_eq!(req.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
-        assert_eq!(req.get("method").and_then(|v| v.as_str()), Some("prompt.submit"));
+        assert_eq!(
+            req.get("method").and_then(|v| v.as_str()),
+            Some("prompt.submit")
+        );
         assert_eq!(req.get("id").and_then(|v| v.as_u64()), Some(7));
         assert_eq!(
-            req.get("params").and_then(|p| p.get("session_id")).and_then(|v| v.as_str()),
+            req.get("params")
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str()),
             Some("sess123")
         );
         assert_eq!(
-            req.get("params").and_then(|p| p.get("text")).and_then(|v| v.as_str()),
+            req.get("params")
+                .and_then(|p| p.get("text"))
+                .and_then(|v| v.as_str()),
             Some("Hello world")
         );
         // No model/stream/history fields — upstream prompt.submit only takes
@@ -950,7 +960,11 @@ mod tests {
         // state guard logic directly: the function checks state == Connected
         // before touching the network.
         let state = ws.state.lock().await;
-        assert_eq!(*state, ConnectionState::Connected, "precondition: must be Connected");
+        assert_eq!(
+            *state,
+            ConnectionState::Connected,
+            "precondition: must be Connected"
+        );
         // In the real function, this guard returns Ok(()) immediately.
     }
 
@@ -1022,7 +1036,8 @@ mod tests {
     async fn start_mock_backend() -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let received: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received: Arc<tokio::sync::Mutex<Vec<Value>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let received_clone = Arc::clone(&received);
 
         tokio::spawn(async move {
@@ -1038,21 +1053,38 @@ mod tests {
 
             while let Some(Ok(msg)) = ws.next().await {
                 if let Message::Text(text) = msg {
-                    let req: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => continue };
+                    let req: Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
                     received_clone.lock().await.push(req.clone());
                     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
                     let id = req.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
-                    let sid = req.get("params").and_then(|p| p.get("session_id")).and_then(|s| s.as_str()).unwrap_or("mock-sess");
+                    let sid = req
+                        .get("params")
+                        .and_then(|p| p.get("session_id"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("mock-sess");
 
                     match method {
                         "session.create" => {
-                            let source = req.get("params").and_then(|p| p.get("source")).and_then(|s| s.as_str()).unwrap_or("desktop");
-                            let new_sid = if source == "briefing_smart" { "brief-sess" } else { "chat-sess" };
-                            let resp = json!({"jsonrpc":"2.0","id":id,"result":{"session_id":new_sid}});
+                            let source = req
+                                .get("params")
+                                .and_then(|p| p.get("source"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("desktop");
+                            let new_sid = if source == "briefing_smart" {
+                                "brief-sess"
+                            } else {
+                                "chat-sess"
+                            };
+                            let resp =
+                                json!({"jsonrpc":"2.0","id":id,"result":{"session_id":new_sid}});
                             let _ = ws.send(Message::Text(resp.to_string())).await;
                         }
                         "prompt.submit" => {
-                            let ack = json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
+                            let ack =
+                                json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
                             let _ = ws.send(Message::Text(ack.to_string())).await;
                             // Stream events
                             for ev in [
@@ -1071,11 +1103,15 @@ mod tests {
             }
         });
 
-        (format!("ws://127.0.0.1:{}/api/ws?token=test", port), received)
+        (
+            format!("ws://127.0.0.1:{}/api/ws?token=test", port),
+            received,
+        )
     }
 
     fn mock_emitter() -> (EmitFn, Arc<tokio::sync::Mutex<Vec<ChatEvent>>>) {
-        let events: Arc<tokio::sync::Mutex<Vec<ChatEvent>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let events: Arc<tokio::sync::Mutex<Vec<ChatEvent>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let events_clone = Arc::clone(&events);
         let emit_fn: EmitFn = Arc::new(move |event: &ChatEvent| {
             // ChatEvent is not Clone, so we capture a debug snapshot.
@@ -1088,11 +1124,11 @@ mod tests {
                 ChatEvent::ToolStart { .. } => "tool_start",
                 ChatEvent::ToolComplete { .. } => "tool_complete",
                 ChatEvent::Done { session_id } => {
-                    if let Some(sid) = session_id {
+                    if let Some(_sid) = session_id {
                         let ec = events.clone();
                         let _ = snapshot; // keep for potential future use
-                        // Record done with session_id for session reuse tests.
-                        // We use a side-channel: push the sid string.
+                                          // Record done with session_id for session reuse tests.
+                                          // We use a side-channel: push the sid string.
                         let _ = ec;
                     }
                     "done"
@@ -1114,9 +1150,13 @@ mod tests {
         tokio::pin!(deadline);
         loop {
             if let Ok(s) = ws_state.state.try_lock() {
-                if *s == ConnectionState::Connected { return; }
+                if *s == ConnectionState::Connected {
+                    return;
+                }
             }
-            if deadline.is_elapsed() { panic!("not Connected within {}ms", timeout_ms); }
+            if deadline.is_elapsed() {
+                panic!("not Connected within {}ms", timeout_ms);
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -1127,7 +1167,9 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state).await.unwrap();
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .unwrap();
         wait_connected(&ws_state, 3000).await;
 
         // cmd_tx must be set.
@@ -1139,15 +1181,21 @@ mod tests {
         let (ws_url, received) = start_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state).await.unwrap();
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let sid = create_session_on_connection(&ws_state, "desktop").await.unwrap();
+        let sid = create_session_on_connection(&ws_state, "desktop")
+            .await
+            .unwrap();
         assert_eq!(sid, "chat-sess");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let frames = received.lock().await;
-        assert!(frames.iter().any(|v| v.get("method").and_then(|m| m.as_str()) == Some("session.create")));
+        assert!(frames
+            .iter()
+            .any(|v| v.get("method").and_then(|m| m.as_str()) == Some("session.create")));
     }
 
     #[tokio::test]
@@ -1155,17 +1203,24 @@ mod tests {
         let (ws_url, received) = start_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state).await.unwrap();
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let sid = create_session_on_connection(&ws_state, "briefing_smart").await.unwrap();
+        let sid = create_session_on_connection(&ws_state, "briefing_smart")
+            .await
+            .unwrap();
         assert_eq!(sid, "brief-sess");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let frames = received.lock().await;
         assert!(frames.iter().any(|v| {
             v.get("method").and_then(|m| m.as_str()) == Some("session.create")
-                && v.get("params").and_then(|p| p.get("source")).and_then(|s| s.as_str()) == Some("briefing_smart")
+                && v.get("params")
+                    .and_then(|p| p.get("source"))
+                    .and_then(|s| s.as_str())
+                    == Some("briefing_smart")
         }));
     }
 
@@ -1174,26 +1229,44 @@ mod tests {
         let (ws_url, received) = start_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state).await.unwrap();
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let sid = create_session_on_connection(&ws_state, "desktop").await.unwrap();
-        submit_prompt_on_connection(&ws_state, &sid, "test prompt").await.unwrap();
+        let sid = create_session_on_connection(&ws_state, "desktop")
+            .await
+            .unwrap();
+        submit_prompt_on_connection(&ws_state, &sid, "test prompt")
+            .await
+            .unwrap();
 
         // Wait for message.complete to arrive and session_id to be cached.
         for _ in 0..60 {
-            if ws_state.session_id.try_lock().map(|s| s.is_some()).unwrap_or(false) {
+            if ws_state
+                .session_id
+                .try_lock()
+                .map(|s| s.is_some())
+                .unwrap_or(false)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let cached = ws_state.session_id.lock().await.clone();
-        assert_eq!(cached.as_deref(), Some("chat-sess"), "session_id must be cached after message.complete");
+        assert_eq!(
+            cached.as_deref(),
+            Some("chat-sess"),
+            "session_id must be cached after message.complete"
+        );
 
         let frames = received.lock().await;
         assert!(frames.iter().any(|v| {
             v.get("method").and_then(|m| m.as_str()) == Some("prompt.submit")
-                && v.get("params").and_then(|p| p.get("text")).and_then(|s| s.as_str()) == Some("test prompt")
+                && v.get("params")
+                    .and_then(|p| p.get("text"))
+                    .and_then(|s| s.as_str())
+                    == Some("test prompt")
         }));
     }
 
@@ -1203,12 +1276,16 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
 
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state).await.unwrap();
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .unwrap();
         wait_connected(&ws_state, 3000).await;
 
         // Second connect — fast path, must NOT error.
         let (emit_fn2, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn2, &ws_state).await.unwrap();
+        ensure_ws_connection(&ws_url, emit_fn2, &ws_state)
+            .await
+            .unwrap();
 
         assert_eq!(*ws_state.state.lock().await, ConnectionState::Connected);
     }

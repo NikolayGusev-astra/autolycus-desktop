@@ -87,7 +87,8 @@ struct IndexEntry {
 
 const REGISTRY_REPO: &str = "fathah/hermes-registry";
 const REGISTRY_BRANCH: &str = "main";
-const INDEX_URL: &str = "https://raw.githubusercontent.com/fathah/hermes-registry/refs/heads/main/index.json";
+const INDEX_URL: &str =
+    "https://raw.githubusercontent.com/fathah/hermes-registry/refs/heads/main/index.json";
 
 /// Fetch the registry catalog from GitHub.
 pub async fn fetch_catalog() -> Result<RegistryCatalog, String> {

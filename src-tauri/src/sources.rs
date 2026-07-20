@@ -228,7 +228,10 @@ impl SourcesConfig {
             env.insert("TELEGRAM_BOT_TOKEN".to_string(), tg.bot_token.clone());
             env.insert("TELEGRAM_CHAT_ID".to_string(), tg.chat_id.clone());
             if !tg.allowed_users.is_empty() {
-                env.insert("TELEGRAM_ALLOWED_USERS".to_string(), tg.allowed_users.clone());
+                env.insert(
+                    "TELEGRAM_ALLOWED_USERS".to_string(),
+                    tg.allowed_users.clone(),
+                );
             }
             if !tg.home_channel.is_empty() {
                 env.insert("TELEGRAM_HOME_CHANNEL".to_string(), tg.home_channel.clone());

@@ -86,16 +86,29 @@ pub async fn mark_email_read(
 
     let mut client = McpStdioClient::spawn(&command, &args, &env)?;
     client.initialize().await?;
-    let result = client.call_tool("mark_read", &json!({
-        "uid": uid,
-        "folder": "INBOX",
-        "read": read,
-    })).await;
+    let result = client
+        .call_tool(
+            "mark_read",
+            &json!({
+                "uid": uid,
+                "folder": "INBOX",
+                "read": read,
+            }),
+        )
+        .await;
     client.shutdown().await;
     let result = result?;
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let text = result.get("content").and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("text")).and_then(|t| t.as_str()).unwrap_or("mark_read error");
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("mark_read error");
         return Err(format!("Email MCP: {}", text));
     }
     Ok(())
@@ -117,16 +130,29 @@ pub async fn send_email(
 
     let mut client = McpStdioClient::spawn(&command, &args, &env)?;
     client.initialize().await?;
-    let result = client.call_tool("send_email", &json!({
-        "to": to,
-        "subject": subject,
-        "body": body,
-    })).await;
+    let result = client
+        .call_tool(
+            "send_email",
+            &json!({
+                "to": to,
+                "subject": subject,
+                "body": body,
+            }),
+        )
+        .await;
     client.shutdown().await;
     let result = result?;
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let text = result.get("content").and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("text")).and_then(|t| t.as_str()).unwrap_or("send_email error");
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("send_email error");
         return Err(format!("Email MCP: {}", text));
     }
     Ok(())
@@ -148,15 +174,28 @@ pub async fn jira_transition(
 
     let mut client = McpStdioClient::spawn(&command, &args, &env)?;
     client.initialize().await?;
-    let result = client.call_tool("jira_transition_issue", &json!({
-        "issue_key": issue_key,
-        "transition_name": transition_name,
-    })).await;
+    let result = client
+        .call_tool(
+            "jira_transition_issue",
+            &json!({
+                "issue_key": issue_key,
+                "transition_name": transition_name,
+            }),
+        )
+        .await;
     client.shutdown().await;
     let result = result?;
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let text = result.get("content").and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("text")).and_then(|t| t.as_str()).unwrap_or("transition error");
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("transition error");
         return Err(format!("Jira MCP: {}", text));
     }
     Ok(())
@@ -177,15 +216,28 @@ pub async fn jira_comment(
 
     let mut client = McpStdioClient::spawn(&command, &args, &env)?;
     client.initialize().await?;
-    let result = client.call_tool("jira_add_comment", &json!({
-        "issue_key": issue_key,
-        "body": body,
-    })).await;
+    let result = client
+        .call_tool(
+            "jira_add_comment",
+            &json!({
+                "issue_key": issue_key,
+                "body": body,
+            }),
+        )
+        .await;
     client.shutdown().await;
     let result = result?;
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let text = result.get("content").and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("text")).and_then(|t| t.as_str()).unwrap_or("comment error");
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("comment error");
         return Err(format!("Jira MCP: {}", text));
     }
     Ok(())
@@ -202,7 +254,11 @@ pub async fn jira_comment(
 /// `isError` first and return a clean error instead of crashing on JSON parse.
 pub fn parse_email_list_response(result: &Value) -> Result<Vec<EmailMessage>, String> {
     // Check for MCP tool error first (server.py:343-344 sets isError: true).
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         let err_text = result
             .get("content")
             .and_then(|c| c.get(0))
@@ -219,8 +275,8 @@ pub fn parse_email_list_response(result: &Value) -> Result<Vec<EmailMessage>, St
         .and_then(|t| t.as_str())
         .ok_or_else(|| "MCP response missing content[0].text".to_string())?;
 
-    let payload: Value = serde_json::from_str(text)
-        .map_err(|e| format!("Failed to parse email payload: {}", e))?;
+    let payload: Value =
+        serde_json::from_str(text).map_err(|e| format!("Failed to parse email payload: {}", e))?;
 
     parse_email_payload(&payload)
 }
@@ -235,11 +291,31 @@ fn parse_email_payload(payload: &Value) -> Result<Vec<EmailMessage>, String> {
     let out = messages
         .iter()
         .map(|m| EmailMessage {
-            id: m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            uid: m.get("uid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            subject: m.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)").to_string(),
-            from: m.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            date: m.get("date").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            id: m
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            uid: m
+                .get("uid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            subject: m
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)")
+                .to_string(),
+            from: m
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            date: m
+                .get("date")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
         .collect();
     Ok(out)
@@ -294,28 +370,66 @@ pub async fn list_jira_my_active(
 /// Parse the `jira_search_jql` response into Vec<JiraIssue>.
 /// Response: `result.content[0].text` = JSON `{"issues": [{key, summary, status, ...}], "total"}`.
 pub fn parse_jira_search_response(result: &Value) -> Result<Vec<JiraIssue>, String> {
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         let err_text = result
-            .get("content").and_then(|c| c.get(0)).and_then(|c0| c0.get("text"))
-            .and_then(|t| t.as_str()).unwrap_or("unknown Jira error");
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("unknown Jira error");
         return Err(format!("Jira MCP error: {}", err_text));
     }
     let text = result
-        .get("content").and_then(|c| c.get(0)).and_then(|c0| c0.get("text"))
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c0| c0.get("text"))
         .and_then(|t| t.as_str())
         .ok_or("Jira response missing content[0].text")?;
-    let payload: Value = serde_json::from_str(text)
-        .map_err(|e| format!("Jira payload parse error: {}", e))?;
-    let issues = payload.get("issues").and_then(|i| i.as_array())
+    let payload: Value =
+        serde_json::from_str(text).map_err(|e| format!("Jira payload parse error: {}", e))?;
+    let issues = payload
+        .get("issues")
+        .and_then(|i| i.as_array())
         .ok_or("Jira payload missing 'issues' array")?;
-    let out = issues.iter().map(|i| JiraIssue {
-        key: i.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        summary: i.get("summary").and_then(|v| v.as_str()).unwrap_or("(no summary)").to_string(),
-        status: i.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        priority: i.get("priority").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        assignee: i.get("assignee_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        updated: i.get("updated").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-    }).collect();
+    let out = issues
+        .iter()
+        .map(|i| JiraIssue {
+            key: i
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            summary: i
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no summary)")
+                .to_string(),
+            status: i
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            priority: i
+                .get("priority")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            assignee: i
+                .get("assignee_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            updated: i
+                .get("updated")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect();
     Ok(out)
 }
 
@@ -376,7 +490,9 @@ pub async fn list_calendar_today(
     // 2. List events for today + next 7 days.
     let now = chrono::Utc::now();
     let since = now.format("%Y-%m-%dT00:00:00").to_string();
-    let until = (now + chrono::Duration::days(7)).format("%Y-%m-%dT23:59:59").to_string();
+    let until = (now + chrono::Duration::days(7))
+        .format("%Y-%m-%dT23:59:59")
+        .to_string();
     let events_result = client
         .call_tool(
             "list_events",
@@ -410,7 +526,10 @@ fn parse_iso(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Minutes until the event starts (negative if already started/past).
-pub fn minutes_until_start(event: &CalendarEvent, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+pub fn minutes_until_start(
+    event: &CalendarEvent,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
     let start = parse_iso(&event.start)?;
     let diff = start.signed_duration_since(now);
     Some(diff.num_minutes())
@@ -449,16 +568,27 @@ pub async fn list_meeting_reminders(
 /// Response: `content[0].text` = JSON `{url, display_name, color}` (single)
 /// or `{calendars: [...]}`.
 fn parse_calendar_url(result: &Value) -> Result<String, String> {
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let err_text = result.get("content").and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("text")).and_then(|t| t.as_str()).unwrap_or("calendar error");
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let err_text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("calendar error");
         return Err(format!("Calendar MCP error: {}", err_text));
     }
-    let text = result.get("content").and_then(|c| c.get(0))
-        .and_then(|c0| c0.get("text")).and_then(|t| t.as_str())
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c0| c0.get("text"))
+        .and_then(|t| t.as_str())
         .ok_or("Calendar response missing content[0].text")?;
-    let payload: Value = serde_json::from_str(text)
-        .map_err(|e| format!("Calendar payload parse error: {}", e))?;
+    let payload: Value =
+        serde_json::from_str(text).map_err(|e| format!("Calendar payload parse error: {}", e))?;
     // Single calendar: {url: "..."}
     if let Some(url) = payload.get("url").and_then(|u| u.as_str()) {
         return Ok(url.to_string());
@@ -484,16 +614,27 @@ fn parse_calendar_url(result: &Value) -> Result<String, String> {
 ///
 /// Event fields use `start_local`/`end_local` (ISO with offset), not `start`.
 fn parse_calendar_events_response(result: &Value) -> Result<Vec<CalendarEvent>, String> {
-    if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let err_text = result.get("content").and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("text")).and_then(|t| t.as_str()).unwrap_or("events error");
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let err_text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c0| c0.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("events error");
         return Err(format!("Calendar events error: {}", err_text));
     }
-    let text = result.get("content").and_then(|c| c.get(0))
-        .and_then(|c0| c0.get("text")).and_then(|t| t.as_str())
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c0| c0.get("text"))
+        .and_then(|t| t.as_str())
         .ok_or("Events response missing content[0].text")?;
-    let payload: Value = serde_json::from_str(text)
-        .map_err(|e| format!("Events payload parse error: {}", e))?;
+    let payload: Value =
+        serde_json::from_str(text).map_err(|e| format!("Events payload parse error: {}", e))?;
 
     // Normalize to a list of event objects.
     let events: Vec<&Value> = if let Some(arr) = payload.get("events").and_then(|e| e.as_array()) {
@@ -507,57 +648,93 @@ fn parse_calendar_events_response(result: &Value) -> Result<Vec<CalendarEvent>, 
         return Err("Events payload has no events".to_string());
     };
 
-    let out = events.iter().map(|e| {
-        // Attendees may be a string list or a list of {email, display_name}.
-        let attendees: Vec<String> = e
-            .get("attendees")
-            .and_then(|a| a.as_array())
-            .map(|arr| {
-                arr.iter().filter_map(|a| {
-                    if let Some(s) = a.as_str() {
-                        Some(s.to_string())
-                    } else {
-                        a.get("email").and_then(|v| v.as_str())
-                            .or_else(|| a.get("display_name").and_then(|v| v.as_str()))
-                            .or_else(|| a.get("name").and_then(|v| v.as_str()))
-                            .map(|s| s.to_string())
-                    }
-                }).collect()
-            })
-            .unwrap_or_default();
-        let recurring = e.get("recurring").and_then(|v| v.as_bool())
-            .or_else(|| {
-                // Some servers expose RRULE only, or a "is_recurring" flag.
-                e.get("rrule").and_then(|v| v.as_str()).map(|s| !s.is_empty())
-            })
-            .unwrap_or(false);
-        CalendarEvent {
-            uid: e.get("uid").and_then(|v| v.as_str())
-                .or_else(|| e.get("id").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string(),
-            summary: e.get("summary").and_then(|v| v.as_str()).unwrap_or("(no title)").to_string(),
-            description: e.get("description").and_then(|v| v.as_str())
-                .or_else(|| e.get("body").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string(),
-            start: e.get("start_local").and_then(|v| v.as_str())
-                .or_else(|| e.get("start").and_then(|v| v.as_str()))
-                .or_else(|| e.get("dtstart").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string(),
-            end: e.get("end_local").and_then(|v| v.as_str())
-                .or_else(|| e.get("end").and_then(|v| v.as_str()))
-                .or_else(|| e.get("dtend").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string(),
-            location: e.get("location").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            organizer: e.get("organizer").and_then(|v| v.as_str())
-                .or_else(|| e.get("organizer_email").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string(),
-            attendees,
-            recurring,
-            recurrence_rule: e.get("rrule").and_then(|v| v.as_str())
-                .or_else(|| e.get("recurrence_rule").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string(),
-        }
-    }).collect();
+    let out = events
+        .iter()
+        .map(|e| {
+            // Attendees may be a string list or a list of {email, display_name}.
+            let attendees: Vec<String> = e
+                .get("attendees")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| {
+                            if let Some(s) = a.as_str() {
+                                Some(s.to_string())
+                            } else {
+                                a.get("email")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| a.get("display_name").and_then(|v| v.as_str()))
+                                    .or_else(|| a.get("name").and_then(|v| v.as_str()))
+                                    .map(|s| s.to_string())
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let recurring = e
+                .get("recurring")
+                .and_then(|v| v.as_bool())
+                .or_else(|| {
+                    // Some servers expose RRULE only, or a "is_recurring" flag.
+                    e.get("rrule")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                })
+                .unwrap_or(false);
+            CalendarEvent {
+                uid: e
+                    .get("uid")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.get("id").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+                summary: e
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no title)")
+                    .to_string(),
+                description: e
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.get("body").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+                start: e
+                    .get("start_local")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.get("start").and_then(|v| v.as_str()))
+                    .or_else(|| e.get("dtstart").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+                end: e
+                    .get("end_local")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.get("end").and_then(|v| v.as_str()))
+                    .or_else(|| e.get("dtend").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+                location: e
+                    .get("location")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                organizer: e
+                    .get("organizer")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.get("organizer_email").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+                attendees,
+                recurring,
+                recurrence_rule: e
+                    .get("rrule")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.get("recurrence_rule").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        })
+        .collect();
     Ok(out)
 }
 
@@ -626,7 +803,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn parse_email_list_response_extracts_messages() {
         // Realistic MCP response: result.content[0].text is a JSON string
@@ -670,7 +846,11 @@ mod tests {
         let result = parse_email_list_response(&response);
         assert!(result.is_err(), "isError response must be an error");
         let err = result.unwrap_err();
-        assert!(err.contains("getaddrinfo"), "error must carry the MCP message: {}", err);
+        assert!(
+            err.contains("getaddrinfo"),
+            "error must carry the MCP message: {}",
+            err
+        );
     }
 
     #[test]
@@ -766,7 +946,8 @@ mod tests {
 
     #[test]
     fn parse_calendar_url_multiple() {
-        let inner = json!({"calendars":[{"url":"https://cal.example.com/work/","display_name":"Work"}]});
+        let inner =
+            json!({"calendars":[{"url":"https://cal.example.com/work/","display_name":"Work"}]});
         let response = json!({"content":[{"type":"text","text":inner.to_string()}]});
         let url = parse_calendar_url(&response).unwrap();
         assert_eq!(url, "https://cal.example.com/work/");
@@ -815,7 +996,8 @@ mod tests {
 
     #[test]
     fn parse_calendar_events_errors_on_iserror() {
-        let response = json!({"content":[{"type":"text","text":"CalDAV auth failed"}],"isError":true});
+        let response =
+            json!({"content":[{"type":"text","text":"CalDAV auth failed"}],"isError":true});
         let result = parse_calendar_events_response(&response);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("CalDAV"));
@@ -848,7 +1030,10 @@ mod tests {
         assert_eq!(ev.uid, "devos-daily-2026-07-18");
         assert_eq!(ev.description, "Quick status sync");
         assert_eq!(ev.organizer, "boss@corp.ru");
-        assert_eq!(ev.attendees, vec!["a@corp.ru".to_string(), "b@corp.ru".to_string()]);
+        assert_eq!(
+            ev.attendees,
+            vec!["a@corp.ru".to_string(), "b@corp.ru".to_string()]
+        );
         assert!(ev.recurring);
         assert_eq!(ev.recurrence_rule, "FREQ=DAILY");
     }
@@ -867,7 +1052,10 @@ mod tests {
         });
         let response = json!({"content":[{"type":"text","text":inner.to_string()}]});
         let events = parse_calendar_events_response(&response).unwrap();
-        assert!(events[0].recurring, "recurring inferred from non-empty rrule");
+        assert!(
+            events[0].recurring,
+            "recurring inferred from non-empty rrule"
+        );
     }
 
     #[test]
@@ -925,7 +1113,11 @@ mod tests {
             .into_iter()
             .filter_map(|e| {
                 let mins = minutes_until_start(&e, now)?;
-                if mins >= -5 && mins <= 15 { Some(e) } else { None }
+                if mins >= -5 && mins <= 15 {
+                    Some(e)
+                } else {
+                    None
+                }
             })
             .collect();
         assert_eq!(due.len(), 1);

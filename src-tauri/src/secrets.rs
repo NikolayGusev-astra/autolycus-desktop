@@ -20,8 +20,8 @@ pub mod account {
 
 /// Store a secret under the Steersman namespace.
 pub fn set(account: &str, value: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, account)
-        .map_err(|e| format!("Keyring error: {}", e))?;
+    let entry =
+        keyring::Entry::new(SERVICE, account).map_err(|e| format!("Keyring error: {}", e))?;
     entry
         .set_password(value)
         .map_err(|e| format!("Failed to store secret in keyring: {}", e))
@@ -30,8 +30,8 @@ pub fn set(account: &str, value: &str) -> Result<(), String> {
 /// Read a secret. Returns `Ok(None)` when no entry exists (expected on first
 /// run, or after migration). Returns `Err` only on a genuine keyring failure.
 pub fn get(account: &str) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(SERVICE, account)
-        .map_err(|e| format!("Keyring error: {}", e))?;
+    let entry =
+        keyring::Entry::new(SERVICE, account).map_err(|e| format!("Keyring error: {}", e))?;
     match entry.get_password() {
         Ok(v) => Ok(Some(v)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -41,8 +41,8 @@ pub fn get(account: &str) -> Result<Option<String>, String> {
 
 /// Delete a secret. Missing entry is treated as success (idempotent).
 pub fn delete(account: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, account)
-        .map_err(|e| format!("Keyring error: {}", e))?;
+    let entry =
+        keyring::Entry::new(SERVICE, account).map_err(|e| format!("Keyring error: {}", e))?;
     match entry.delete_password() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),

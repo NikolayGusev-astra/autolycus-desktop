@@ -182,7 +182,8 @@ pub fn read_desktop_config(hermes_home: &Path) -> ConnectionConfig {
     // move it into the OS keyring and clear the field on disk. Subsequent
     // reads pull the key from the keyring via get_remote_api_key().
     if !cfg.api_key.is_empty() {
-        let migrated = crate::secrets::migrate(crate::secrets::account::REMOTE_API_KEY, &cfg.api_key);
+        let migrated =
+            crate::secrets::migrate(crate::secrets::account::REMOTE_API_KEY, &cfg.api_key);
         if migrated {
             // Rewrite the file without the plaintext key. If the rewrite
             // fails we keep the old file; the key is now ALSO in keyring,
@@ -225,8 +226,8 @@ pub fn set_remote_api_key(hermes_home: &Path, api_key: &str) -> Result<(), Strin
 
 pub fn write_desktop_config(hermes_home: &Path, config: &ConnectionConfig) -> Result<(), String> {
     let path = desktop_config_path(hermes_home);
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(config).map_err(|e| format!("Serialization error: {}", e))?;
     // desktop.json no longer stores the API key (moved to keyring), but it may
     // still hold the SSH key path, so keep it owner-only.
     write_secret_file(&path, &json).map_err(|e| format!("Write error: {}", e))?;
@@ -275,7 +276,11 @@ fn parse_env_file(path: &Path) -> HashMap<String, String> {
             }
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim().to_string();
-                let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
                 result.insert(key, value);
             }
         }
@@ -330,13 +335,15 @@ pub fn write_env_value(
 
 // ── config.yaml ───────────────────────────────────────────────────────────
 
-pub fn read_config_yaml(hermes_home: &Path, profile: Option<&str>) -> Result<serde_json::Value, String> {
+pub fn read_config_yaml(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let yaml_path = profile_config_path(hermes_home, profile);
     if !yaml_path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let content = fs::read_to_string(&yaml_path)
-        .map_err(|e| format!("Read error: {}", e))?;
+    let content = fs::read_to_string(&yaml_path).map_err(|e| format!("Read error: {}", e))?;
     let parsed: serde_json::Value = serde_yaml_to_json(&content)?;
     Ok(parsed)
 }
@@ -474,8 +481,14 @@ pub fn resolve_effective_proxy(hermes_home: &Path, profile: Option<&str>) -> Str
     }
     // Source 2: .env — upstream Hermes Agent proxy chain
     let env_map = read_env(hermes_home, profile);
-    for var in &["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
-                 "https_proxy", "http_proxy", "all_proxy"] {
+    for var in &[
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ] {
         if let Some(url) = env_map.get(*var) {
             if !url.is_empty() {
                 return url.clone();
@@ -483,8 +496,14 @@ pub fn resolve_effective_proxy(hermes_home: &Path, profile: Option<&str>) -> Str
         }
     }
     // Source 3: process env — same chain (inherited from shell)
-    for var in &["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
-                 "https_proxy", "http_proxy", "all_proxy"] {
+    for var in &[
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ] {
         if let Ok(url) = std::env::var(var) {
             if !url.is_empty() {
                 return url;
@@ -535,21 +554,31 @@ pub fn detect_system_proxy() -> Option<String> {
 fn detect_windows_proxy() -> Option<String> {
     // Use reg.exe query — no winreg crate dependency, works on all Windows.
     let output = std::process::Command::new("reg")
-        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"])
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyEnable",
+        ])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Look for "ProxyEnable    REG_DWORD    0x1"
-    let enabled = stdout.lines().any(|line| {
-        line.contains("ProxyEnable") && line.contains("0x1")
-    });
+    let enabled = stdout
+        .lines()
+        .any(|line| line.contains("ProxyEnable") && line.contains("0x1"));
     if !enabled {
         return None;
     }
 
     // Read ProxyServer value.
     let output = std::process::Command::new("reg")
-        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer"])
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyServer",
+        ])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -622,7 +651,10 @@ fn detect_linux_proxy() -> Option<String> {
         .args(["get", "org.gnome.system.proxy", "mode"])
         .output()
         .ok()?;
-    let mode_str = String::from_utf8_lossy(&mode.stdout).trim().trim_matches('\'').to_string();
+    let mode_str = String::from_utf8_lossy(&mode.stdout)
+        .trim()
+        .trim_matches('\'')
+        .to_string();
     if mode_str != "manual" {
         return None;
     }
@@ -683,21 +715,36 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
     // `hermes setup` writes). Read provider/default/base_url from there first.
     if let Ok(yaml) = read_config_yaml(hermes_home, profile) {
         if let Some(model_block) = yaml.get("model").and_then(|m| m.as_object()) {
-            let provider = model_block.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-            let default = model_block.get("default").and_then(|v| v.as_str()).unwrap_or("");
-            let base_url = model_block.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = model_block
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let default = model_block
+                .get("default")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let base_url = model_block
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             // proxy: read from a top-level `proxy:` block (desktop-managed) or
             // from `model.proxy.*` for backward compatibility.
             let mut proxy = ProxySettings::default();
             if let Some(pb) = yaml.get("proxy").and_then(|m| m.as_object()) {
-                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
+                proxy.use_proxy = pb
+                    .get("use_proxy")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 proxy.proxy_url = pb
                     .get("proxy_url")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
             } else if let Some(pb) = model_block.get("proxy").and_then(|m| m.as_object()) {
-                proxy.use_proxy = pb.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
+                proxy.use_proxy = pb
+                    .get("use_proxy")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 proxy.proxy_url = pb
                     .get("proxy_url")
                     .and_then(|v| v.as_str())
@@ -711,9 +758,7 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
                     .and_then(|v| v.as_object())
                     .map(|obj| {
                         obj.iter()
-                            .filter_map(|(k, v)| {
-                                v.as_str().map(|s| (k.clone(), s.to_string()))
-                            })
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                             .collect::<std::collections::HashMap<String, String>>()
                     });
                 return ModelConfig {
@@ -733,9 +778,7 @@ pub fn get_model_config(hermes_home: &Path, profile: Option<&str>) -> ModelConfi
                         .get("autonomy")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    prompt_cache: model_block
-                        .get("prompt_cache")
-                        .and_then(|v| v.as_bool()),
+                    prompt_cache: model_block.get("prompt_cache").and_then(|v| v.as_bool()),
                     reasoning_context: model_block
                         .get("reasoning_context")
                         .and_then(|v| v.as_str())
@@ -879,12 +922,7 @@ pub fn set_yaml_block_scalars(
                 .find(|(k, _)| trimmed.starts_with(&format!("{}:", k)))
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()));
             if let Some((k, v)) = replacement {
-                *line = format!(
-                    "{}{}: {}",
-                    " ".repeat(block_indent.unwrap_or(0) + 2),
-                    k,
-                    v
-                );
+                *line = format!("{}{}: {}", " ".repeat(block_indent.unwrap_or(0) + 2), k, v);
                 set_keys.insert(k);
             }
         }
@@ -898,7 +936,10 @@ pub fn set_yaml_block_scalars(
         .collect();
     if !missing.is_empty() {
         // Ensure the block header exists.
-        if !lines.iter().any(|l| l.trim_start().starts_with(&block_header)) {
+        if !lines
+            .iter()
+            .any(|l| l.trim_start().starts_with(&block_header))
+        {
             lines.push(block_header.clone());
         }
         let indent = " ".repeat(2);
@@ -936,9 +977,7 @@ pub fn get_api_server_key(hermes_home: &Path, profile: Option<&str>) -> Option<S
 
 pub fn profile_home(hermes_home: &Path, profile: Option<&str>) -> PathBuf {
     match profile {
-        Some(p) if p != "default" && !p.is_empty() => {
-            hermes_home.join("profiles").join(p)
-        }
+        Some(p) if p != "default" && !p.is_empty() => hermes_home.join("profiles").join(p),
         _ => hermes_home.to_path_buf(),
     }
 }
@@ -949,19 +988,45 @@ pub fn profile_home(hermes_home: &Path, profile: Option<&str>) -> PathBuf {
 /// Falls back to CUSTOM_API_KEY for unknown URLs.
 pub fn expected_env_key_for_url(url: &str) -> &str {
     let url_lower = url.to_lowercase();
-    if url_lower.contains("openrouter.ai") { return "OPENROUTER_API_KEY"; }
-    if url_lower.contains("anthropic.com") { return "ANTHROPIC_API_KEY"; }
-    if url_lower.contains("openai.com") { return "OPENAI_API_KEY"; }
-    if url_lower.contains("ollama.com") { return "OLLAMA_API_KEY"; }
-    if url_lower.contains("huggingface.co") { return "HF_TOKEN"; }
-    if url_lower.contains("api.groq.com") { return "GROQ_API_KEY"; }
-    if url_lower.contains("api.deepseek.com") { return "DEEPSEEK_API_KEY"; }
-    if url_lower.contains("api.together.xyz") { return "TOGETHER_API_KEY"; }
-    if url_lower.contains("api.fireworks.ai") { return "FIREWORKS_API_KEY"; }
-    if url_lower.contains("api.cerebras.ai") { return "CEREBRAS_API_KEY"; }
-    if url_lower.contains("api.mistral.ai") { return "MISTRAL_API_KEY"; }
-    if url_lower.contains("api.perplexity.ai") { return "PERPLEXITY_API_KEY"; }
-    if url_lower.contains("api.xiaomimimo.com") { return "XIAOMI_API_KEY"; }
+    if url_lower.contains("openrouter.ai") {
+        return "OPENROUTER_API_KEY";
+    }
+    if url_lower.contains("anthropic.com") {
+        return "ANTHROPIC_API_KEY";
+    }
+    if url_lower.contains("openai.com") {
+        return "OPENAI_API_KEY";
+    }
+    if url_lower.contains("ollama.com") {
+        return "OLLAMA_API_KEY";
+    }
+    if url_lower.contains("huggingface.co") {
+        return "HF_TOKEN";
+    }
+    if url_lower.contains("api.groq.com") {
+        return "GROQ_API_KEY";
+    }
+    if url_lower.contains("api.deepseek.com") {
+        return "DEEPSEEK_API_KEY";
+    }
+    if url_lower.contains("api.together.xyz") {
+        return "TOGETHER_API_KEY";
+    }
+    if url_lower.contains("api.fireworks.ai") {
+        return "FIREWORKS_API_KEY";
+    }
+    if url_lower.contains("api.cerebras.ai") {
+        return "CEREBRAS_API_KEY";
+    }
+    if url_lower.contains("api.mistral.ai") {
+        return "MISTRAL_API_KEY";
+    }
+    if url_lower.contains("api.perplexity.ai") {
+        return "PERPLEXITY_API_KEY";
+    }
+    if url_lower.contains("api.xiaomimimo.com") {
+        return "XIAOMI_API_KEY";
+    }
     "CUSTOM_API_KEY"
 }
 
@@ -1029,7 +1094,10 @@ pub fn has_api_key_for_provider(
     }
 
     let env = read_env(hermes_home, profile);
-    let value = env.get(expected_key).map(|v| v.trim().to_string()).unwrap_or_default();
+    let value = env
+        .get(expected_key)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
     if !value.is_empty() {
         return true;
     }
@@ -1056,7 +1124,10 @@ mod tests {
         let p = ProxySettings::default();
         assert!(!p.use_proxy, "proxy must default to OFF (safe default)");
         assert!(p.proxy_url.is_empty());
-        assert!(p.resolve_url().is_empty(), "OFF proxy must resolve to empty");
+        assert!(
+            p.resolve_url().is_empty(),
+            "OFF proxy must resolve to empty"
+        );
     }
 
     #[test]
@@ -1122,7 +1193,11 @@ mod tests {
         write_fixture(&dir, "model:\n  default: old-model\n  provider: old\n");
         set_yaml_block_scalars(&dir, None, "model", &[("default", "new-model")]).unwrap();
         let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
-        assert!(updated.contains("new-model"), "updated content: {}", updated);
+        assert!(
+            updated.contains("new-model"),
+            "updated content: {}",
+            updated
+        );
         assert!(!updated.contains("old-model"));
     }
 
@@ -1136,7 +1211,13 @@ mod tests {
         );
         // Note: set_yaml_block_scalars treats block as a flat key search within
         // the located block; nested dotted paths exercise the line-walker.
-        set_yaml_block_scalars(&dir, None, "mcp_servers.email.env", &[("EMAIL_ADDRESS", "new@example.com")]).unwrap();
+        set_yaml_block_scalars(
+            &dir,
+            None,
+            "mcp_servers.email.env",
+            &[("EMAIL_ADDRESS", "new@example.com")],
+        )
+        .unwrap();
         let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
         assert!(
             updated.contains("new@example.com"),
@@ -1155,9 +1236,17 @@ mod tests {
         set_yaml_block_scalars(&dir, None, "model", &[("default", "m2")]).unwrap();
         let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
         // Unrelated agent block must survive.
-        assert!(updated.contains("max_turns: 60"), "unrelated key dropped: {}", updated);
+        assert!(
+            updated.contains("max_turns: 60"),
+            "unrelated key dropped: {}",
+            updated
+        );
         // Untouched sibling key in the same block survives.
-        assert!(updated.contains("provider: p1"), "sibling key dropped: {}", updated);
+        assert!(
+            updated.contains("provider: p1"),
+            "sibling key dropped: {}",
+            updated
+        );
     }
 
     #[test]
@@ -1188,9 +1277,19 @@ mod tests {
             &dir,
             "mcp_servers:\n  email:\n    command: x\n    env:\n      KEY: email-val\n  jira:\n    command: y\n    env:\n      KEY: jira-val\n",
         );
-        set_yaml_block_scalars(&dir, None, "mcp_servers.email.env", &[("KEY", "updated-email")]).unwrap();
+        set_yaml_block_scalars(
+            &dir,
+            None,
+            "mcp_servers.email.env",
+            &[("KEY", "updated-email")],
+        )
+        .unwrap();
         let updated = fs::read_to_string(dir.join("config.yaml")).unwrap();
-        assert!(updated.contains("updated-email"), "target not updated: {}", updated);
+        assert!(
+            updated.contains("updated-email"),
+            "target not updated: {}",
+            updated
+        );
         // The jira env must be untouched.
         assert!(
             updated.contains("jira-val"),
@@ -1248,16 +1347,17 @@ pub struct ConfigHealthSummary {
 
 impl Default for ConfigHealthSummary {
     fn default() -> Self {
-        Self { errors: 0, warnings: 0, infos: 0 }
+        Self {
+            errors: 0,
+            warnings: 0,
+            infos: 0,
+        }
     }
 }
 
 /// Run config health check — returns a report of issues found.
 /// Never throws; returns empty report on total failure.
-pub fn run_config_health_check(
-    hermes_home: &Path,
-    profile: Option<&str>,
-) -> ConfigHealthReport {
+pub fn run_config_health_check(hermes_home: &Path, profile: Option<&str>) -> ConfigHealthReport {
     let profile_name = profile.unwrap_or("default").to_string();
     let mut report = ConfigHealthReport {
         ran_at: chrono::Utc::now().timestamp(),
@@ -1319,7 +1419,10 @@ fn check_model_key_presence(
     }
 
     let env = read_env(hermes_home, profile);
-    let value = env.get(expected_key).map(|v| v.trim().to_string()).unwrap_or_default();
+    let value = env
+        .get(expected_key)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
     if !value.is_empty() {
         return None;
     }
@@ -1360,7 +1463,10 @@ fn check_non_ascii_credentials(
     let mut offenders = Vec::new();
 
     for (key, value) in &env {
-        if !key.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+        if !key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        {
             continue;
         }
         if !key.ends_with("_API_KEY") && !key.ends_with("_TOKEN") && key != "API_SERVER_KEY" {
@@ -1369,7 +1475,10 @@ fn check_non_ascii_credentials(
         if value.is_empty() {
             continue;
         }
-        if value.chars().any(|c| !c.is_ascii() || (c as u32) < 0x20 || (c as u32) > 0x7e) {
+        if value
+            .chars()
+            .any(|c| !c.is_ascii() || (c as u32) < 0x20 || (c as u32) > 0x7e)
+        {
             offenders.push(key.clone());
         }
     }
@@ -1382,10 +1491,11 @@ fn check_non_ascii_credentials(
     Some(ConfigHealthIssue {
         code: "NON_ASCII_CREDENTIAL".to_string(),
         severity: "info".to_string(),
-        message: format!("Non-ASCII characters detected in: {}.", offenders.join(", ")),
-        detail: Some(
-            "Common cause: a smart-quote or trailing newline from a paste.".to_string(),
+        message: format!(
+            "Non-ASCII characters detected in: {}.",
+            offenders.join(", ")
         ),
+        detail: Some("Common cause: a smart-quote or trailing newline from a paste.".to_string()),
         locations: vec![env_path.to_string_lossy().to_string()],
         auto_fixable: true,
         fix_description: Some("Strip non-ASCII characters from the values.".to_string()),
@@ -1394,12 +1504,12 @@ fn check_non_ascii_credentials(
 }
 
 /// Check: API server key presence.
-fn check_api_server_key(
-    hermes_home: &Path,
-    profile: Option<&str>,
-) -> Option<ConfigHealthIssue> {
+fn check_api_server_key(hermes_home: &Path, profile: Option<&str>) -> Option<ConfigHealthIssue> {
     let env = read_env(hermes_home, profile);
-    let env_key = env.get("API_SERVER_KEY").map(|v| v.trim().to_string()).unwrap_or_default();
+    let env_key = env
+        .get("API_SERVER_KEY")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
 
     if !env_key.is_empty() {
         return None;
@@ -1415,7 +1525,9 @@ fn check_api_server_key(
     Some(ConfigHealthIssue {
         code: "EMPTY_API_SERVER_KEY".to_string(),
         severity: "warning".to_string(),
-        message: "No API_SERVER_KEY is set — chat will fail because the Hermes gateway requires auth.".to_string(),
+        message:
+            "No API_SERVER_KEY is set — chat will fail because the Hermes gateway requires auth."
+                .to_string(),
         detail: Some(
             "API_SERVER_KEY is mandatory for Hermes API access. Set it in .env.".to_string(),
         ),

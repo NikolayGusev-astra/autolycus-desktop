@@ -57,10 +57,7 @@ impl Default for ChatReadiness {
 
 /// Validate chat readiness — synchronous check against config, no network calls.
 /// Fail open: any error returns ok=true.
-pub fn validate_chat_readiness(
-    hermes_home: &Path,
-    profile: Option<&str>,
-) -> ChatReadiness {
+pub fn validate_chat_readiness(hermes_home: &Path, profile: Option<&str>) -> ChatReadiness {
     let mc = config::get_model_config(hermes_home, profile);
     let provider = mc.provider.trim().to_lowercase();
     let model = mc.model.trim();

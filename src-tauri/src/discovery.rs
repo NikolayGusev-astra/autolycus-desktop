@@ -212,7 +212,13 @@ pub fn check_gateway_status(python_path: &str) -> (bool, Option<u16>) {
             let mut tc = Command::new("tasklist");
             no_window(&mut tc);
             if let Ok(out) = tc
-                .args(["/FI", &format!("IMAGENAME eq {}", python_exe), "/FO", "CSV", "/NH"])
+                .args([
+                    "/FI",
+                    &format!("IMAGENAME eq {}", python_exe),
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                ])
                 .output()
             {
                 let stdout = String::from_utf8_lossy(&out.stdout);
@@ -339,7 +345,11 @@ pub fn detect_local_instances() -> Vec<DetectedInstance> {
     // ── pip-installed agent binaries (resolved to a real interpreter) ──
     for bin in AGENT_BINS {
         let local_bin = home
-            .join(if cfg!(windows) { "AppData\\Local\\Programs" } else { ".local/bin" })
+            .join(if cfg!(windows) {
+                "AppData\\Local\\Programs"
+            } else {
+                ".local/bin"
+            })
             .join(agent_bin(bin));
         if local_bin.exists() {
             candidates.push((local_bin, bin));
@@ -454,7 +464,11 @@ fn resolve_interpreter(path: &Path) -> PathBuf {
                 return sibling;
             }
             // venv: ../bin/python or ..\Scripts\python.exe
-            if dir.file_name().map(|n| n == venv_bin_dir()).unwrap_or(false) {
+            if dir
+                .file_name()
+                .map(|n| n == venv_bin_dir())
+                .unwrap_or(false)
+            {
                 if let Some(venv_root) = dir.parent() {
                     let py = venv_interpreter(venv_root);
                     if py.exists() {

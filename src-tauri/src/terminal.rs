@@ -52,10 +52,12 @@ pub fn open_terminal(cwd: &str) -> TerminalResult {
     } else {
         match std::env::current_dir() {
             Ok(d) => d.to_string_lossy().to_string(),
-            Err(_) => return TerminalResult {
-                success: false,
-                error: Some("Cannot determine current directory".to_string()),
-            },
+            Err(_) => {
+                return TerminalResult {
+                    success: false,
+                    error: Some("Cannot determine current directory".to_string()),
+                }
+            }
         }
     };
 
@@ -86,7 +88,9 @@ pub fn open_terminal(cwd: &str) -> TerminalResult {
 fn get_terminal_command(cwd: &str) -> (String, Vec<String>) {
     if cfg!(target_os = "windows") {
         // Windows: use cmd.exe or PowerShell
-        if std::path::Path::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe").exists() {
+        if std::path::Path::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+            .exists()
+        {
             (
                 "powershell.exe".to_string(),
                 vec![
@@ -111,7 +115,13 @@ fn get_terminal_command(cwd: &str) -> (String, Vec<String>) {
     } else if cfg!(target_os = "macos") {
         // macOS: use Terminal.app — cwd is passed as a path argument, no
         // shell interpolation, but still guard against control chars.
-        let safe = if looks_safe_for_shell(cwd) { cwd.to_string() } else { std::env::current_dir().map(|d| d.to_string_lossy().to_string()).unwrap_or_default() };
+        let safe = if looks_safe_for_shell(cwd) {
+            cwd.to_string()
+        } else {
+            std::env::current_dir()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
         (
             "open".to_string(),
             vec!["-a".to_string(), "Terminal".to_string(), safe],
@@ -124,11 +134,26 @@ fn get_terminal_command(cwd: &str) -> (String, Vec<String>) {
         // so it must be metacharacter-free or we refuse to cd there.
         let safe = looks_safe_for_shell(cwd);
         let terminals: Vec<(String, Vec<String>)> = vec![
-            ("x-terminal-emulator".to_string(), vec!["--working-directory".to_string(), cwd.to_string()]),
-            ("gnome-terminal".to_string(), vec!["--working-directory".to_string(), cwd.to_string()]),
-            ("konsole".to_string(), vec!["--workdir".to_string(), cwd.to_string()]),
-            ("xfce4-terminal".to_string(), vec!["--working-directory".to_string(), cwd.to_string()]),
-            ("mate-terminal".to_string(), vec!["--working-directory".to_string(), cwd.to_string()]),
+            (
+                "x-terminal-emulator".to_string(),
+                vec!["--working-directory".to_string(), cwd.to_string()],
+            ),
+            (
+                "gnome-terminal".to_string(),
+                vec!["--working-directory".to_string(), cwd.to_string()],
+            ),
+            (
+                "konsole".to_string(),
+                vec!["--workdir".to_string(), cwd.to_string()],
+            ),
+            (
+                "xfce4-terminal".to_string(),
+                vec!["--working-directory".to_string(), cwd.to_string()],
+            ),
+            (
+                "mate-terminal".to_string(),
+                vec!["--working-directory".to_string(), cwd.to_string()],
+            ),
         ];
 
         for (cmd, args) in &terminals {
@@ -141,9 +166,15 @@ fn get_terminal_command(cwd: &str) -> (String, Vec<String>) {
         // metacharacter-free; otherwise spawn without an inline cd (the
         // process CWD is already set by the caller).
         if safe {
-            ("xterm".to_string(), vec!["-e".to_string(), format!("cd {} && exec $SHELL", cwd)])
+            (
+                "xterm".to_string(),
+                vec!["-e".to_string(), format!("cd {} && exec $SHELL", cwd)],
+            )
         } else {
-            ("xterm".to_string(), vec!["-e".to_string(), "$SHELL".to_string()])
+            (
+                "xterm".to_string(),
+                vec!["-e".to_string(), "$SHELL".to_string()],
+            )
         }
     }
 }

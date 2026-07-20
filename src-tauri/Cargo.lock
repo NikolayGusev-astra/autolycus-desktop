@@ -3182,6 +3182,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "portpicker"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be97d76faf1bfab666e1375477b23fde79eccf0276e9b63b92a39d676a889ba9"
+dependencies = [
+ "rand 0.8.6",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4200,6 +4209,7 @@ dependencies = [
  "keyring",
  "libc",
  "openssl-sys",
+ "portpicker",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -4213,6 +4223,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
  "tracing",

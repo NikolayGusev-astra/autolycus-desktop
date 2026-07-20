@@ -22,10 +22,7 @@ pub enum ChatEvent {
     #[serde(rename = "reasoning")]
     Reasoning { content: String },
     #[serde(rename = "tool_start")]
-    ToolStart {
-        name: String,
-        tool_call_id: String,
-    },
+    ToolStart { name: String, tool_call_id: String },
     #[serde(rename = "tool_complete")]
     ToolComplete {
         name: String,
@@ -50,9 +47,7 @@ pub enum ChatEvent {
         cost_usd: Option<f64>,
     },
     #[serde(rename = "done")]
-    Done {
-        session_id: Option<String>,
-    },
+    Done { session_id: Option<String> },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "status")]
@@ -245,8 +240,7 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
             let action = payload_field(value, "action")
                 .or_else(|| payload_field(value, "message"))
                 .unwrap_or("");
-            let command_class = payload_field(value, "command_class")
-                .unwrap_or("write");
+            let command_class = payload_field(value, "command_class").unwrap_or("write");
             Some(ChatEvent::ApprovalRequest {
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -359,11 +353,13 @@ async fn send_via_ws_remote(
 /// from `HERMES_DASHBOARD_SESSION_TOKEN`. Returns the URL + None if the gateway
 /// is not yet running.
 async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, String> {
-    let port = gateway::get_gateway_port(gateway_state, None).await
+    let port = gateway::get_gateway_port(gateway_state, None)
+        .await
         .ok_or("Gateway not available (no port)")?;
     // Token: prefer the one Steersman generated for the spawned process (P1);
     // fall back to HERMES_DASHBOARD_SESSION_TOKEN env for Phase 0 compatibility.
-    let token = gateway::get_gateway_session_token(gateway_state, None).await
+    let token = gateway::get_gateway_session_token(gateway_state, None)
+        .await
         .or_else(|| {
             std::env::var("HERMES_DASHBOARD_SESSION_TOKEN")
                 .ok()
@@ -448,7 +444,9 @@ pub async fn send_message(
                 // Try to start gateway
                 let result = gateway::start_gateway(gateway_state, hermes_home, None).await;
                 if !result.success {
-                    return Err(result.error.unwrap_or("Failed to start gateway".to_string()));
+                    return Err(result
+                        .error
+                        .unwrap_or("Failed to start gateway".to_string()));
                 }
             }
 
@@ -470,21 +468,24 @@ pub async fn send_message(
             // (-L local:remote), so WebSocket frames pass through unmodified
             // (ADR-005). Only the URL scheme must be ws://, not http://.
             if !crate::ssh::is_tunnel_active(ssh_state) {
-                crate::ssh::start_ssh_tunnel(ssh_state, ssh)
+                crate::ssh::start_ssh_tunnel(ssh_state, ssh.clone(), hermes_home.clone())
                     .map_err(|e| format!("SSH tunnel failed: {}", e))?;
             }
 
-            let tunnel_url = crate::ssh::get_tunnel_url(ssh_state)
-                .ok_or("SSH tunnel not available")?;
+            let tunnel_url =
+                crate::ssh::get_tunnel_url(ssh_state).ok_or("SSH tunnel not available")?;
 
             // The remote backend's session token (same resolution as Remote).
             let tunneled_token = config::get_api_server_key(hermes_home, None)
                 .or_else(|| {
-                    dirs::home_dir().and_then(|h| {
-                        config::get_api_server_key(&h.join(".hermes"), None)
-                    })
+                    dirs::home_dir()
+                        .and_then(|h| config::get_api_server_key(&h.join(".hermes"), None))
                 })
-                .or_else(|| std::env::var("API_SERVER_KEY").ok().filter(|v| !v.is_empty()))
+                .or_else(|| {
+                    std::env::var("API_SERVER_KEY")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                })
                 .unwrap_or_default();
 
             send_via_ws_remote(&tunnel_url, &tunneled_token, &request, app_handle).await
@@ -692,18 +693,15 @@ mod tests {
 
     #[test]
     fn ws_message_start_is_status() {
-        let ev = ws_event(
-            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.start"}}"#,
-        );
+        let ev =
+            ws_event(r#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.start"}}"#);
         assert!(matches!(ev, Some(ChatEvent::Status { .. })));
     }
 
     #[test]
     fn ws_session_info_is_ignored() {
         // session.info is informational, not a streaming event to display.
-        let ev = ws_event(
-            r#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info"}}"#,
-        );
+        let ev = ws_event(r#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info"}}"#);
         assert!(ev.is_none());
     }
 
@@ -716,7 +714,10 @@ mod tests {
 
     #[test]
     fn to_ws_url_converts_https_to_wss() {
-        assert_eq!(to_ws_url("https://remote.example.com:9000"), "wss://remote.example.com:9000");
+        assert_eq!(
+            to_ws_url("https://remote.example.com:9000"),
+            "wss://remote.example.com:9000"
+        );
     }
 
     #[test]
@@ -748,7 +749,9 @@ mod tests {
         // the frontend contract expects duration_ms. The parser must convert.
         let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"tc1","name":"read_file","duration_s":1.5,"result":"ok"}}}"#;
         match parse_ws_message(raw) {
-            Some(ChatEvent::ToolComplete { name, duration_ms, .. }) => {
+            Some(ChatEvent::ToolComplete {
+                name, duration_ms, ..
+            }) => {
                 assert_eq!(name, "read_file");
                 // 1.5s → 1500ms
                 assert_eq!(duration_ms, 1500, "1.5s must convert to 1500ms");
@@ -773,7 +776,13 @@ mod tests {
         // Wire format from _emit_approval_request (server.py:1147-1166).
         let raw = r#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s1","payload":{"request_id":"apr1","name":"bash","command":"rm -rf /tmp","command_class":"dangerous","choices":["once","deny"]}}}"#;
         match parse_ws_message(raw) {
-            Some(ChatEvent::ApprovalRequest { request_id, tool_name, tool_input, command_class, .. }) => {
+            Some(ChatEvent::ApprovalRequest {
+                request_id,
+                tool_name,
+                tool_input,
+                command_class,
+                ..
+            }) => {
                 assert_eq!(request_id, "apr1");
                 assert_eq!(tool_name, "bash");
                 assert_eq!(tool_input, "rm -rf /tmp");

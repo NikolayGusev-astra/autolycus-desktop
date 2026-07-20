@@ -42,17 +42,14 @@ pub struct GatewayProcess {
 // ── State ─────────────────────────────────────────────────────────────────
 
 pub struct GatewayState {
-    /// Single lock wrapping all gateway processes keyed by profile. Previously
-    /// two separate mutexes (processes + api_server_available) could drift.
+    /// Single lock wrapping all gateway processes keyed by profile.
     pub processes: Arc<Mutex<HashMap<String, GatewayProcess>>>,
-    pub api_server_available: Arc<Mutex<Option<bool>>>,
 }
 
 impl GatewayState {
     pub fn new() -> Self {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
-            api_server_available: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -140,13 +137,23 @@ pub async fn start_gateway(
     // as HERMES_BACKEND_READY port=N. Auth is a session token (ADR-004 §2).
     let hermes_launcher = python_path
         .parent() // bin/ or Scripts/
-        .map(|dir| dir.join(if cfg!(windows) { "hermes.exe" } else { "hermes" }));
+        .map(|dir| {
+            dir.join(if cfg!(windows) {
+                "hermes.exe"
+            } else {
+                "hermes"
+            })
+        });
 
     // Windows: prefer pythonw.exe (no console). Fallback: bare python + CREATE_NO_WINDOW.
     #[cfg(windows)]
     let python_for_gateway = {
         let pythonw = python_path.with_file_name("pythonw.exe");
-        if pythonw.exists() { pythonw } else { python_path.clone() }
+        if pythonw.exists() {
+            pythonw
+        } else {
+            python_path.clone()
+        }
     };
     #[cfg(not(windows))]
     let python_for_gateway = python_path.clone();
@@ -156,13 +163,17 @@ pub async fn start_gateway(
 
     let mut cmd = if let Some(launcher) = hermes_launcher.as_ref().filter(|p| p.exists()) {
         let mut c = tokio::process::Command::new(launcher);
-        for a in &serve_args { c.arg(a); }
+        for a in &serve_args {
+            c.arg(a);
+        }
         c
     } else {
         // Fallback: invoke the CLI module directly with the interpreter.
         let mut c = tokio::process::Command::new(&python_for_gateway);
         c.arg("-m").arg("hermes_cli.main");
-        for a in &serve_args { c.arg(a); }
+        for a in &serve_args {
+            c.arg(a);
+        }
         c
     };
 
@@ -242,6 +253,23 @@ pub async fn start_gateway(
         "WS handshake complete"
     );
 
+    // If readiness failed, kill the child process before returning error
+    if !ready {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return GatewayStartResult {
+            success: false,
+            running: false,
+            already_running: Some(false),
+            error: Some(format!(
+                "Backend process started but did not become ready via WS handshake within 30s. \
+                 Check that Hermes Agent is installed and `hermes serve` runs. Captured port: {}.",
+                port
+            )),
+            log_path: Some(format!("{}/logs/gateway.log", hermes_home.display())),
+        };
+    }
+
     // Store process
     {
         let mut processes = state.processes.lock().await;
@@ -257,25 +285,11 @@ pub async fn start_gateway(
         );
     }
 
-    // Mark API as available (only if readiness was confirmed)
-    {
-        let mut api = state.api_server_available.lock().await;
-        *api = Some(ready);
-    }
-
     GatewayStartResult {
         success: ready,
         running: ready,
         already_running: Some(false),
-        error: if ready {
-            None
-        } else {
-            Some(format!(
-                "Backend process started but did not become ready via WS handshake within 30s. \
-                 Check that Hermes Agent is installed and `hermes serve` runs. Captured port: {}.",
-                port
-            ))
-        },
+        error: None,
         log_path: Some(format!("{}/logs/gateway.log", hermes_home.display())),
     }
 }
@@ -295,7 +309,6 @@ async fn spawn_gateway_child(
     // Windows: suppress console window.
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
@@ -350,15 +363,18 @@ async fn await_gateway_port(
     }
 }
 
-
-
 // ── Gateway stop (async) ───────────────────────────────────────────────────
 
 pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), String> {
     let profile_key = profile.unwrap_or("default").to_string();
 
-    let mut processes = state.processes.lock().await;
-    if let Some(mut gw) = processes.remove(&profile_key) {
+    // Remove from map and drop the lock BEFORE waiting for process exit
+    let gw = {
+        let mut processes = state.processes.lock().await;
+        processes.remove(&profile_key)
+    };
+
+    if let Some(mut gw) = gw {
         // Graceful shutdown: SIGTERM → wait → SIGKILL
         #[cfg(unix)]
         {
@@ -368,7 +384,7 @@ pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result
             }
         }
 
-        // Wait up to 3 seconds (async)
+        // Wait up to 3 seconds (async) - lock already dropped
         let start = Instant::now();
         loop {
             match gw.child.try_wait() {
@@ -395,7 +411,6 @@ pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result
 
     Ok(())
 }
-
 
 // ── Gateway status ────────────────────────────────────────────────────────
 
@@ -426,20 +441,15 @@ pub async fn get_gateway_port(state: &GatewayState, profile: Option<&str>) -> Op
 
 /// Return the dashboard session token for the spawned gateway (ADR-004 §2).
 /// Used to build the WS ?token= URL. Falls back to None if no process is held.
-pub async fn get_gateway_session_token(state: &GatewayState, profile: Option<&str>) -> Option<String> {
+pub async fn get_gateway_session_token(
+    state: &GatewayState,
+    profile: Option<&str>,
+) -> Option<String> {
     let profile_key = profile.unwrap_or("default").to_string();
     let processes = state.processes.lock().await;
-    processes.get(&profile_key).map(|gw| gw.session_token.clone())
-}
-
-// ── Health check ──────────────────────────────────────────────────────────
-
-pub async fn check_gateway_health(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{}/health", port);
-    match reqwest::get(&url).await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
+    processes
+        .get(&profile_key)
+        .map(|gw| gw.session_token.clone())
 }
 
 // ── Gateway restart ───────────────────────────────────────────────────────
@@ -452,22 +462,6 @@ pub async fn restart_gateway(
     let _ = stop_gateway(state, profile).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     start_gateway(state, hermes_home, profile).await
-}
-
-// ── API URL ───────────────────────────────────────────────────────────────
-
-pub async fn get_api_url(state: &GatewayState, profile: Option<&str>) -> Option<String> {
-    get_gateway_port(state, profile).await.map(|port| format!("http://127.0.0.1:{}", port))
-}
-
-// ── API server ready check ────────────────────────────────────────────────
-
-pub async fn is_api_server_ready(state: &GatewayState, profile: Option<&str>) -> bool {
-    if let Some(port) = get_gateway_port(state, profile).await {
-        check_gateway_health(port).await
-    } else {
-        false
-    }
 }
 
 // ADR-004: hermes serve spawn helpers (P1)
@@ -539,41 +533,6 @@ fn fill_random(buf: &mut [u8]) {
     }
 }
 
-// One-shot WS readiness probe (ADR-004 §3). Connects, waits up to 5s for the
-// gateway.ready event, returns true on success. Used by start_gateway in place
-// of the legacy TCP /health poll. The connection is closed immediately after.
-async fn check_ws_ready(ws_url: &str) -> bool {
-    use futures::StreamExt;
-    use tokio_tungstenite::tungstenite::Message;
-
-    let (mut ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
-        Ok(pair) => pair,
-        Err(_) => return false,
-    };
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, ws.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let is_ready = v.get("method").and_then(|m| m.as_str()) == Some("event")
-                        && v.get("params")
-                            .and_then(|p| p.get("type"))
-                            .and_then(|t| t.as_str())
-                            == Some("gateway.ready");
-                    if is_ready {
-                        let _ = ws.close(None).await;
-                        return true;
-                    }
-                }
-            }
-            _ => break,
-        }
-    }
-    let _ = ws.close(None).await;
-    false
-}
-
 // ── Typed backend errors (P3.3, v2 §8.3 #9) ────────────────────────────────
 //
 // BackendError replaces Result<_, String> on the public gateway lifecycle API
@@ -622,7 +581,15 @@ mod tests {
         let args = build_serve_args(Some("architect"));
         assert_eq!(
             args,
-            vec!["--profile", "architect", "serve", "--host", "127.0.0.1", "--port", "0"]
+            vec![
+                "--profile",
+                "architect",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0"
+            ]
         );
     }
 
@@ -638,7 +605,10 @@ mod tests {
 
     #[test]
     fn parse_ready_port_extracts_port() {
-        assert_eq!(parse_ready_port("HERMES_BACKEND_READY port=9420"), Some(9420));
+        assert_eq!(
+            parse_ready_port("HERMES_BACKEND_READY port=9420"),
+            Some(9420)
+        );
     }
 
     #[test]
@@ -669,7 +639,9 @@ mod tests {
         // 32 bytes -> base64url no-pad -> exactly 43 chars, alphabet [A-Za-z0-9_-].
         let t = generate_session_token();
         assert_eq!(t.len(), 43);
-        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]

@@ -142,11 +142,7 @@ impl McpStdioClient {
 
     /// Call an MCP tool by name with the given arguments. Returns the `result`
     /// field of the JSON-RPC response.
-    pub async fn call_tool(
-        &mut self,
-        tool_name: &str,
-        arguments: &Value,
-    ) -> Result<Value, String> {
+    pub async fn call_tool(&mut self, tool_name: &str, arguments: &Value) -> Result<Value, String> {
         let id = next_id();
         let req = build_tools_call_request(id, tool_name, arguments);
         self.send(&req).await?;
@@ -159,8 +155,8 @@ impl McpStdioClient {
 
     /// Send a JSON-RPC frame as a newline-delimited line to the child's stdin.
     async fn send(&mut self, value: &Value) -> Result<(), String> {
-        let mut text = serde_json::to_string(value)
-            .map_err(|e| format!("JSON encode error: {}", e))?;
+        let mut text =
+            serde_json::to_string(value).map_err(|e| format!("JSON encode error: {}", e))?;
         text.push('\n');
         self.stdin
             .write_all(text.as_bytes())
@@ -222,7 +218,10 @@ mod tests {
     fn mcp_initialize_request_is_valid_jsonrpc() {
         let req = build_initialize_request(1);
         assert_eq!(req.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
-        assert_eq!(req.get("method").and_then(|v| v.as_str()), Some("initialize"));
+        assert_eq!(
+            req.get("method").and_then(|v| v.as_str()),
+            Some("initialize")
+        );
         assert_eq!(req.get("id").and_then(|v| v.as_u64()), Some(1));
         // protocolVersion must be present (MCP handshake contract).
         assert!(req
@@ -242,7 +241,10 @@ mod tests {
     fn mcp_tools_call_request_is_valid_jsonrpc() {
         let req = build_tools_call_request(2, "list_inbox", &json!({}));
         assert_eq!(req.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
-        assert_eq!(req.get("method").and_then(|v| v.as_str()), Some("tools/call"));
+        assert_eq!(
+            req.get("method").and_then(|v| v.as_str()),
+            Some("tools/call")
+        );
         assert_eq!(req.get("id").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(
             req.get("params")
@@ -264,7 +266,10 @@ mod tests {
             .get("params")
             .and_then(|p| p.get("arguments"))
             .expect("arguments field missing");
-        assert_eq!(params_args.get("unread_only").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            params_args.get("unread_only").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(params_args.get("days").and_then(|v| v.as_i64()), Some(7));
         assert_eq!(params_args.get("limit").and_then(|v| v.as_i64()), Some(20));
     }
@@ -376,7 +381,11 @@ main()
             .and_then(|c0| c0.get("text"))
             .and_then(|t| t.as_str())
             .expect("missing content[0].text");
-        assert!(text.contains("\"messages\":[]"), "unexpected payload: {}", text);
+        assert!(
+            text.contains("\"messages\":[]"),
+            "unexpected payload: {}",
+            text
+        );
 
         client.shutdown().await;
     }

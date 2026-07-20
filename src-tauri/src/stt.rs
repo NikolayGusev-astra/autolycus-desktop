@@ -21,10 +21,7 @@ use crate::config;
 /// (profile + global ~/.hermes/.env), then the credential pool in auth.json
 /// (manual entries hold the raw key; env entries point at .env). This makes a
 /// key added in Settings → Credentials immediately usable for STT.
-pub async fn transcribe_audio(
-    hermes_home: &Path,
-    audio_path: &str,
-) -> Result<String, String> {
+pub async fn transcribe_audio(hermes_home: &Path, audio_path: &str) -> Result<String, String> {
     // Pre-load the credential pool from auth.json once (async), so the
     // synchronous key resolver below can consult it without awaiting.
     let pool = crate::auth::get_credential_pool(&hermes_home.to_path_buf())
@@ -150,7 +147,9 @@ async fn transcribe_openai_compat(
     if !status.is_success() {
         // 401/403 → bad/forbidden key; 429 → rate limit. Give actionable text.
         let hint = match status.as_u16() {
-            401 | 403 => " — проверьте правильность GROQ_API_KEY (в Настройках → Ключи API)".to_string(),
+            401 | 403 => {
+                " — проверьте правильность GROQ_API_KEY (в Настройках → Ключи API)".to_string()
+            }
             429 => " — превышен лимит запросов Groq, попробуйте позже".to_string(),
             _ => String::new(),
         };
@@ -180,7 +179,10 @@ fn build_multipart(
 
     // model field
     push(&mut out, &format!("--{}\r\n", boundary));
-    push(&mut out, "Content-Disposition: form-data; name=\"model\"\r\n\r\n");
+    push(
+        &mut out,
+        "Content-Disposition: form-data; name=\"model\"\r\n\r\n",
+    );
     push(&mut out, model);
     push(&mut out, "\r\n");
 

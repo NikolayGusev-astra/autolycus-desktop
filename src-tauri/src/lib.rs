@@ -3,28 +3,31 @@
 // Ported from fathah/hermes-desktop (v0.5.8)
 
 mod auth;
+mod briefing;
 mod chat;
 mod config;
 mod config_health;
 mod cronjobs;
 mod discovery;
+mod feed_sources;
 mod gateway;
 mod install;
 mod kanban;
+mod mcp;
+mod mcp_client;
+pub mod mcp_server;
 mod media;
+mod meeting_briefing;
 mod memory;
 mod model_discovery;
 mod models;
-mod mcp;
 mod process_supervisor;
-mod profiles;
 mod productivity;
+mod profiles;
 mod provider_registry;
 mod registry;
 mod secrets;
 mod sessions;
-mod briefing;
-mod meeting_briefing;
 mod skills;
 mod sources;
 mod ssh;
@@ -33,9 +36,6 @@ mod telegram;
 mod terminal;
 mod validation;
 mod ws_transport;
-mod mcp_client;
-mod feed_sources;
-pub mod mcp_server;
 
 use std::path::PathBuf;
 
@@ -47,12 +47,12 @@ use tauri::{AppHandle, Emitter, State};
 pub use chat::{send_message, ChatEvent, ConnectionMode, SendMessageRequest};
 pub use config::{ConnectionConfig, PublicConnectionConfig, SshConfig};
 pub use gateway::{GatewayStartResult, GatewayState};
+pub use mcp::{McpCatalogEntry, McpServer, McpServerInput};
 pub use models::SavedModel;
 pub use profiles::ProfileInfo;
-pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use sessions::FeedItem;
+pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
-pub use mcp::{McpServer, McpServerInput, McpCatalogEntry};
 
 // ── App State ─────────────────────────────────────────────────────────────
 
@@ -140,7 +140,9 @@ async fn init_app(state: State<'_, AppState>) -> Result<InitResult, String> {
     let _ = ensure_agents_md(&hermes_home);
     let _ = ensure_bundled_skill(&hermes_home);
 
-    state.hermes_home.store(Some(std::sync::Arc::new(hermes_home.clone())));
+    state
+        .hermes_home
+        .store(Some(std::sync::Arc::new(hermes_home.clone())));
 
     Ok(InitResult {
         hermes_home: hermes_home.to_string_lossy().to_string(),
@@ -152,6 +154,7 @@ async fn init_app(state: State<'_, AppState>) -> Result<InitResult, String> {
 /// block so the Hermes agent discovers steersman_* tools at startup. Idempotent
 /// — if already present (by name "steersman"), no-op. Uses line-based editing
 /// to preserve the rest of config.yaml.
+#[allow(dead_code)]
 fn ensure_steersman_mcp_registered(_hermes_home: &std::path::Path) -> Result<(), String> {
     // DISABLED: auto-registering the Steersman MCP server in config.yaml on
     // every init corrupted user configs (the YAML emitter rewrites the whole
@@ -171,8 +174,7 @@ fn ensure_agents_md(hermes_home: &std::path::Path) -> Result<(), String> {
         return Ok(()); // respect user's existing file
     }
     let template = include_str!("../templates/AGENTS.md");
-    std::fs::write(&agents_path, template)
-        .map_err(|e| format!("write AGENTS.md: {}", e))?;
+    std::fs::write(&agents_path, template).map_err(|e| format!("write AGENTS.md: {}", e))?;
     tracing::info!(target: "steersman_desktop_lib::init", "created AGENTS.md from template");
     Ok(())
 }
@@ -187,11 +189,9 @@ fn ensure_bundled_skill(hermes_home: &std::path::Path) -> Result<(), String> {
     if skill_md.exists() {
         return Ok(()); // respect user's existing skill
     }
-    std::fs::create_dir_all(&skill_dir)
-        .map_err(|e| format!("create skill dir: {}", e))?;
+    std::fs::create_dir_all(&skill_dir).map_err(|e| format!("create skill dir: {}", e))?;
     let template = include_str!("../templates/skills/steersman-assistant/SKILL.md");
-    std::fs::write(&skill_md, template)
-        .map_err(|e| format!("write SKILL.md: {}", e))?;
+    std::fs::write(&skill_md, template).map_err(|e| format!("write SKILL.md: {}", e))?;
     tracing::info!(target: "steersman_desktop_lib::init", "installed steersman-assistant skill");
     Ok(())
 }
@@ -234,18 +234,24 @@ fn register_steersman_mcp_linebased(
     config_path: &std::path::Path,
     mcp_bin: &str,
 ) -> Result<bool, String> {
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("read config.yaml: {}", e))?;
+    let content =
+        std::fs::read_to_string(config_path).map_err(|e| format!("read config.yaml: {}", e))?;
 
     // Idempotency: check for an existing `  steersman:` entry (line-based —
     // survives quoting quirks, unlike a YAML parse).
-    if content.lines().any(|l| l.trim_start() == "steersman:" && l.starts_with("  ")) {
+    if content
+        .lines()
+        .any(|l| l.trim_start() == "steersman:" && l.starts_with("  "))
+    {
         return Ok(false);
     }
 
     // Escape backslashes for YAML double-quoted string (Windows paths).
     let bin_escaped = mcp_bin.replace('\\', "/");
-    let block = format!("  steersman:\n    command: \"{}\"\n    args: []", bin_escaped);
+    let block = format!(
+        "  steersman:\n    command: \"{}\"\n    args: []",
+        bin_escaped
+    );
 
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     let mcp_idx = lines.iter().position(|l| l.trim_start() == "mcp_servers:");
@@ -280,10 +286,9 @@ fn harden_secret_files(hermes_home: &std::path::Path) {
             };
             // Only chmod if more permissive than 0600 (owner rw).
             if mode & 0o077 != 0 {
-                if let Err(e) = std::fs::set_permissions(
-                    &path,
-                    std::fs::Permissions::from_mode(0o600),
-                ) {
+                if let Err(e) =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                {
                     tracing::warn!(
                         target: "steersman_desktop_lib",
                         path = %path.display(), error = %e,
@@ -363,9 +368,10 @@ async fn connect_to_instance(
     // Windows. This keeps sessions/memory readable.
     let resolved_default = config::resolve_hermes_home();
     let home = match &instance.home_dir {
-        Some(h) if !h.is_empty()
-            && PathBuf::from(h).is_dir()
-            && PathBuf::from(h).join("state.db").exists() =>
+        Some(h)
+            if !h.is_empty()
+                && PathBuf::from(h).is_dir()
+                && PathBuf::from(h).join("state.db").exists() =>
         {
             PathBuf::from(h)
         }
@@ -380,7 +386,9 @@ async fn connect_to_instance(
         ));
     }
 
-    state.hermes_home.store(Some(std::sync::Arc::new(home.clone())));
+    state
+        .hermes_home
+        .store(Some(std::sync::Arc::new(home.clone())));
 
     Ok(home.to_string_lossy().to_string())
 }
@@ -393,9 +401,7 @@ async fn connect_to_instance(
 /// local agent exists (the shturman.ai "Подключен" experience), without ever
 /// showing the manual connection screen.
 #[tauri::command]
-async fn auto_connect_local_cmd(
-    state: State<'_, AppState>,
-) -> Result<AutoConnectResult, String> {
+async fn auto_connect_local_cmd(state: State<'_, AppState>) -> Result<AutoConnectResult, String> {
     let instance = match discovery::primary_instance() {
         Some(i) => i,
         None => {
@@ -416,9 +422,10 @@ async fn auto_connect_local_cmd(
     // dir that has no data — which previously left sessions/memory empty.
     let resolved_default = config::resolve_hermes_home();
     let home = match &instance.home_dir {
-        Some(h) if !h.is_empty()
-            && PathBuf::from(h).is_dir()
-            && PathBuf::from(h).join("state.db").exists() =>
+        Some(h)
+            if !h.is_empty()
+                && PathBuf::from(h).is_dir()
+                && PathBuf::from(h).join("state.db").exists() =>
         {
             PathBuf::from(h)
         }
@@ -440,7 +447,9 @@ async fn auto_connect_local_cmd(
                     hermes_home: None,
                     gateway_running: instance.gateway_running,
                     label: instance.label.clone(),
-                    error: Some("Detected instance but could not resolve its home directory".to_string()),
+                    error: Some(
+                        "Detected instance but could not resolve its home directory".to_string(),
+                    ),
                 });
             }
         }
@@ -604,8 +613,8 @@ fn set_config_scalar(
     value: &str,
 ) -> Result<(), String> {
     let path = profile_config_yaml_path(hermes_home, profile);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Read config.yaml error: {}", e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Read config.yaml error: {}", e))?;
 
     // Look for an existing `display:` block and update the key inside it; or
     // append a fresh block if absent. We operate on lines so formatting is
@@ -645,10 +654,7 @@ fn set_config_scalar(
 
     if !replaced {
         // Either no display block or no such key: append a clean block.
-        let block = format!(
-            "display:\n  {}: {}\n",
-            key, value
-        );
+        let block = format!("display:\n  {}: {}\n", key, value);
         lines.push(block);
     }
 
@@ -657,7 +663,10 @@ fn set_config_scalar(
     Ok(())
 }
 
-fn profile_config_yaml_path(hermes_home: &std::path::Path, profile: Option<&str>) -> std::path::PathBuf {
+fn profile_config_yaml_path(
+    hermes_home: &std::path::Path,
+    profile: Option<&str>,
+) -> std::path::PathBuf {
     match profile {
         Some(p) if p != "default" && !p.is_empty() => {
             hermes_home.join("profiles").join(p).join("config.yaml")
@@ -683,14 +692,28 @@ fn save_provider_key_cmd(
     // agent picks them up immediately.
     if let (Some(p), Some(m)) = (provider, model) {
         let b = base_url.unwrap_or_default();
-        let _ = config::set_model_config(&hermes_home, None, &p, &m, &b, None, None, None, None, None, None);
+        let _ = config::set_model_config(
+            &hermes_home,
+            None,
+            &p,
+            &m,
+            &b,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
     Ok(())
 }
 
 /// Detect Python/steersman instances on a remote machine via SSH
 #[tauri::command]
-async fn detect_remote_instances_cmd(ssh_config: SshConfig) -> Result<Vec<RemoteInstanceInfo>, String> {
+async fn detect_remote_instances_cmd(
+    ssh_config: SshConfig,
+) -> Result<Vec<RemoteInstanceInfo>, String> {
     let candidates: Vec<(&str, &str)> = vec![
         ("~/steersman/venv/bin/python3", "steersman"),
         ("~/steersman/venv/bin/python", "steersman"),
@@ -702,7 +725,9 @@ async fn detect_remote_instances_cmd(ssh_config: SshConfig) -> Result<Vec<Remote
 
     let mut result = Vec::new();
     for (path, instance) in candidates {
-        let exists = ssh::ssh_exec(&ssh_config, &format!("test -f {}", path), 15).is_ok();
+        let exists = ssh::ssh_exec(&ssh_config, &format!("test -f {}", path), 15)
+            .await
+            .is_ok();
         result.push(RemoteInstanceInfo {
             path: path.to_string(),
             instance: instance.to_string(),
@@ -725,7 +750,9 @@ fn get_versions_cmd() -> VersionsInfo {
     VersionsInfo {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         tauri_version: tauri::VERSION.to_string(),
-        rust_version: option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown").to_string(),
+        rust_version: option_env!("CARGO_PKG_RUST_VERSION")
+            .unwrap_or("unknown")
+            .to_string(),
         node_version: std::env::var("npm_config_node_version").unwrap_or_else(|_| "unknown".into()),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -746,7 +773,9 @@ struct VersionsInfo {
 
 /// Get connection config
 #[tauri::command]
-async fn get_connection_config(state: State<'_, AppState>) -> Result<PublicConnectionConfig, String> {
+async fn get_connection_config(
+    state: State<'_, AppState>,
+) -> Result<PublicConnectionConfig, String> {
     let hermes_home = state.hermes_home()?;
     let cfg = config::read_desktop_config(&hermes_home);
     Ok(PublicConnectionConfig::from(&cfg))
@@ -829,11 +858,7 @@ async fn start_gateway_cmd(
 ) -> Result<GatewayStartResult, String> {
     let hermes_home = state.hermes_home()?;
 
-    Ok(gateway::start_gateway(
-        &state.gateway,
-        &hermes_home,
-        profile.as_deref(),
-    ).await)
+    Ok(gateway::start_gateway(&state.gateway, &hermes_home, profile.as_deref()).await)
 }
 
 /// Stop gateway
@@ -863,7 +888,9 @@ async fn list_models_api_cmd(state: State<'_, AppState>) -> Result<Vec<String>, 
     // configured model is config.yaml `model.default` — read it directly.
     // Previously this hit http://127.0.0.1:{port}/v1/models, which 404'd on
     // hermes serve and returned an empty list -> UI showed "No Models".
-    let hermes_home = state.hermes_home().unwrap_or_else(|_| config::resolve_hermes_home());
+    let hermes_home = state
+        .hermes_home()
+        .unwrap_or_else(|_| config::resolve_hermes_home());
     let model_config = config::get_model_config(&hermes_home, None);
     if model_config.model.is_empty() {
         Ok(Vec::new())
@@ -910,14 +937,17 @@ async fn start_remote_gateway_cmd(
         remote_port, remote_port, python_path
     );
 
-    ssh::ssh_exec(&ssh_config, &cmd, 10)?;
+    ssh::ssh_exec(&ssh_config, &cmd, 10).await?;
 
     // Wait for gateway to start (async, does not block the Tauri runtime).
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Check if gateway is running on remote
-    let check_cmd = format!("curl -sf http://127.0.0.1:{}/health 2>/dev/null || echo fail", remote_port);
-    let output = ssh::ssh_exec(&ssh_config, &check_cmd, 5)?;
+    let check_cmd = format!(
+        "curl -sf http://127.0.0.1:{}/health 2>/dev/null || echo fail",
+        remote_port
+    );
+    let output = ssh::ssh_exec(&ssh_config, &check_cmd, 5).await?;
 
     let success = !output.trim().is_empty() && !output.contains("fail");
 
@@ -925,7 +955,11 @@ async fn start_remote_gateway_cmd(
         success,
         running: success,
         already_running: None,
-        error: if success { None } else { Some("Remote gateway health check failed".to_string()) },
+        error: if success {
+            None
+        } else {
+            Some("Remote gateway health check failed".to_string())
+        },
         log_path: Some("/tmp/gateway.log".to_string()),
     })
 }
@@ -1104,9 +1138,11 @@ async fn generate_smart_briefing_cmd(
     // briefing server needed (replaces mcp-smart-briefing/server.py).
     let prompt = briefing::briefing_prompt(days);
 
-    let port = gateway::get_gateway_port(&state.gateway, None).await
+    let port = gateway::get_gateway_port(&state.gateway, None)
+        .await
         .ok_or("Gateway not available for briefing")?;
-    let token = gateway::get_gateway_session_token(&state.gateway, None).await
+    let token = gateway::get_gateway_session_token(&state.gateway, None)
+        .await
         .ok_or("No session token for briefing")?;
     let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
 
@@ -1127,16 +1163,15 @@ async fn generate_smart_briefing_cmd(
     // it out. Without this, each briefing session would appear as a normal
     // "desktop" chat that the NEXT briefing would pick up and analyse →
     // "briefing-of-briefing" infinite loop.
-    let (real_session_id, briefing_text) =
-        crate::ws_transport::send_message_via_ws_buffered(
-            &ws_url,
-            None,
-            &prompt,
-            &app_handle,
-            "briefing_smart",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+    let (real_session_id, briefing_text) = crate::ws_transport::send_message_via_ws_buffered(
+        &ws_url,
+        None,
+        &prompt,
+        &app_handle,
+        "briefing_smart",
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Persist as a briefing session for the dashboard cache.
     let cache_session_id = format!("smart_briefing:{}", profile.as_deref().unwrap_or("default"));
@@ -1162,7 +1197,13 @@ async fn generate_smart_briefing_cmd(
         conn.execute(
             "INSERT OR REPLACE INTO sessions (id, source, started_at, title, preview)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![&cache_session_id, "briefing_agent", started_at, &title, &stored_text],
+            rusqlite::params![
+                &cache_session_id,
+                "briefing_agent",
+                started_at,
+                &title,
+                &stored_text
+            ],
         )
     });
 
@@ -1185,8 +1226,12 @@ async fn list_feed_channels_cmd(
     profile: Option<String>,
 ) -> Result<Vec<FeedItem>, String> {
     let hermes_home = home_or_resolve(&state)?;
-    sessions::list_feed_channels(&hermes_home, profile.as_deref(), limit_per_source.unwrap_or(5))
-        .map_err(|e| format!("SQLite error: {}", e))
+    sessions::list_feed_channels(
+        &hermes_home,
+        profile.as_deref(),
+        limit_per_source.unwrap_or(5),
+    )
+    .map_err(|e| format!("SQLite error: {}", e))
 }
 
 /// ADR-007: Live source card — unread email from the configured email MCP
@@ -1246,7 +1291,8 @@ async fn mark_email_read_cmd(
     profile: Option<String>,
 ) -> Result<(), String> {
     let hermes_home = home_or_resolve(&state)?;
-    feed_sources::mark_email_read(&hermes_home, profile.as_deref(), &uid, read.unwrap_or(true)).await
+    feed_sources::mark_email_read(&hermes_home, profile.as_deref(), &uid, read.unwrap_or(true))
+        .await
 }
 
 /// L8: generate a pre-meeting briefing for a calendar event.
@@ -1261,25 +1307,29 @@ async fn generate_meeting_briefing_cmd(
     event_uid: String,
     profile: Option<String>,
 ) -> Result<meeting_briefing::MeetingBriefingResult, String> {
-    eprintln!("[meeting_briefing] START event_uid={} profile={:?}", event_uid, profile);
+    eprintln!(
+        "[meeting_briefing] START event_uid={} profile={:?}",
+        event_uid, profile
+    );
     let hermes_home = home_or_resolve(&state)?;
 
     // 1. Fetch the event by uid from the calendar MCP.
     eprintln!("[meeting_briefing] Fetching calendar events...");
-    let events = feed_sources::list_calendar_today(&hermes_home, profile.as_deref()).await
+    let events = feed_sources::list_calendar_today(&hermes_home, profile.as_deref())
+        .await
         .map_err(|e| {
             eprintln!("[meeting_briefing] list_calendar_today error: {}", e);
             e
         })?;
     eprintln!("[meeting_briefing] Got {} events", events.len());
-    let event = events
-        .iter()
-        .find(|e| e.uid == event_uid)
-        .ok_or_else(|| {
-            eprintln!("[meeting_briefing] Event not found: {}", event_uid);
-            format!("Meeting {} not found in calendar", event_uid)
-        })?;
-    eprintln!("[meeting_briefing] Found event: {} (uid={})", event.summary, event.uid);
+    let event = events.iter().find(|e| e.uid == event_uid).ok_or_else(|| {
+        eprintln!("[meeting_briefing] Event not found: {}", event_uid);
+        format!("Meeting {} not found in calendar", event_uid)
+    })?;
+    eprintln!(
+        "[meeting_briefing] Found event: {} (uid={})",
+        event.summary, event.uid
+    );
 
     // 2. Classify the meeting type.
     let meeting_type = meeting_briefing::classify_meeting(&event.summary, &event.organizer);
@@ -1288,12 +1338,7 @@ async fn generate_meeting_briefing_cmd(
     // 3. Gather related tasks (by title keyword match on organizer / summary)
     //    and recent chat sessions for context.
     let all_tasks = productivity::list_tasks(&hermes_home, profile.as_deref()).unwrap_or_default();
-    let keyword = event
-        .organizer
-        .split('@')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let keyword = event.organizer.split('@').next().unwrap_or("").to_string();
     let related_task_titles: Vec<String> = all_tasks
         .iter()
         .filter(|t| {
@@ -1303,15 +1348,17 @@ async fn generate_meeting_briefing_cmd(
         })
         .map(|t| t.title.clone())
         .collect();
-    eprintln!("[meeting_briefing] Related tasks: {:?}", related_task_titles);
+    eprintln!(
+        "[meeting_briefing] Related tasks: {:?}",
+        related_task_titles
+    );
 
-    let related_session_previews: Vec<String> = sessions::recent_session_previews(
-        &hermes_home,
-        profile.as_deref(),
-        20,
-    )
-    .unwrap_or_default();
-    eprintln!("[meeting_briefing] Related sessions: {}", related_session_previews.len());
+    let related_session_previews: Vec<String> =
+        sessions::recent_session_previews(&hermes_home, profile.as_deref(), 20).unwrap_or_default();
+    eprintln!(
+        "[meeting_briefing] Related sessions: {}",
+        related_session_previews.len()
+    );
 
     // 4. Build the prompt and send via WS (same path as smart briefing).
     let prompt = meeting_briefing::meeting_briefing_prompt(
@@ -1325,30 +1372,35 @@ async fn generate_meeting_briefing_cmd(
     );
     eprintln!("[meeting_briefing] Prompt length: {} chars", prompt.len());
 
-    let port = gateway::get_gateway_port(&state.gateway, None).await
+    let port = gateway::get_gateway_port(&state.gateway, None)
+        .await
         .ok_or("Gateway not available for meeting briefing")?;
     eprintln!("[meeting_briefing] Gateway port: {}", port);
-    let token = gateway::get_gateway_session_token(&state.gateway, None).await
+    let token = gateway::get_gateway_session_token(&state.gateway, None)
+        .await
         .ok_or("No session token for meeting briefing")?;
     eprintln!("[meeting_briefing] Got session token");
     let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
     eprintln!("[meeting_briefing] WS URL: {}", ws_url);
 
-    let (real_session_id, briefing_text) =
-        crate::ws_transport::send_message_via_ws_buffered(
-            &ws_url,
-            None,
-            &prompt,
-            &app_handle,
-            "meeting_briefing",
-        )
-        .await
-        .map_err(|e| {
-            eprintln!("[meeting_briefing] WS error: {}", e);
-            e.to_string()
-        })?;
+    let (real_session_id, briefing_text) = crate::ws_transport::send_message_via_ws_buffered(
+        &ws_url,
+        None,
+        &prompt,
+        &app_handle,
+        "meeting_briefing",
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("[meeting_briefing] WS error: {}", e);
+        e.to_string()
+    })?;
 
-    eprintln!("[meeting_briefing] SUCCESS: session_id={}, text_len={}", real_session_id, briefing_text.len());
+    eprintln!(
+        "[meeting_briefing] SUCCESS: session_id={}, text_len={}",
+        real_session_id,
+        briefing_text.len()
+    );
 
     Ok(meeting_briefing::MeetingBriefingResult {
         event_uid: event.uid.clone(),
@@ -1381,7 +1433,13 @@ async fn jira_transition_cmd(
     profile: Option<String>,
 ) -> Result<(), String> {
     let hermes_home = home_or_resolve(&state)?;
-    feed_sources::jira_transition(&hermes_home, profile.as_deref(), &issue_key, &transition_name).await
+    feed_sources::jira_transition(
+        &hermes_home,
+        profile.as_deref(),
+        &issue_key,
+        &transition_name,
+    )
+    .await
 }
 
 /// ADR-008 Phase 2: actionable Jira card — add a comment.
@@ -1406,16 +1464,18 @@ async fn get_cached_briefing_cmd(
     profile: Option<String>,
 ) -> Result<briefing::CachedBriefing, String> {
     let hermes_home = home_or_resolve(&state)?;
-    Ok(briefing::get_cached_briefing(&hermes_home, profile.as_deref(), max_age_secs.unwrap_or(1800.0)))
+    Ok(briefing::get_cached_briefing(
+        &hermes_home,
+        profile.as_deref(),
+        max_age_secs.unwrap_or(1800.0),
+    ))
 }
 
 // ── Profile Commands ──────────────────────────────────────────────────────
 
 /// List profiles
 #[tauri::command]
-async fn list_profiles_cmd(
-    state: State<'_, AppState>,
-) -> Result<Vec<ProfileInfo>, String> {
+async fn list_profiles_cmd(state: State<'_, AppState>) -> Result<Vec<ProfileInfo>, String> {
     let hermes_home = state.hermes_home()?;
 
     let active = profiles::get_active_profile(&hermes_home);
@@ -1436,10 +1496,7 @@ async fn create_profile_cmd(
 
 /// Delete profile
 #[tauri::command]
-async fn delete_profile_cmd(
-    state: State<'_, AppState>,
-    name: String,
-) -> Result<(), String> {
+async fn delete_profile_cmd(state: State<'_, AppState>, name: String) -> Result<(), String> {
     let hermes_home = state.hermes_home()?;
 
     profiles::delete_profile(&hermes_home, &name)
@@ -1447,10 +1504,7 @@ async fn delete_profile_cmd(
 
 /// Set active profile
 #[tauri::command]
-async fn set_active_profile_cmd(
-    state: State<'_, AppState>,
-    name: String,
-) -> Result<(), String> {
+async fn set_active_profile_cmd(state: State<'_, AppState>, name: String) -> Result<(), String> {
     let hermes_home = state.hermes_home()?;
 
     profiles::set_active_profile(&hermes_home, &name)
@@ -1460,9 +1514,7 @@ async fn set_active_profile_cmd(
 
 /// List models
 #[tauri::command]
-async fn list_models_cmd(
-    state: State<'_, AppState>,
-) -> Result<Vec<SavedModel>, String> {
+async fn list_models_cmd(state: State<'_, AppState>) -> Result<Vec<SavedModel>, String> {
     let hermes_home = state.hermes_home()?;
 
     Ok(models::list_models(&hermes_home))
@@ -1484,10 +1536,7 @@ async fn add_model_cmd(
 
 /// Remove model
 #[tauri::command]
-async fn remove_model_cmd(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<bool, String> {
+async fn remove_model_cmd(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     let hermes_home = state.hermes_home()?;
 
     models::remove_model(&hermes_home, &id)
@@ -1580,15 +1629,17 @@ async fn set_model_config_cmd(
 /// writes it as the default. This is the command the frontend model selector
 /// calls when the user picks a model from the dropdown.
 #[tauri::command]
-async fn set_default_model_cmd(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+async fn set_default_model_cmd(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let hermes_home = state.hermes_home()?;
     // Parse "provider/model" — the id format used by SavedModel and ChatInput.
     let (provider, model) = match id.split_once('/') {
         Some((p, m)) if !p.is_empty() && !m.is_empty() => (p.to_string(), m.to_string()),
-        _ => return Err(format!("invalid model id '{}': expected 'provider/model'", id)),
+        _ => {
+            return Err(format!(
+                "invalid model id '{}': expected 'provider/model'",
+                id
+            ))
+        }
     };
     // Look up base_url from saved models; fall back to current config.
     let saved = models::list_models(&hermes_home);
@@ -1644,7 +1695,10 @@ async fn list_installed_skills_cmd(
 ) -> Result<Vec<skills::InstalledSkill>, String> {
     let hermes_home = state.hermes_home()?;
 
-    Ok(skills::list_installed_skills(&hermes_home, profile.as_deref()))
+    Ok(skills::list_installed_skills(
+        &hermes_home,
+        profile.as_deref(),
+    ))
 }
 
 /// Get skill content
@@ -1747,23 +1801,20 @@ async fn start_ssh_tunnel_cmd(
     state: State<'_, AppState>,
     ssh_config: SshConfig,
 ) -> Result<(), String> {
-    ssh::start_ssh_tunnel(&state.ssh, &ssh_config)
+    let hermes_home = state.hermes_home()?;
+    ssh::start_ssh_tunnel(&state.ssh, ssh_config, hermes_home).map(|_| ())
 }
 
 /// Stop SSH tunnel
 #[tauri::command]
-async fn stop_ssh_tunnel_cmd(
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    ssh::stop_ssh_tunnel(&state.ssh);
+async fn stop_ssh_tunnel_cmd(state: State<'_, AppState>) -> Result<(), String> {
+    ssh::stop_ssh_tunnel(&state.ssh)?;
     Ok(())
 }
 
 /// Check SSH tunnel status
 #[tauri::command]
-async fn ssh_tunnel_status_cmd(
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
+async fn ssh_tunnel_status_cmd(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(ssh::is_tunnel_active(&state.ssh))
 }
 
@@ -1783,13 +1834,21 @@ async fn send_telegram_message_cmd(
     // Iterate once (the previous code iterated twice and used an OR-predicate
     // that could match the wrong source if chat_id collided across bots).
     let sources = sources::SourcesConfig::load(&hermes_home, None);
-    let matched = sources.telegram.iter()
+    let matched = sources
+        .telegram
+        .iter()
         .find(|t| t.bot_token == bot_token)
         .or_else(|| sources.telegram.iter().find(|t| t.chat_id == chat_id));
     let (use_proxy, proxy_url) = match matched {
         Some(t) if !t.proxy_url.is_empty() => (t.use_proxy, t.proxy_url.clone()),
-        Some(_) => (model_config.proxy.use_proxy, model_config.proxy.resolve_url()),
-        None => (model_config.proxy.use_proxy, model_config.proxy.resolve_url()),
+        Some(_) => (
+            model_config.proxy.use_proxy,
+            model_config.proxy.resolve_url(),
+        ),
+        None => (
+            model_config.proxy.use_proxy,
+            model_config.proxy.resolve_url(),
+        ),
     };
     Ok(telegram::send_message(&bot_token, &chat_id, &text, use_proxy, &proxy_url).await)
 }
@@ -1837,7 +1896,10 @@ async fn list_sources_cmd(
     profile: Option<String>,
 ) -> Result<sources::SourcesConfig, String> {
     let hermes_home = state.hermes_home()?;
-    Ok(sources::SourcesConfig::load(&hermes_home, profile.as_deref()))
+    Ok(sources::SourcesConfig::load(
+        &hermes_home,
+        profile.as_deref(),
+    ))
 }
 
 /// Add Telegram source
@@ -2201,16 +2263,61 @@ async fn list_media_files_cmd(dir: String) -> Result<Vec<media::MediaInfo>, Stri
     Ok(media::list_media_files(&dir))
 }
 
+use tauri::ipc::Request;
+
 /// Save a media blob (voice clip or attachment) to the instance media cache.
-/// Accepts raw bytes + extension, returns the saved file path.
+/// Accepts raw binary body + extension via headers, returns the saved file path.
+/// Uses Tauri v2 binary IPC: pass Uint8Array directly as payload, ext in header.
 #[tauri::command]
 async fn save_media_blob_cmd(
     state: State<'_, AppState>,
-    data: Vec<u8>,
-    ext: String,
+    request: Request<'_>,
 ) -> Result<String, String> {
     let hermes_home = state.hermes_home()?;
-    let path = media::save_media_blob(&hermes_home, &data, &ext)?;
+
+    // Extract raw binary body
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b,
+        _ => return Err("Expected binary body".to_string()),
+    };
+
+    // Get extension from header
+    let ext = request
+        .headers()
+        .get("x-file-extension")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("bin");
+
+    let path = media::save_media_blob(&hermes_home, bytes, ext)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Save a media file to the instance media cache by copying from a local path.
+/// This is more efficient for large files as it avoids passing bytes through JSON IPC.
+#[tauri::command]
+async fn save_media_file_cmd(
+    state: State<'_, AppState>,
+    source_path: String,
+    ext: Option<String>,
+) -> Result<String, String> {
+    let hermes_home = state.hermes_home()?;
+    let source = std::path::Path::new(&source_path);
+    if !source.exists() || !source.is_file() {
+        return Err(format!("Source file not found: {}", source_path));
+    }
+
+    // Determine extension from source file if not provided
+    let ext = ext.unwrap_or_else(|| {
+        source
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin")
+            .to_string()
+    });
+
+    // Read and save the file
+    let bytes = std::fs::read(source).map_err(|e| format!("Read file error: {}", e))?;
+    let path = media::save_media_blob(&hermes_home, &bytes, &ext)?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -2236,7 +2343,8 @@ async fn discover_models_cmd(
         match auth::get_credential_pool(&hermes_home).await {
             Ok(pool) => {
                 // Look up the provider (try both the given id and common aliases).
-                let entry = pool.get(&provider)
+                let entry = pool
+                    .get(&provider)
                     .or_else(|| pool.get(&provider.to_lowercase()))
                     .and_then(|entries| entries.first());
                 match entry {
@@ -2259,7 +2367,8 @@ async fn discover_models_cmd(
         resolved_api_key.as_deref(),
         use_proxy,
         Some(&hermes_home),
-    ).await)
+    )
+    .await)
 }
 
 /// Check if provider supports model discovery
@@ -2270,7 +2379,9 @@ async fn is_discoverable_cmd(provider: String) -> Result<bool, String> {
 
 /// Get OAuth provider models
 #[tauri::command]
-async fn get_oauth_models_cmd(provider: String) -> Result<Vec<model_discovery::DiscoveredModel>, String> {
+async fn get_oauth_models_cmd(
+    provider: String,
+) -> Result<Vec<model_discovery::DiscoveredModel>, String> {
     Ok(model_discovery::get_oauth_models(&provider))
 }
 
@@ -2299,7 +2410,10 @@ async fn get_all_provider_urls_cmd() -> Result<std::collections::HashMap<String,
 /// List all known provider IDs (single source of truth for frontend dropdowns).
 #[tauri::command]
 async fn list_providers_cmd() -> Result<Vec<String>, String> {
-    Ok(provider_registry::all_provider_ids().into_iter().map(|s| s.to_string()).collect())
+    Ok(provider_registry::all_provider_ids()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect())
 }
 
 // ── Registry Commands ─────────────────────────────────────────────────────
@@ -2353,7 +2467,13 @@ async fn create_kanban_board_cmd(
     profile: Option<String>,
 ) -> Result<kanban::KanbanBoard, String> {
     let hermes_home = state.hermes_home()?;
-    kanban::create_board(&hermes_home, profile.as_deref(), &slug, &name, description.as_deref())
+    kanban::create_board(
+        &hermes_home,
+        profile.as_deref(),
+        &slug,
+        &name,
+        description.as_deref(),
+    )
 }
 
 /// Delete a kanban board
@@ -2389,7 +2509,14 @@ async fn create_kanban_task_cmd(
     profile: Option<String>,
 ) -> Result<kanban::KanbanTask, String> {
     let hermes_home = state.hermes_home()?;
-    kanban::create_task(&hermes_home, profile.as_deref(), &board_slug, &title, body.as_deref(), &status)
+    kanban::create_task(
+        &hermes_home,
+        profile.as_deref(),
+        &board_slug,
+        &title,
+        body.as_deref(),
+        &status,
+    )
 }
 
 /// Update a kanban task
@@ -2436,7 +2563,10 @@ async fn config_health_check_cmd(
     profile: Option<String>,
 ) -> Result<config::ConfigHealthReport, String> {
     let hermes_home = state.hermes_home()?;
-    Ok(config::run_config_health_check(&hermes_home, profile.as_deref()))
+    Ok(config::run_config_health_check(
+        &hermes_home,
+        profile.as_deref(),
+    ))
 }
 
 /// Auto-fix a config health issue
@@ -2459,7 +2589,10 @@ async fn validate_chat_readiness_cmd(
     profile: Option<String>,
 ) -> Result<validation::ChatReadiness, String> {
     let hermes_home = state.hermes_home()?;
-    Ok(validation::validate_chat_readiness(&hermes_home, profile.as_deref()))
+    Ok(validation::validate_chat_readiness(
+        &hermes_home,
+        profile.as_deref(),
+    ))
 }
 
 // ── Cron Jobs Commands ───────────────────────────────────────────────────
@@ -2472,7 +2605,11 @@ async fn list_cron_jobs_cmd(
     profile: Option<String>,
 ) -> Result<Vec<cronjobs::CronJob>, String> {
     let hermes_home = state.hermes_home()?;
-    Ok(cronjobs::list_cron_jobs(&hermes_home, profile.as_deref(), include_disabled.unwrap_or(true)))
+    Ok(cronjobs::list_cron_jobs(
+        &hermes_home,
+        profile.as_deref(),
+        include_disabled.unwrap_or(true),
+    ))
 }
 
 /// Create cron job
@@ -2486,7 +2623,14 @@ async fn create_cron_job_cmd(
     profile: Option<String>,
 ) -> Result<cronjobs::CronJob, String> {
     let hermes_home = state.hermes_home()?;
-    cronjobs::create_cron_job(&hermes_home, profile.as_deref(), &schedule, prompt.as_deref(), name.as_deref(), deliver.as_deref())
+    cronjobs::create_cron_job(
+        &hermes_home,
+        profile.as_deref(),
+        &schedule,
+        prompt.as_deref(),
+        name.as_deref(),
+        deliver.as_deref(),
+    )
 }
 
 /// Remove cron job
@@ -2545,8 +2689,8 @@ async fn auth_login_cmd(
 ) -> Result<auth::OAuthLoginResult, String> {
     let hermes_home = state.hermes_home()?;
 
-    let (hermes_python, _hermes_repo) = gateway::find_hermes_python()
-        .map_err(|e| format!("Hermes Python not found: {}", e))?;
+    let (hermes_python, _hermes_repo) =
+        gateway::find_hermes_python().map_err(|e| format!("Hermes Python not found: {}", e))?;
 
     auth::run_oauth_login(
         app_handle,
@@ -2561,9 +2705,7 @@ async fn auth_login_cmd(
 
 /// Cancel in-flight OAuth login
 #[tauri::command]
-async fn auth_cancel_cmd(
-    state: tauri::State<'_, AppState>,
-) -> Result<bool, String> {
+async fn auth_cancel_cmd(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     auth::cancel_oauth_login(&state.auth).await
 }
 
@@ -2579,19 +2721,13 @@ async fn store_credential_cmd(
 
 /// Get credential from OS keyring
 #[tauri::command]
-async fn get_credential_cmd(
-    service: String,
-    account: String,
-) -> Result<Option<String>, String> {
+async fn get_credential_cmd(service: String, account: String) -> Result<Option<String>, String> {
     auth::get_credential(service, account).await
 }
 
 /// Delete credential from OS keyring
 #[tauri::command]
-async fn delete_credential_cmd(
-    service: String,
-    account: String,
-) -> Result<(), String> {
+async fn delete_credential_cmd(service: String, account: String) -> Result<(), String> {
     auth::delete_credential(service, account).await
 }
 
@@ -2657,7 +2793,17 @@ async fn upsert_external_ref_cmd(
     profile: Option<String>,
 ) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::upsert_external_ref(&hh, profile.as_deref(), &source, &external_id, external_url.as_deref(), title.as_deref(), task_id, project_id, goal_id)
+    productivity::upsert_external_ref(
+        &hh,
+        profile.as_deref(),
+        &source,
+        &external_id,
+        external_url.as_deref(),
+        title.as_deref(),
+        task_id,
+        project_id,
+        goal_id,
+    )
 }
 
 #[tauri::command]
@@ -2686,7 +2832,19 @@ async fn create_task_from_external_cmd(
     profile: Option<String>,
 ) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_task_from_external(&hh, profile.as_deref(), &source, &external_id, external_url.as_deref(), &title, priority, due_date.as_deref(), project_id, goal_id, &assignee)
+    productivity::create_task_from_external(
+        &hh,
+        profile.as_deref(),
+        &source,
+        &external_id,
+        external_url.as_deref(),
+        &title,
+        priority,
+        due_date.as_deref(),
+        project_id,
+        goal_id,
+        &assignee,
+    )
 }
 
 // ── Session links (ADR-009: chat sessions → tasks/projects/goals) ────────────
@@ -2703,7 +2861,16 @@ async fn link_session_cmd(
     profile: Option<String>,
 ) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::link_session(&hh, profile.as_deref(), &session_id, task_id, project_id, goal_id, linked_by.as_deref(), note.as_deref())
+    productivity::link_session(
+        &hh,
+        profile.as_deref(),
+        &session_id,
+        task_id,
+        project_id,
+        goal_id,
+        linked_by.as_deref(),
+        note.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -2737,131 +2904,320 @@ async fn get_links_for_task_cmd(
 }
 
 #[tauri::command]
-async fn list_tasks_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Task>, String> {
+async fn list_tasks_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<productivity::Task>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_tasks(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_task_cmd(state: State<'_, AppState>, title: String, priority: Option<i64>, due_date: Option<String>, project_id: Option<i64>, assignee: Option<String>, section_id: Option<i64>, profile: Option<String>) -> Result<i64, String> {
+async fn create_task_cmd(
+    state: State<'_, AppState>,
+    title: String,
+    priority: Option<i64>,
+    due_date: Option<String>,
+    project_id: Option<i64>,
+    assignee: Option<String>,
+    section_id: Option<i64>,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_task(&hh, profile.as_deref(), &title, priority.unwrap_or(3), due_date.as_deref(), project_id, assignee.as_deref().unwrap_or(""), section_id)
+    productivity::create_task(
+        &hh,
+        profile.as_deref(),
+        &title,
+        priority.unwrap_or(3),
+        due_date.as_deref(),
+        project_id,
+        assignee.as_deref().unwrap_or(""),
+        section_id,
+    )
 }
 #[tauri::command]
-async fn update_task_status_cmd(state: State<'_, AppState>, id: i64, status: String, profile: Option<String>) -> Result<(), String> {
+async fn update_task_status_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    status: String,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::update_task_status(&hh, profile.as_deref(), id, &status)
 }
 #[tauri::command]
-async fn delete_task_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+async fn delete_task_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_task(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn update_task_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, priority: Option<i64>, due_date: Option<String>, project_id: Option<Option<i64>>, assignee: Option<String>, labels: Option<String>, section_id: Option<i64>, profile: Option<String>) -> Result<(), String> {
+async fn update_task_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    title: Option<String>,
+    priority: Option<i64>,
+    due_date: Option<String>,
+    project_id: Option<Option<i64>>,
+    assignee: Option<String>,
+    labels: Option<String>,
+    section_id: Option<i64>,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
-    productivity::update_task(&hh, profile.as_deref(), id, title.as_deref(), priority, due_date.as_deref(), project_id, assignee.as_deref(), labels.as_deref(), section_id)
+    productivity::update_task(
+        &hh,
+        profile.as_deref(),
+        id,
+        title.as_deref(),
+        priority,
+        due_date.as_deref(),
+        project_id,
+        assignee.as_deref(),
+        labels.as_deref(),
+        section_id,
+    )
 }
 #[tauri::command]
-async fn list_goals_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Goal>, String> {
+async fn list_goals_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<productivity::Goal>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_goals(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_goal_cmd(state: State<'_, AppState>, title: String, target_date: Option<String>, profile: Option<String>) -> Result<i64, String> {
+async fn create_goal_cmd(
+    state: State<'_, AppState>,
+    title: String,
+    target_date: Option<String>,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
     productivity::create_goal(&hh, profile.as_deref(), &title, target_date.as_deref())
 }
 #[tauri::command]
-async fn delete_goal_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+async fn delete_goal_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_goal(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn update_goal_cmd(state: State<'_, AppState>, id: i64, title: Option<String>, target_date: Option<String>, progress: Option<i64>, profile: Option<String>) -> Result<(), String> {
+async fn update_goal_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    title: Option<String>,
+    target_date: Option<String>,
+    progress: Option<i64>,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
-    productivity::update_goal(&hh, profile.as_deref(), id, title.as_deref(), target_date.as_deref(), progress)
+    productivity::update_goal(
+        &hh,
+        profile.as_deref(),
+        id,
+        title.as_deref(),
+        target_date.as_deref(),
+        progress,
+    )
 }
 #[tauri::command]
-async fn list_projects_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Project>, String> {
+async fn list_projects_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<productivity::Project>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_projects(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_project_cmd(state: State<'_, AppState>, name: String, color: Option<String>, goal_id: Option<i64>, profile: Option<String>) -> Result<i64, String> {
+async fn create_project_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    color: Option<String>,
+    goal_id: Option<i64>,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_project(&hh, profile.as_deref(), &name, color.as_deref().unwrap_or("#888"), goal_id)
+    productivity::create_project(
+        &hh,
+        profile.as_deref(),
+        &name,
+        color.as_deref().unwrap_or("#888"),
+        goal_id,
+    )
 }
 #[tauri::command]
-async fn delete_project_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+async fn delete_project_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_project(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn update_project_cmd(state: State<'_, AppState>, id: i64, name: Option<String>, color: Option<String>, goal_id: Option<Option<i64>>, profile: Option<String>) -> Result<(), String> {
+async fn update_project_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    name: Option<String>,
+    color: Option<String>,
+    goal_id: Option<Option<i64>>,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
-    productivity::update_project(&hh, profile.as_deref(), id, name.as_deref(), color.as_deref(), goal_id)
+    productivity::update_project(
+        &hh,
+        profile.as_deref(),
+        id,
+        name.as_deref(),
+        color.as_deref(),
+        goal_id,
+    )
 }
 #[tauri::command]
-async fn list_protocols_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::Protocol>, String> {
+async fn list_protocols_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<productivity::Protocol>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_protocols(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_protocol_cmd(state: State<'_, AppState>, title: String, participants: String, meeting_date: Option<String>, decisions: String, risks: String, profile: Option<String>) -> Result<i64, String> {
+async fn create_protocol_cmd(
+    state: State<'_, AppState>,
+    title: String,
+    participants: String,
+    meeting_date: Option<String>,
+    decisions: String,
+    risks: String,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_protocol(&hh, profile.as_deref(), &title, &participants, meeting_date.as_deref(), &decisions, &risks)
+    productivity::create_protocol(
+        &hh,
+        profile.as_deref(),
+        &title,
+        &participants,
+        meeting_date.as_deref(),
+        &decisions,
+        &risks,
+    )
 }
 #[tauri::command]
-async fn delete_protocol_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+async fn delete_protocol_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_protocol(&hh, profile.as_deref(), id)
 }
 #[tauri::command]
-async fn list_self_checks_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::SelfCheck>, String> {
+async fn list_self_checks_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<productivity::SelfCheck>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_self_checks(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn add_self_check_cmd(state: State<'_, AppState>, energy: i64, joy: i64, mood: String, notes: String, profile: Option<String>) -> Result<i64, String> {
+async fn add_self_check_cmd(
+    state: State<'_, AppState>,
+    energy: i64,
+    joy: i64,
+    mood: String,
+    notes: String,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
     productivity::add_self_check(&hh, profile.as_deref(), energy, joy, &mood, &notes)
 }
 #[tauri::command]
-async fn dash_stats_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<productivity::DashStats, String> {
+async fn dash_stats_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<productivity::DashStats, String> {
     let hh = home_or_resolve(&state)?;
     productivity::dash_stats(&hh, profile.as_deref())
 }
 
 // ── Sections ──
 #[tauri::command]
-async fn list_sections_cmd(state: State<'_, AppState>, project_id: i64, profile: Option<String>) -> Result<Vec<productivity::Section>, String> {
+async fn list_sections_cmd(
+    state: State<'_, AppState>,
+    project_id: i64,
+    profile: Option<String>,
+) -> Result<Vec<productivity::Section>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_sections(&hh, profile.as_deref(), project_id)
 }
 #[tauri::command]
-async fn create_section_cmd(state: State<'_, AppState>, project_id: i64, name: String, profile: Option<String>) -> Result<i64, String> {
+async fn create_section_cmd(
+    state: State<'_, AppState>,
+    project_id: i64,
+    name: String,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
     productivity::create_section(&hh, profile.as_deref(), project_id, &name)
 }
 #[tauri::command]
-async fn delete_section_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+async fn delete_section_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_section(&hh, profile.as_deref(), id)
 }
 
 // ── Connection Profiles ──
 #[tauri::command]
-async fn list_conn_profiles_cmd(state: State<'_, AppState>, profile: Option<String>) -> Result<Vec<productivity::ConnectionProfile>, String> {
+async fn list_conn_profiles_cmd(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<Vec<productivity::ConnectionProfile>, String> {
     let hh = home_or_resolve(&state)?;
     productivity::list_profiles(&hh, profile.as_deref())
 }
 #[tauri::command]
-async fn create_conn_profile_cmd(state: State<'_, AppState>, name: String, mode: String, host: String, port: Option<i64>, username: String, key_path: String, api_url: String, api_key: String, profile: Option<String>) -> Result<i64, String> {
+async fn create_conn_profile_cmd(
+    state: State<'_, AppState>,
+    name: String,
+    mode: String,
+    host: String,
+    port: Option<i64>,
+    username: String,
+    key_path: String,
+    api_url: String,
+    api_key: String,
+    profile: Option<String>,
+) -> Result<i64, String> {
     let hh = home_or_resolve(&state)?;
-    productivity::create_profile(&hh, profile.as_deref(), &name, &mode, &host, port.unwrap_or(22), &username, &key_path, &api_url, &api_key)
+    productivity::create_profile(
+        &hh,
+        profile.as_deref(),
+        &name,
+        &mode,
+        &host,
+        port.unwrap_or(22),
+        &username,
+        &key_path,
+        &api_url,
+        &api_key,
+    )
 }
 #[tauri::command]
-async fn delete_conn_profile_cmd(state: State<'_, AppState>, id: i64, profile: Option<String>) -> Result<(), String> {
+async fn delete_conn_profile_cmd(
+    state: State<'_, AppState>,
+    id: i64,
+    profile: Option<String>,
+) -> Result<(), String> {
     let hh = home_or_resolve(&state)?;
     productivity::delete_profile(&hh, profile.as_deref(), id)
 }
@@ -2875,8 +3231,9 @@ pub fn run() {
     // stderr; safe to call before the Tauri runtime starts.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("steersman_desktop_lib=info,warn")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("steersman_desktop_lib=info,warn")
+            }),
         )
         .with_writer(std::io::stderr)
         .try_init();
@@ -2950,7 +3307,11 @@ pub fn run() {
                         _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
-                        if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            ..
+                        } = event
+                        {
                             let app = tray.app_handle();
                             if let Some(window) = app.get_webview_window("main") {
                                 if window.is_visible().unwrap_or(false) {
@@ -3101,6 +3462,7 @@ pub fn run() {
             read_media_data_url_cmd,
             list_media_files_cmd,
             save_media_blob_cmd,
+            save_media_file_cmd,
             // Model Discovery
             discover_models_cmd,
             is_discoverable_cmd,
@@ -3250,7 +3612,9 @@ mod tests {
         // Cleanup: remove the test entry so we don't leave junk in auth.json.
         let remaining: Vec<auth::CredentialPoolEntry> = groq
             .iter()
-            .filter(|e| e.label.as_deref() != Some("GROQ_API_KEY") || e.source.as_deref() == Some("manual"))
+            .filter(|e| {
+                e.label.as_deref() != Some("GROQ_API_KEY") || e.source.as_deref() == Some("manual")
+            })
             .cloned()
             .collect();
         // Keep only non-test entries.
@@ -3297,7 +3661,11 @@ mod tests {
 
         let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
         // steersman entry must be present.
-        assert!(after.contains("steersman:"), "steersman entry missing: {}", after);
+        assert!(
+            after.contains("steersman:"),
+            "steersman entry missing: {}",
+            after
+        );
         // Backslashes must be escaped to forward slashes (the bug that
         // corrupted configs).
         assert!(
@@ -3306,24 +3674,34 @@ mod tests {
             after
         );
         // The existing jira entry must survive.
-        assert!(after.contains("jira.exe"), "existing server dropped: {}", after);
+        assert!(
+            after.contains("jira.exe"),
+            "existing server dropped: {}",
+            after
+        );
         // The model block must survive (line-based, not YAML rewrite).
-        assert!(after.contains("default: m1"), "model block dropped: {}", after);
+        assert!(
+            after.contains("default: m1"),
+            "model block dropped: {}",
+            after
+        );
     }
 
     #[test]
     fn register_steersman_mcp_is_idempotent() {
         let dir = tempdir();
         write_fixture(&dir, "mcp_servers:\n  steersman:\n    command: x\n");
-        let inserted = register_steersman_mcp_linebased(
-            &dir.join("config.yaml"),
-            "C:\\path\\mcp.exe",
-        )
-        .unwrap();
+        let inserted =
+            register_steersman_mcp_linebased(&dir.join("config.yaml"), "C:\\path\\mcp.exe")
+                .unwrap();
         assert!(!inserted, "should NOT insert when steersman already exists");
         // File unchanged — no duplicate.
         let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
-        assert_eq!(after.matches("steersman:").count(), 1, "duplicate steersman entry");
+        assert_eq!(
+            after.matches("steersman:").count(),
+            1,
+            "duplicate steersman entry"
+        );
     }
 
     #[test]
@@ -3337,7 +3715,10 @@ mod tests {
         .unwrap();
         assert!(inserted);
         let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
-        assert!(after.contains("mcp_servers:"), "mcp_servers block not created");
+        assert!(
+            after.contains("mcp_servers:"),
+            "mcp_servers block not created"
+        );
         assert!(after.contains("steersman:"), "steersman entry missing");
     }
 
@@ -3349,15 +3730,17 @@ mod tests {
             &dir,
             "model:\n  default: \"m1\"\nmcp_servers:\n  email:\n    env:\n      X: \"a\\b\"\n",
         );
-        let inserted = register_steersman_mcp_linebased(
-            &dir.join("config.yaml"),
-            "C:\\mcp\\server.exe",
-        )
-        .unwrap();
+        let inserted =
+            register_steersman_mcp_linebased(&dir.join("config.yaml"), "C:\\mcp\\server.exe")
+                .unwrap();
         assert!(inserted);
         let after = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
         // The tricky email env block must survive verbatim.
-        assert!(after.contains("\"a\\b\""), "email env quoting corrupted: {}", after);
+        assert!(
+            after.contains("\"a\\b\""),
+            "email env quoting corrupted: {}",
+            after
+        );
         assert!(after.contains("steersman:"), "steersman missing");
     }
 }

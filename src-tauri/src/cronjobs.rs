@@ -2,9 +2,9 @@
 // Cron job management: list, create, remove, pause, resume, trigger
 // Ported from fathah/hermes-desktop src/main/cronjobs.rs
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -112,8 +112,7 @@ pub fn create_cron_job(
     let path = cron_config_path(hermes_home, profile);
 
     let mut config = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Read error: {}", e))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| format!("Read error: {}", e))?;
         serde_json::from_str(&content).unwrap_or(CronConfigFile {
             jobs: HashMap::new(),
         })
@@ -143,8 +142,8 @@ pub fn create_cron_job(
         std::fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {}", e))?;
     }
 
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("Serialization error: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(CronJob {
@@ -178,15 +177,14 @@ pub fn remove_cron_job(
         return Err("Cron config not found".to_string());
     }
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Read error: {}", e))?;
-    let mut config: CronConfigFile = serde_json::from_str(&content)
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("Read error: {}", e))?;
+    let mut config: CronConfigFile =
+        serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))?;
 
     config.jobs.remove(job_id);
 
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("Serialization error: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())
@@ -244,10 +242,9 @@ where
         return Err("Cron config not found".to_string());
     }
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Read error: {}", e))?;
-    let mut config: CronConfigFile = serde_json::from_str(&content)
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("Read error: {}", e))?;
+    let mut config: CronConfigFile =
+        serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))?;
 
     if let Some(job) = config.jobs.get_mut(job_id) {
         updater(job);
@@ -255,8 +252,8 @@ where
         return Err(format!("Job '{}' not found", job_id));
     }
 
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("Serialization error: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())

@@ -128,7 +128,9 @@ pub fn recent_session_previews(
         .query_map(params![limit], |row| {
             let title: Option<String> = row.get(0)?;
             let preview: String = row.get(1)?;
-            let t = title.filter(|s| !s.is_empty()).unwrap_or_else(|| "(без темы)".to_string());
+            let t = title
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(без темы)".to_string());
             Ok(format!("{} — {}", t, preview))
         })?
         .collect::<SqliteResult<Vec<_>>>()?;
@@ -267,7 +269,10 @@ pub fn delete_session(
     }
 
     let conn = Connection::open(&db_path)?;
-    conn.execute("DELETE FROM messages WHERE session_id = ?1", params![session_id])?;
+    conn.execute(
+        "DELETE FROM messages WHERE session_id = ?1",
+        params![session_id],
+    )?;
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
 
     Ok(())
@@ -308,10 +313,7 @@ pub struct SessionStats {
     pub total_messages: i64,
 }
 
-pub fn get_session_stats(
-    hermes_home: &Path,
-    profile: Option<&str>,
-) -> SqliteResult<SessionStats> {
+pub fn get_session_stats(hermes_home: &Path, profile: Option<&str>) -> SqliteResult<SessionStats> {
     let db_path = state_db_path(hermes_home, profile);
 
     if !db_path.exists() {

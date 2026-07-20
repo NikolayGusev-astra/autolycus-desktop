@@ -121,8 +121,7 @@ pub fn list_boards(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Kanb
         return Ok(Vec::new());
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     let mut stmt = conn
         .prepare("SELECT slug, name, description, icon, color, is_current, archived FROM boards ORDER BY name")
@@ -145,9 +144,11 @@ pub fn list_boards(hermes_home: &Path, profile: Option<&str>) -> Result<Vec<Kanb
             let mut count_stmt = conn
                 .prepare("SELECT status, COUNT(*) FROM tasks WHERE board_slug = ?1 GROUP BY status")
                 .unwrap();
-            let count_rows = count_stmt.query_map([&slug], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
-            }).unwrap();
+            let count_rows = count_stmt
+                .query_map([&slug], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
+                })
+                .unwrap();
             for c in count_rows {
                 if let Ok((status, count)) = c {
                     counts.insert(status, count);
@@ -184,8 +185,7 @@ pub fn create_board(
     let db_path = kanban_db_path(hermes_home, profile);
     init_kanban_db(&db_path)?;
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     conn.execute(
         "INSERT INTO boards (slug, name, description, is_current, archived) VALUES (?1, ?2, ?3, 0, 0)",
@@ -207,18 +207,13 @@ pub fn create_board(
 }
 
 /// Delete a kanban board and all its tasks.
-pub fn delete_board(
-    hermes_home: &Path,
-    profile: Option<&str>,
-    slug: &str,
-) -> Result<bool, String> {
+pub fn delete_board(hermes_home: &Path, profile: Option<&str>, slug: &str) -> Result<bool, String> {
     let db_path = kanban_db_path(hermes_home, profile);
     if !db_path.exists() {
         return Ok(false);
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     conn.execute("DELETE FROM tasks WHERE board_slug = ?1", [slug])
         .map_err(|e| format!("DB delete error: {}", e))?;
@@ -241,8 +236,7 @@ pub fn list_tasks(
         return Err("Kanban database not found".to_string());
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     // Get board info
     let board = conn
@@ -329,8 +323,7 @@ pub fn create_task(
     let db_path = kanban_db_path(hermes_home, profile);
     init_kanban_db(&db_path)?;
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -372,8 +365,7 @@ pub fn update_task(
         return Ok(false);
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     // Build dynamic UPDATE query
     let mut set_clauses = Vec::new();
@@ -404,16 +396,11 @@ pub fn update_task(
         return Ok(false);
     }
 
-    let sql = format!(
-        "UPDATE tasks SET {} WHERE id = ?",
-        set_clauses.join(", ")
-    );
+    let sql = format!("UPDATE tasks SET {} WHERE id = ?", set_clauses.join(", "));
     params.push(task_id.to_string());
 
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params
-        .iter()
-        .map(|p| p as &dyn rusqlite::ToSql)
-        .collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
 
     let updated = conn
         .execute(&sql, &param_refs[..])
@@ -433,8 +420,7 @@ pub fn delete_task(
         return Ok(false);
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     let deleted = conn
         .execute("DELETE FROM tasks WHERE id = ?1", [task_id])
@@ -455,8 +441,7 @@ pub fn move_task(
         return Ok(false);
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     let now = chrono::Utc::now().timestamp();
     let (started_at, completed_at) = match new_status {
@@ -474,9 +459,15 @@ pub fn move_task(
     };
 
     let updated = if started_at.is_some() {
-        conn.execute(sql, rusqlite::params![new_status, started_at.unwrap(), task_id])
+        conn.execute(
+            sql,
+            rusqlite::params![new_status, started_at.unwrap(), task_id],
+        )
     } else if completed_at.is_some() {
-        conn.execute(sql, rusqlite::params![new_status, completed_at.unwrap(), task_id])
+        conn.execute(
+            sql,
+            rusqlite::params![new_status, completed_at.unwrap(), task_id],
+        )
     } else {
         conn.execute(sql, rusqlite::params![new_status, task_id])
     }
@@ -500,8 +491,7 @@ fn col_label(key: &str) -> &str {
 
 /// Initialize the kanban database schema.
 fn init_kanban_db(db_path: &Path) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("DB open error: {}", e))?;
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("DB open error: {}", e))?;
 
     conn.execute_batch(
         "

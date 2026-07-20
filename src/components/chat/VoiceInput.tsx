@@ -42,7 +42,7 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
     setError(null);
     // Ensure the window is focused so the WebView2 permission dialog (if any)
     // is visible and not behind another window.
-    try { window.focus(); } catch {}
+    try { window.focus(); } catch { /* ignore focus errors */ }
 
     // Note mode (or live without Web Speech): use MediaRecorder, which requires
     // microphone access. Explicitly request permission with a clear message on
@@ -70,9 +70,8 @@ export function VoiceInput({ onTranscribed, onRecorded }: VoiceInputProps) {
         setProcessing(true);
         try {
           const buf = new Uint8Array(await blob.arrayBuffer());
-          const path = await invoke<string>("save_media_blob_cmd", {
-            data: Array.from(buf),
-            ext: "webm",
+          const path = await invoke<string>("save_media_blob_cmd", buf, {
+            headers: { "x-file-extension": "webm" },
           });
 
           if (mode === "live" && onTranscribed) {

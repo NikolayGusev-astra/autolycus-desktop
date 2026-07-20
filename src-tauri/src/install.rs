@@ -199,7 +199,9 @@ pub async fn install_hermes_cmd(
         } else {
             Some(format!("Installer exited with status {}", status))
         },
-        hermes_home: hermes_home.as_ref().map(|p| p.to_string_lossy().to_string()),
+        hermes_home: hermes_home
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
     })
 }
 

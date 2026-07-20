@@ -102,11 +102,7 @@ pub fn ensure_media_dir(hermes_home: &Path) -> Result<(), String> {
 /// Persist a blob of media bytes (e.g. a recorded voice clip, or an uploaded
 /// attachment) into the instance's media cache dir and return its absolute
 /// path. The caller chooses the extension; we generate a unique filename.
-pub fn save_media_blob(
-    hermes_home: &Path,
-    bytes: &[u8],
-    ext: &str,
-) -> Result<PathBuf, String> {
+pub fn save_media_blob(hermes_home: &Path, bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
     ensure_media_dir(hermes_home)?;
     let dir = media_cache_dir(hermes_home);
     let name = format!(

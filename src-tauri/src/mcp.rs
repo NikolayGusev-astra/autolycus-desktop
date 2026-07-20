@@ -2,9 +2,9 @@
 // MCP servers management: list, add, remove, enable, test
 // Ported from fathah/hermes-desktop src/main/mcp-servers.rs
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -95,21 +95,39 @@ fn config_yaml_path(hermes_home: &Path, profile: Option<&str>) -> std::path::Pat
 }
 
 /// Read the `mcp_servers:` block from config.yaml as a map of name → McpServerConfig.
-pub(crate) fn read_mcp_servers_yaml(hermes_home: &Path, profile: Option<&str>) -> HashMap<String, McpServerConfig> {
+pub(crate) fn read_mcp_servers_yaml(
+    hermes_home: &Path,
+    profile: Option<&str>,
+) -> HashMap<String, McpServerConfig> {
     let json = match crate::config::read_config_yaml(hermes_home, profile) {
         Ok(v) => v,
         Err(_) => return HashMap::new(),
     };
     // read_config_yaml returns the full config; extract mcp_servers.
-    let mcp_block = json.get("mcp_servers").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+    let mcp_block = json
+        .get("mcp_servers")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
     let mut out = HashMap::new();
     if let serde_json::Value::Object(map) = mcp_block {
         for (name, val) in map {
-            let server_type = if val.get("url").is_some() { "http" } else { "stdio" };
+            let server_type = if val.get("url").is_some() {
+                "http"
+            } else {
+                "stdio"
+            };
             // Collect extra fields we don't model explicitly (timeout,
             // connect_timeout, headers, etc.) so the UI can show them and we
             // never silently drop them.
-            let known_keys = ["server_type", "url", "command", "args", "env", "auth", "enabled"];
+            let known_keys = [
+                "server_type",
+                "url",
+                "command",
+                "args",
+                "env",
+                "auth",
+                "enabled",
+            ];
             let mut raw_fields = HashMap::new();
             if let Some(obj) = val.as_object() {
                 for (k, v) in obj {
@@ -129,17 +147,28 @@ pub(crate) fn read_mcp_servers_yaml(hermes_home: &Path, profile: Option<&str>) -
                     .and_then(|v| v.as_str())
                     .unwrap_or(server_type)
                     .to_string(),
-                url: val.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                command: val.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                url: val
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                command: val
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 args: val.get("args").and_then(|v| v.as_array()).map(|a| {
-                    a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
                 }),
                 env: val.get("env").and_then(|v| v.as_object()).map(|o| {
                     o.iter()
                         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect()
                 }),
-                auth: val.get("auth").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                auth: val
+                    .get("auth")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 enabled: val.get("enabled").and_then(|v| v.as_bool()),
                 raw_fields,
             };
@@ -160,7 +189,11 @@ pub fn list_mcp_servers(hermes_home: &Path, profile: Option<&str>) -> Vec<McpSer
             server_type: server.server_type.clone(),
             transport: server.server_type.clone(),
             enabled: server.enabled.unwrap_or(true),
-            detail: server.url.clone().or_else(|| server.command.clone()).unwrap_or_default(),
+            detail: server
+                .url
+                .clone()
+                .or_else(|| server.command.clone())
+                .unwrap_or_default(),
             url: server.url,
             command: server.command,
             args: server.args.unwrap_or_default(),
@@ -196,7 +229,11 @@ pub fn add_mcp_server(
         server_type: input.server_type.clone(),
         transport: input.server_type.clone(),
         enabled: true,
-        detail: input.url.clone().or_else(|| input.command.clone()).unwrap_or_default(),
+        detail: input
+            .url
+            .clone()
+            .or_else(|| input.command.clone())
+            .unwrap_or_default(),
         url: input.url.clone(),
         command: input.command.clone(),
         args: input.args.clone().unwrap_or_default(),
@@ -257,7 +294,9 @@ fn insert_server_block_linebased(
     }
 
     // Find the `mcp_servers:` header line.
-    let mcp_idx = lines.iter().position(|l| l.trim_start() == "mcp_servers:" || l.trim_start().starts_with("mcp_servers:"));
+    let mcp_idx = lines.iter().position(|l| {
+        l.trim_start() == "mcp_servers:" || l.trim_start().starts_with("mcp_servers:")
+    });
 
     match mcp_idx {
         Some(idx) => {
@@ -303,7 +342,9 @@ pub fn remove_mcp_server(
     let lines: Vec<&str> = content.lines().collect();
 
     // Find the server block start: `  <name>:` at 2-space indent inside mcp_servers.
-    let server_idx = lines.iter().position(|l| l.trim_start() == format!("{}:", name) && l.starts_with("  ") && !l.starts_with("   "));
+    let server_idx = lines.iter().position(|l| {
+        l.trim_start() == format!("{}:", name) && l.starts_with("  ") && !l.starts_with("   ")
+    });
 
     let server_idx = match server_idx {
         Some(i) => i,
@@ -341,7 +382,12 @@ pub fn set_mcp_server_enabled(
     // Line-based: set the `enabled` field on the specific server block.
     // This preserves all other fields, comments, and unknown keys.
     let block = format!("mcp_servers.{}", name);
-    crate::config::set_yaml_block_scalars(hermes_home, profile, &block, &[("enabled", if enabled { "true" } else { "false" })])
+    crate::config::set_yaml_block_scalars(
+        hermes_home,
+        profile,
+        &block,
+        &[("enabled", if enabled { "true" } else { "false" })],
+    )
 }
 
 // ── Update MCP server env ─────────────────────────────────────────────────
@@ -384,7 +430,11 @@ fn update_server_env_linebased(
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
 
     // Phase 1: locate the `  <server_name>:` line inside mcp_servers.
-    let server_idx = lines.iter().position(|l| l.trim_start() == format!("{}:", server_name) && l.starts_with("  ") && !l.starts_with("   "));
+    let server_idx = lines.iter().position(|l| {
+        l.trim_start() == format!("{}:", server_name)
+            && l.starts_with("  ")
+            && !l.starts_with("   ")
+    });
 
     let server_idx = match server_idx {
         Some(i) => i,
@@ -440,7 +490,8 @@ fn update_server_env_linebased(
     }
 
     // Phase 4: append missing keys.
-    let missing: Vec<(&String, &String)> = env.iter().filter(|(k, _)| !set_keys.contains(*k)).collect();
+    let missing: Vec<(&String, &String)> =
+        env.iter().filter(|(k, _)| !set_keys.contains(*k)).collect();
     if !missing.is_empty() {
         if env_idx.is_none() {
             // No env: line — insert one after the server header.
@@ -536,10 +587,7 @@ pub fn install_mcp_catalog_entry(
 /// This function reads source credentials (email/jira) and writes them as
 /// `env:` blocks under the corresponding `mcp_servers` entries in config.yaml.
 /// Called automatically after source add/update/remove (alongside .env write).
-pub fn sync_mcp_env_blocks(
-    hermes_home: &Path,
-    profile: Option<&str>,
-) -> Result<(), String> {
+pub fn sync_mcp_env_blocks(hermes_home: &Path, profile: Option<&str>) -> Result<(), String> {
     let sources = crate::sources::SourcesConfig::load(hermes_home, profile);
 
     // Build env maps for email and jira MCP servers from SourcesConfig.
@@ -554,7 +602,11 @@ pub fn sync_mcp_env_blocks(
         email_env.insert("EMAIL_SMTP_PORT".to_string(), email.smtp_port.to_string());
         email_env.insert(
             "EMAIL_USE_SSL".to_string(),
-            if email.use_ssl { "true".to_string() } else { "false".to_string() },
+            if email.use_ssl {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            },
         );
         email_env.insert("EMAIL_HOST".to_string(), email.smtp_host.clone());
     }
@@ -634,7 +686,10 @@ mod tests {
             url: None,
             command: Some("mcp-email".to_string()),
             args: Some(vec![]),
-            env: Some(HashMap::from([("EMAIL_ADDRESS".to_string(), "a@b.com".to_string())])),
+            env: Some(HashMap::from([(
+                "EMAIL_ADDRESS".to_string(),
+                "a@b.com".to_string(),
+            )])),
             auth: None,
         };
         add_mcp_server(&dir, None, &input).unwrap();
@@ -664,12 +719,23 @@ mod tests {
 
         // config.yaml must now contain the mcp_servers block.
         let yaml = fs::read_to_string(dir.join("config.yaml")).unwrap();
-        assert!(yaml.contains("mcp_servers:"), "config.yaml missing mcp_servers: {}", yaml);
-        assert!(yaml.contains("jira"), "config.yaml missing server name: {}", yaml);
+        assert!(
+            yaml.contains("mcp_servers:"),
+            "config.yaml missing mcp_servers: {}",
+            yaml
+        );
+        assert!(
+            yaml.contains("jira"),
+            "config.yaml missing server name: {}",
+            yaml
+        );
 
         // servers.json must NOT be created (the legacy storage is retired).
         assert!(
-            !dir.join(".hermes").join("mcp").join("servers.json").exists(),
+            !dir.join(".hermes")
+                .join("mcp")
+                .join("servers.json")
+                .exists(),
             "servers.json was created — storage must be config.yaml only"
         );
     }
@@ -737,28 +803,62 @@ mcp_servers:
         fs::write(dir.join("config.yaml"), REALISTIC_FIXTURE).unwrap();
 
         // Update one env var on the email server.
-        let new_env = HashMap::from([
-            ("EMAIL_PASSWORD".to_string(), "newpass456".to_string()),
-        ]);
+        let new_env = HashMap::from([("EMAIL_PASSWORD".to_string(), "newpass456".to_string())]);
         update_mcp_server_env(&dir, None, "email", &new_env).unwrap();
 
         let after = fs::read_to_string(dir.join("config.yaml")).unwrap();
 
         // The updated value must be present.
-        assert!(after.contains("newpass456"), "new env value missing: {}", after);
+        assert!(
+            after.contains("newpass456"),
+            "new env value missing: {}",
+            after
+        );
         // The old value must be gone.
-        assert!(!after.contains("secret123"), "old value not replaced: {}", after);
+        assert!(
+            !after.contains("secret123"),
+            "old value not replaced: {}",
+            after
+        );
         // Comments must survive (the whole point of line-based editing).
-        assert!(after.contains("# Hermes Agent configuration"), "comment dropped: {}", after);
-        assert!(after.contains("# Email connector"), "server comment dropped: {}", after);
+        assert!(
+            after.contains("# Hermes Agent configuration"),
+            "comment dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("# Email connector"),
+            "server comment dropped: {}",
+            after
+        );
         // Unknown fields (timeout, connect_timeout) must survive.
-        assert!(after.contains("timeout: 60"), "timeout field dropped: {}", after);
-        assert!(after.contains("connect_timeout: 30"), "connect_timeout dropped: {}", after);
+        assert!(
+            after.contains("timeout: 60"),
+            "timeout field dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("connect_timeout: 30"),
+            "connect_timeout dropped: {}",
+            after
+        );
         // The OTHER server (lodestone) must be fully intact.
-        assert!(after.contains("lodestone"), "other server dropped: {}", after);
-        assert!(after.contains("Bearer lst_token_here"), "lodestone header dropped: {}", after);
+        assert!(
+            after.contains("lodestone"),
+            "other server dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("Bearer lst_token_here"),
+            "lodestone header dropped: {}",
+            after
+        );
         // Other env vars on email must survive (only EMAIL_PASSWORD changed).
-        assert!(after.contains("EMAIL_ADDRESS: \"user@example.com\""), "sibling env var dropped: {}", after);
+        assert!(
+            after.contains("EMAIL_ADDRESS: \"user@example.com\""),
+            "sibling env var dropped: {}",
+            after
+        );
         assert!(after.contains("NO_PROXY"), "NO_PROXY dropped: {}", after);
     }
 
@@ -772,14 +872,34 @@ mcp_servers:
         let after = fs::read_to_string(dir.join("config.yaml")).unwrap();
 
         // enabled: false must be present on the email server.
-        assert!(after.contains("enabled: false"), "enabled not set: {}", after);
+        assert!(
+            after.contains("enabled: false"),
+            "enabled not set: {}",
+            after
+        );
         // Unknown fields must survive.
-        assert!(after.contains("timeout: 60"), "timeout dropped after set_enabled: {}", after);
-        assert!(after.contains("connect_timeout: 30"), "connect_timeout dropped: {}", after);
+        assert!(
+            after.contains("timeout: 60"),
+            "timeout dropped after set_enabled: {}",
+            after
+        );
+        assert!(
+            after.contains("connect_timeout: 30"),
+            "connect_timeout dropped: {}",
+            after
+        );
         // Lodestone must be untouched.
-        assert!(after.contains("Bearer lst_token_here"), "lodestone clobbered: {}", after);
+        assert!(
+            after.contains("Bearer lst_token_here"),
+            "lodestone clobbered: {}",
+            after
+        );
         // Comments survive.
-        assert!(after.contains("# Email connector"), "comment dropped: {}", after);
+        assert!(
+            after.contains("# Email connector"),
+            "comment dropped: {}",
+            after
+        );
     }
 
     #[test]
@@ -792,14 +912,38 @@ mcp_servers:
         let after = fs::read_to_string(dir.join("config.yaml")).unwrap();
 
         // Email server must be gone.
-        assert!(!after.contains("EMAIL_PASSWORD"), "removed server env still present: {}", after);
-        assert!(!after.contains("command: \"python\""), "removed server command still present: {}", after);
+        assert!(
+            !after.contains("EMAIL_PASSWORD"),
+            "removed server env still present: {}",
+            after
+        );
+        assert!(
+            !after.contains("command: \"python\""),
+            "removed server command still present: {}",
+            after
+        );
         // Lodestone must be fully intact.
-        assert!(after.contains("lodestone"), "other server dropped: {}", after);
-        assert!(after.contains("Bearer lst_token_here"), "lodestone header dropped: {}", after);
-        assert!(after.contains("timeout: 60"), "lodestone timeout dropped: {}", after);
+        assert!(
+            after.contains("lodestone"),
+            "other server dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("Bearer lst_token_here"),
+            "lodestone header dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("timeout: 60"),
+            "lodestone timeout dropped: {}",
+            after
+        );
         // Comments survive.
-        assert!(after.contains("# Hermes Agent configuration"), "comment dropped: {}", after);
+        assert!(
+            after.contains("# Hermes Agent configuration"),
+            "comment dropped: {}",
+            after
+        );
     }
 
     #[test]
@@ -821,16 +965,44 @@ mcp_servers:
         let after = fs::read_to_string(dir.join("config.yaml")).unwrap();
 
         // New server must be present.
-        assert!(after.contains("newserver"), "new server not added: {}", after);
+        assert!(
+            after.contains("newserver"),
+            "new server not added: {}",
+            after
+        );
         assert!(after.contains("newcmd"), "new command not added: {}", after);
-        assert!(after.contains("API_KEY: \"xyz\""), "new env not added: {}", after);
+        assert!(
+            after.contains("API_KEY: \"xyz\""),
+            "new env not added: {}",
+            after
+        );
         // Existing servers must be fully intact.
-        assert!(after.contains("email"), "existing server dropped: {}", after);
-        assert!(after.contains("lodestone"), "existing server dropped: {}", after);
-        assert!(after.contains("Bearer lst_token_here"), "lodestone header dropped: {}", after);
+        assert!(
+            after.contains("email"),
+            "existing server dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("lodestone"),
+            "existing server dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("Bearer lst_token_here"),
+            "lodestone header dropped: {}",
+            after
+        );
         // Comments survive.
-        assert!(after.contains("# Hermes Agent configuration"), "comment dropped: {}", after);
-        assert!(after.contains("# Email connector"), "comment dropped: {}", after);
+        assert!(
+            after.contains("# Hermes Agent configuration"),
+            "comment dropped: {}",
+            after
+        );
+        assert!(
+            after.contains("# Email connector"),
+            "comment dropped: {}",
+            after
+        );
     }
 
     #[test]
@@ -842,9 +1014,20 @@ mcp_servers:
         let email = listed.iter().find(|s| s.name == "email").unwrap();
 
         // raw_fields must contain timeout and connect_timeout.
-        assert!(email.raw_fields.contains_key("timeout"), "timeout not in raw_fields: {:?}", email.raw_fields);
-        assert!(email.raw_fields.contains_key("connect_timeout"), "connect_timeout not in raw_fields: {:?}", email.raw_fields);
-        assert_eq!(email.raw_fields.get("timeout").map(|s| s.as_str()), Some("60"));
+        assert!(
+            email.raw_fields.contains_key("timeout"),
+            "timeout not in raw_fields: {:?}",
+            email.raw_fields
+        );
+        assert!(
+            email.raw_fields.contains_key("connect_timeout"),
+            "connect_timeout not in raw_fields: {:?}",
+            email.raw_fields
+        );
+        assert_eq!(
+            email.raw_fields.get("timeout").map(|s| s.as_str()),
+            Some("60")
+        );
     }
 
     #[test]
@@ -858,4 +1041,3 @@ mcp_servers:
         assert!(result.unwrap_err().contains("not found"));
     }
 }
-

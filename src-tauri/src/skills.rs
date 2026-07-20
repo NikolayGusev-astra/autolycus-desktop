@@ -19,7 +19,10 @@ fn validate_skill_identifier(name: &str) -> Result<(), String> {
         return Err("Skill name must not be empty".to_string());
     }
     if name.contains('/') || name.contains('\\') {
-        return Err(format!("Skill name must not contain path separators: '{}'", name));
+        return Err(format!(
+            "Skill name must not contain path separators: '{}'",
+            name
+        ));
     }
     if name == "." || name == ".." {
         return Err(format!("Invalid skill name: '{}'", name));
@@ -64,7 +67,10 @@ fn ensure_inside(base: &Path, target: &Path) -> Result<PathBuf, String> {
             return Err("Cannot resolve skill path".to_string());
         }
         let next = ancestor.parent().unwrap().to_path_buf();
-        let name = ancestor.strip_prefix(&next).map_err(|_| "path error".to_string())?.to_path_buf();
+        let name = ancestor
+            .strip_prefix(&next)
+            .map_err(|_| "path error".to_string())?
+            .to_path_buf();
         suffix.push(name);
         ancestor = next;
     }
@@ -121,7 +127,11 @@ pub fn list_installed_skills(hermes_home: &Path, profile: Option<&str>) -> Vec<I
                 continue;
             }
 
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             // Skip hidden (dot-prefixed) and known-junk directories that are not
             // skills: .curator_backups, .git, ._apple macOS resource-fork
@@ -155,9 +165,17 @@ pub fn list_installed_skills(hermes_home: &Path, profile: Option<&str>) -> Vec<I
                         for line in frontmatter.lines() {
                             let line = line.trim();
                             if line.starts_with("description:") {
-                                description = line["description:".len()..].trim().trim_matches('"').trim_matches('\'').to_string();
+                                description = line["description:".len()..]
+                                    .trim()
+                                    .trim_matches('"')
+                                    .trim_matches('\'')
+                                    .to_string();
                             } else if line.starts_with("category:") {
-                                category = line["category:".len()..].trim().trim_matches('"').trim_matches('\'').to_string();
+                                category = line["category:".len()..]
+                                    .trim()
+                                    .trim_matches('"')
+                                    .trim_matches('\'')
+                                    .to_string();
                             }
                         }
                     }
@@ -167,7 +185,10 @@ pub fn list_installed_skills(hermes_home: &Path, profile: Option<&str>) -> Vec<I
                 if description.is_empty() {
                     for line in content.lines() {
                         let trimmed = line.trim();
-                        if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
+                        if !trimmed.is_empty()
+                            && !trimmed.starts_with('#')
+                            && !trimmed.starts_with("---")
+                        {
                             description = trimmed.chars().take(120).collect();
                             break;
                         }
@@ -253,8 +274,14 @@ pub fn install_skill(
     // Create minimal skill directory
     fs::create_dir_all(&safe_dest).map_err(|e| format!("Create dir error: {}", e))?;
     let skill_md = safe_dest.join("SKILL.md");
-    fs::write(&skill_md, format!("---\nname: {}\ndescription: {}\n---\n", identifier, identifier))
-        .map_err(|e| format!("Write error: {}", e))?;
+    fs::write(
+        &skill_md,
+        format!(
+            "---\nname: {}\ndescription: {}\n---\n",
+            identifier, identifier
+        ),
+    )
+    .map_err(|e| format!("Write error: {}", e))?;
 
     Ok(())
 }

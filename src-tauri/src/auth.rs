@@ -11,7 +11,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-
 // ── OAuth-capable providers ──────────────────────────────────────────────
 
 /// Providers that support OAuth device-code flow.
@@ -63,16 +62,13 @@ impl AuthState {
 /// Parse a device-code login prompt out of the CLI's streamed output.
 /// Returns `Some { url, code }` once both parts are present.
 pub fn detect_device_code(text: &str) -> Option<DeviceCodeInfo> {
-    let url_match = regex::Regex::new(
-        r"Open this URL in your browser:[^\S\n]*\n[^\S\n]*(https://\S+)",
-    )
-    .ok()?
-    .captures(text)?;
-    let code_match = regex::Regex::new(
-        r"Enter this code:[^\S\n]*\n[^\S\n]*(\S+)",
-    )
-    .ok()?
-    .captures(text)?;
+    let url_match =
+        regex::Regex::new(r"Open this URL in your browser:[^\S\n]*\n[^\S\n]*(https://\S+)")
+            .ok()?
+            .captures(text)?;
+    let code_match = regex::Regex::new(r"Enter this code:[^\S\n]*\n[^\S\n]*(\S+)")
+        .ok()?
+        .captures(text)?;
     Some(DeviceCodeInfo {
         url: url_match[1].to_string(),
         code: code_match[1].to_string(),
@@ -128,7 +124,9 @@ pub async fn run_oauth_login(
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start sign-in: {}",e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start sign-in: {}", e))?;
 
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
@@ -207,12 +205,13 @@ pub async fn run_oauth_login(
 }
 
 /// Kill the in-flight login subprocess, if any.
-pub async fn cancel_oauth_login(
-    auth_state: &AuthState,
-) -> Result<bool, String> {
+pub async fn cancel_oauth_login(auth_state: &AuthState) -> Result<bool, String> {
     let mut guard = auth_state.active_proc.lock().await;
     if let Some(mut child) = guard.take() {
-        child.kill().await.map_err(|e| format!("Failed to cancel: {}", e))?;
+        child
+            .kill()
+            .await
+            .map_err(|e| format!("Failed to cancel: {}", e))?;
         Ok(true)
     } else {
         Ok(false)
@@ -228,8 +227,8 @@ pub async fn store_credential(
     account: String,
     password: String,
 ) -> Result<(), String> {
-    let entry = keyring::Entry::new(&service, &account)
-        .map_err(|e| format!("Keyring error: {}", e))?;
+    let entry =
+        keyring::Entry::new(&service, &account).map_err(|e| format!("Keyring error: {}", e))?;
     entry
         .set_password(&password)
         .map_err(|e| format!("Failed to store credential: {}", e))?;
@@ -238,12 +237,9 @@ pub async fn store_credential(
 
 /// Retrieve a credential from the OS keyring.
 #[tauri::command]
-pub async fn get_credential(
-    service: String,
-    account: String,
-) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(&service, &account)
-        .map_err(|e| format!("Keyring error: {}", e))?;
+pub async fn get_credential(service: String, account: String) -> Result<Option<String>, String> {
+    let entry =
+        keyring::Entry::new(&service, &account).map_err(|e| format!("Keyring error: {}", e))?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -253,12 +249,9 @@ pub async fn get_credential(
 
 /// Delete a credential from the OS keyring.
 #[tauri::command]
-pub async fn delete_credential(
-    service: String,
-    account: String,
-) -> Result<(), String> {
-    let entry = keyring::Entry::new(&service, &account)
-        .map_err(|e| format!("Keyring error: {}", e))?;
+pub async fn delete_credential(service: String, account: String) -> Result<(), String> {
+    let entry =
+        keyring::Entry::new(&service, &account).map_err(|e| format!("Keyring error: {}", e))?;
     entry
         .delete_password()
         .map_err(|e| format!("Failed to delete credential: {}", e))?;
@@ -306,7 +299,12 @@ impl CredentialPoolEntry {
     /// env:KEY → look the var up in .env.
     pub fn resolve_secret(&self, hermes_home: &PathBuf) -> Option<String> {
         // manual source: the secret is stored inline.
-        if self.access_token.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+        if self
+            .access_token
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
             return self.access_token.clone();
         }
         // env:KEY — read the variable from the agent's .env.
@@ -365,8 +363,7 @@ fn write_auth_store(hermes_home: &PathBuf, mut store: serde_json::Value) -> Resu
     store["updated_at"] = serde_json::Value::String(now_iso8601());
     let content = serde_json::to_string_pretty(&store)
         .map_err(|e| format!("Failed to serialize auth.json: {}", e))?;
-    write_secret_file(&path, &content)
-        .map_err(|e| format!("Failed to write auth.json: {}", e))?;
+    write_secret_file(&path, &content).map_err(|e| format!("Failed to write auth.json: {}", e))?;
     Ok(())
 }
 
@@ -386,7 +383,10 @@ pub fn fingerprint(secret: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
     let digest = hasher.finalize();
-    let hex = digest.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let hex = digest
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
     format!("sha256:{}", &hex[..16])
 }
 
@@ -394,7 +394,10 @@ pub async fn get_credential_pool(
     hermes_home: &PathBuf,
 ) -> Result<HashMap<String, Vec<CredentialPoolEntry>>, String> {
     let store = read_auth_store(hermes_home);
-    let pool_val = store.get("credential_pool").cloned().unwrap_or(serde_json::json!({}));
+    let pool_val = store
+        .get("credential_pool")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let pool: HashMap<String, Vec<CredentialPoolEntry>> =
         serde_json::from_value(pool_val).unwrap_or_default();
     Ok(pool)
@@ -411,15 +414,18 @@ pub async fn add_credential_pool_entry(
 ) -> Result<Vec<CredentialPoolEntry>, String> {
     let mut pool = get_credential_pool(hermes_home).await?;
     let entries = pool.entry(provider.to_string()).or_default();
-    let next_priority = entries.iter().map(|e| e.priority.unwrap_or(0)).max().unwrap_or(-1) + 1;
+    let next_priority = entries
+        .iter()
+        .map(|e| e.priority.unwrap_or(0))
+        .max()
+        .unwrap_or(-1)
+        + 1;
     let id = uuid::Uuid::new_v4().simple().to_string()[..6].to_string();
 
     // Decide source: if the label looks like an ENV var, treat as env-sourced
     // (write the value to .env, fingerprint in auth.json); else manual.
-    let is_env_label = label
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c == '_')
-        && label.contains('_');
+    let is_env_label =
+        label.chars().all(|c| c.is_ascii_uppercase() || c == '_') && label.contains('_');
     let (source, access_token, secret_fingerprint) = if is_env_label {
         // Write to the agent .env so Hermes resolves it at runtime.
         crate::config::write_env_value(hermes_home, None, label, key)?;
@@ -430,7 +436,11 @@ pub async fn add_credential_pool_entry(
 
     entries.push(CredentialPoolEntry {
         id: Some(id),
-        label: if label.is_empty() { None } else { Some(label.to_string()) },
+        label: if label.is_empty() {
+            None
+        } else {
+            Some(label.to_string())
+        },
         auth_type: Some("api_key".to_string()),
         priority: Some(next_priority),
         source: Some(source),
@@ -458,8 +468,8 @@ pub async fn set_credential_pool(
     if store.get("credential_pool").is_none() {
         store["credential_pool"] = serde_json::json!({});
     }
-    let entries_val = serde_json::to_value(entries)
-        .map_err(|e| format!("Failed to serialize entries: {}", e))?;
+    let entries_val =
+        serde_json::to_value(entries).map_err(|e| format!("Failed to serialize entries: {}", e))?;
     store["credential_pool"][provider] = entries_val;
     write_auth_store(hermes_home, store)
 }
