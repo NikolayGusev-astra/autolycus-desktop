@@ -3,6 +3,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import reactPlugin from "eslint-plugin-react";
 import reactHooks from "eslint-plugin-react-hooks";
+import noRawHermesRpc from "./eslint-rules/no-raw-hermes-rpc.js";
 
 export default [
   js.configs.recommended,
@@ -12,6 +13,11 @@ export default [
     plugins: {
       react: reactPlugin,
       "react-hooks": reactHooks,
+      "hermes-rpc": {
+        rules: {
+          "no-raw-invoke": noRawHermesRpc,
+        },
+      },
     },
     languageOptions: {
       globals: {
@@ -33,6 +39,7 @@ export default [
       ],
       "@typescript-eslint/no-explicit-any": "warn",
       "react-hooks/exhaustive-deps": "warn",
+      "hermes-rpc/no-raw-invoke": "error",
     },
     settings: {
       react: {
