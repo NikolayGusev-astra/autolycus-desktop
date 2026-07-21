@@ -1137,6 +1137,15 @@ mod tests {
                 ChatEvent::Status { .. } => "status",
                 ChatEvent::ApprovalRequest { .. } => "approval",
                 ChatEvent::PipelineStatus { .. } => "pipeline",
+                ChatEvent::SessionInfo { .. } => "session_info",
+                ChatEvent::Thinking { .. } => "thinking",
+                ChatEvent::ToolGenerating { .. } => "tool_generating",
+                ChatEvent::ClarifyRequest { .. } => "clarify_request",
+                ChatEvent::SudoRequest { .. } => "sudo_request",
+                ChatEvent::SudoExpire { .. } => "sudo_expire",
+                ChatEvent::SecretRequest { .. } => "secret_request",
+                ChatEvent::SecretExpire { .. } => "secret_expire",
+                ChatEvent::Notification { .. } => "notification",
             };
             let _ = tag;
             // We can't store ChatEvent (no Clone), but tests check WsState

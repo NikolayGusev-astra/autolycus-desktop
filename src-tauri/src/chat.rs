@@ -52,6 +52,59 @@ pub enum ChatEvent {
     Error { message: String },
     #[serde(rename = "status")]
     Status { status: String },
+    // Phase 1B additions
+    #[serde(rename = "session_info")]
+    SessionInfo {
+        session_id: String,
+        stored_session_id: String,
+        running: bool,
+        model: Option<String>,
+        provider: Option<String>,
+        tools: serde_json::Value,
+        skills: serde_json::Value,
+        usage: Option<serde_json::Value>,
+        desktop_contract: Option<u32>,
+    },
+    #[serde(rename = "thinking")]
+    Thinking { content: String },
+    #[serde(rename = "tool_generating")]
+    ToolGenerating {
+        name: String,
+        tool_call_id: Option<String>,
+        content: Option<String>,
+    },
+    #[serde(rename = "clarify_request")]
+    ClarifyRequest {
+        request_id: String,
+        question: String,
+        choices: Vec<String>,
+    },
+    #[serde(rename = "sudo_request")]
+    SudoRequest {
+        request_id: String,
+        reason: Option<String>,
+        timeout_secs: Option<u64>,
+    },
+    #[serde(rename = "sudo_expire")]
+    SudoExpire { request_id: String },
+    #[serde(rename = "secret_request")]
+    SecretRequest {
+        request_id: String,
+        prompt: String,
+        env_var: String,
+        metadata: Option<serde_json::Value>,
+    },
+    #[serde(rename = "secret_expire")]
+    SecretExpire { request_id: String },
+    #[serde(rename = "notification")]
+    Notification {
+        id: String,
+        key: String,
+        text: String,
+        level: Option<String>,
+        kind: Option<String>,
+        ttl_ms: Option<u64>,
+    },
 }
 
 // ── Connection mode ───────────────────────────────────────────────────────
@@ -150,7 +203,7 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 None
             }
         }
-        "reasoning.delta" | "thinking.delta" => {
+        "reasoning.delta" => {
             let content = payload_text(value).unwrap_or("");
             if !content.is_empty() {
                 Some(ChatEvent::Reasoning {
@@ -247,6 +300,167 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 tool_input: tool_input.to_string(),
                 action: action.to_string(),
                 command_class: command_class.to_string(),
+            })
+        }
+        "session.info" => {
+            let _session_id = payload_field(value, "session_id").unwrap_or("");
+            let stored_session_id = payload_field(value, "stored_session_id").unwrap_or("");
+            let running = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("running"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let model = payload_field(value, "model").map(|s| s.to_string());
+            let provider = payload_field(value, "provider").map(|s| s.to_string());
+            let tools = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("tools"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let skills = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("skills"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let usage = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("usage"))
+                .cloned();
+            let desktop_contract = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("desktop_contract"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let session_id_param = value
+                .get("params")
+                .and_then(|p| p.get("session_id"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            
+            Some(ChatEvent::SessionInfo {
+                session_id: session_id_param.unwrap_or_default(),
+                stored_session_id: stored_session_id.to_string(),
+                running,
+                model,
+                provider,
+                tools,
+                skills,
+                usage,
+                desktop_contract,
+            })
+        }
+        "thinking.delta" => {
+            let content = payload_text(value).unwrap_or("");
+            if !content.is_empty() {
+                Some(ChatEvent::Thinking {
+                    content: content.to_string(),
+                })
+            } else {
+                None
+            }
+        }
+        "tool.generating" => {
+            let name = payload_field(value, "name").unwrap_or("tool");
+            let tool_id = payload_field(value, "tool_id").map(|s| s.to_string());
+            let content = payload_text(value).map(|s| s.to_string());
+            Some(ChatEvent::ToolGenerating {
+                name: name.to_string(),
+                tool_call_id: tool_id,
+                content,
+            })
+        }
+        "clarify.request" => {
+            let request_id = payload_field(value, "request_id").unwrap_or("");
+            let question = payload_field(value, "question").unwrap_or("");
+            let choices = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("choices"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            Some(ChatEvent::ClarifyRequest {
+                request_id: request_id.to_string(),
+                question: question.to_string(),
+                choices,
+            })
+        }
+        "sudo.request" => {
+            let request_id = payload_field(value, "request_id").unwrap_or("");
+            let reason = payload_field(value, "reason").map(|s| s.to_string());
+            let timeout_secs = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("timeout_secs"))
+                .and_then(|v| v.as_u64());
+            Some(ChatEvent::SudoRequest {
+                request_id: request_id.to_string(),
+                reason,
+                timeout_secs,
+            })
+        }
+        "sudo.expire" => {
+            let request_id = payload_field(value, "request_id").unwrap_or("");
+            Some(ChatEvent::SudoExpire {
+                request_id: request_id.to_string(),
+            })
+        }
+        "secret.request" => {
+            let request_id = payload_field(value, "request_id").unwrap_or("");
+            let prompt = payload_field(value, "prompt").unwrap_or("");
+            let env_var = payload_field(value, "env_var").unwrap_or("");
+            let metadata = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("metadata"))
+                .cloned();
+            Some(ChatEvent::SecretRequest {
+                request_id: request_id.to_string(),
+                prompt: prompt.to_string(),
+                env_var: env_var.to_string(),
+                metadata,
+            })
+        }
+        "secret.expire" => {
+            let request_id = payload_field(value, "request_id").unwrap_or("");
+            Some(ChatEvent::SecretExpire {
+                request_id: request_id.to_string(),
+            })
+        }
+        "notification.show" => {
+            let id = payload_field(value, "id").unwrap_or("");
+            let key = payload_field(value, "key").unwrap_or("");
+            let text = payload_field(value, "text").unwrap_or("");
+            let level = payload_field(value, "level").map(|s| s.to_string());
+            let kind = payload_field(value, "kind").map(|s| s.to_string());
+            let ttl_ms = value
+                .get("params")
+                .and_then(|p| p.get("payload"))
+                .and_then(|pl| pl.get("ttl_ms"))
+                .and_then(|v| v.as_u64());
+            Some(ChatEvent::Notification {
+                id: id.to_string(),
+                key: key.to_string(),
+                text: text.to_string(),
+                level,
+                kind,
+                ttl_ms,
+            })
+        }
+        "notification.clear" => {
+            let key = payload_field(value, "key").unwrap_or("");
+            Some(ChatEvent::Notification {
+                id: "".to_string(),
+                key: key.to_string(),
+                text: "".to_string(),
+                level: None,
+                kind: None,
+                ttl_ms: None,
             })
         }
         _ => None,
@@ -699,10 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn ws_session_info_is_ignored() {
-        // session.info is informational, not a streaming event to display.
+    fn ws_session_info_is_parsed() {
+        // session.info is now parsed as SessionInfo event.
         let ev = ws_event(r#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info"}}"#);
-        assert!(ev.is_none());
+        assert!(matches!(ev, Some(ChatEvent::SessionInfo { .. })));
     }
 
     // ── ADR-005: Remote/SSH scheme conversion (P3.2) ────────────────────────
