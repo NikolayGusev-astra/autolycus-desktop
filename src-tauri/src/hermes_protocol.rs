@@ -96,7 +96,7 @@ pub struct JsonRpcEvent<P> {
 
 /// Request params for `session.create`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct SessionCreateParams {
     /// Session source: "desktop" (chat), "briefing_smart" (briefing), etc.
     /// Controls visibility in the feed (sessions.rs filters by source).
@@ -106,11 +106,27 @@ pub struct SessionCreateParams {
 }
 
 /// Response result for `session.create`.
+/// Matches real Hermes wire format with snake_case fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct SessionCreateResult {
     /// The new session ID (UUID).
     pub session_id: String,
+    /// The durable stored session ID.
+    pub stored_session_id: String,
+    /// Number of messages in the session.
+    pub message_count: usize,
+    /// Message history (empty on create).
+    pub messages: Vec<serde_json::Value>,
+    /// Session info including desktop_contract version.
+    pub info: SessionCreateInfo,
+}
+
+/// Session creation info with desktop contract version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCreateInfo {
+    pub desktop_contract: u32,
 }
 
 /// Build a typed `session.create` request.
@@ -133,7 +149,7 @@ pub fn build_session_create_request(
 
 /// Request params for `prompt.submit`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PromptSubmitParams {
     /// Session ID returned by `session.create`.
     pub session_id: String,
@@ -155,6 +171,42 @@ pub fn build_prompt_submit_request(
             text: text.to_string(),
         },
     )
+}
+
+/// Response result for `prompt.submit`.
+/// Matches real Hermes wire format with snake_case fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PromptSubmitResult {
+    /// Session ID that the prompt was submitted to.
+    pub session_id: String,
+    /// The assistant's response text.
+    pub response: String,
+    /// Tools called during this prompt.
+    #[serde(rename = "tools_called")]
+    pub tools_called: Vec<ToolCallInfo>,
+    /// Token usage information.
+    pub tokens: TokenUsage,
+}
+
+/// Information about a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolCallInfo {
+    pub name: String,
+    #[serde(rename = "tool_call_id")]
+    pub tool_call_id: String,
+    pub input: serde_json::Value,
+    pub output: Option<String>,
+}
+
+/// Token usage information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TokenUsage {
+    pub input: u32,
+    pub output: u32,
+    pub total: u32,
 }
 
 // ── Streaming events (method == "event") ─────────────────────────────────────
@@ -211,7 +263,7 @@ pub enum GatewayEvent {
 
 /// Payload for `gateway.ready`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct GatewayReadyPayload {
     pub version: Option<String>,
     pub backend: Option<String>,
@@ -219,7 +271,7 @@ pub struct GatewayReadyPayload {
 
 /// Payload for `message.delta` (token stream).
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct MessageDeltaPayload {
     pub session_id: String,
     #[serde(default)]
@@ -232,7 +284,7 @@ pub struct MessageDeltaPayload {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct MessageDeltaInner {
     pub text: String,
 }
@@ -250,7 +302,7 @@ impl MessageDeltaPayload {
 
 /// Payload for `message.complete`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct MessageCompletePayload {
     pub session_id: String,
     // Some backends include the full text on complete
@@ -260,7 +312,7 @@ pub struct MessageCompletePayload {
 
 /// Payload for `reasoning.delta`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ReasoningDeltaPayload {
     pub session_id: String,
     #[serde(default)]
@@ -270,7 +322,7 @@ pub struct ReasoningDeltaPayload {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ReasoningDeltaInner {
     pub text: String,
 }
@@ -286,7 +338,7 @@ impl ReasoningDeltaPayload {
 
 /// Payload for `tool.start`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ToolStartPayload {
     pub session_id: String,
     pub tool_id: String,
@@ -295,7 +347,7 @@ pub struct ToolStartPayload {
 
 /// Payload for `tool.complete`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ToolCompletePayload {
     pub session_id: String,
     pub tool_id: String,
@@ -308,7 +360,7 @@ pub struct ToolCompletePayload {
 
 /// Payload for `approval.request`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ApprovalRequestPayload {
     pub session_id: String,
     pub request_id: String,
@@ -325,7 +377,7 @@ pub struct ApprovalRequestPayload {
 
 /// Payload for `status.update`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct StatusUpdatePayload {
     pub session_id: String,
     #[serde(default)]
@@ -336,7 +388,7 @@ pub struct StatusUpdatePayload {
 
 /// Payload for `pipeline.status`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PipelineStatusPayload {
     pub session_id: String,
     pub backend: String,
@@ -352,7 +404,7 @@ pub struct PipelineStatusPayload {
 
 /// Payload for `error` streaming event.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ErrorPayload {
     pub session_id: Option<String>,
     pub message: String,
@@ -362,7 +414,7 @@ pub struct ErrorPayload {
 
 /// Payload for `message.end`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct MessageEndPayload {
     pub session_id: String,
     #[serde(default)]
@@ -394,12 +446,20 @@ pub mod fixtures {
     use super::*;
     use serde_json::json;
 
-    /// A `session.create` response.
+    /// A `session.create` response matching real Hermes wire format.
     pub fn session_create_response(id: u64, session_id: &str) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "sessionId": session_id }
+            "result": {
+                "session_id": session_id,
+                "stored_session_id": format!("stored-{}", session_id),
+                "message_count": 0,
+                "messages": [],
+                "info": {
+                    "desktop_contract": 4
+                }
+            }
         })
     }
 
@@ -432,7 +492,7 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "message.delta",
-                "sessionId": session_id,
+                "session_id": session_id,
                 "payload": { "text": token }
             }
         })
@@ -445,7 +505,7 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "message.delta",
-                "sessionId": session_id,
+                "session_id": session_id,
                 "text": token
             }
         })
@@ -458,7 +518,7 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "reasoning.delta",
-                "sessionId": session_id,
+                "session_id": session_id,
                 "payload": { "text": text }
             }
         })
@@ -471,8 +531,8 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "tool.start",
-                "sessionId": session_id,
-                "toolId": tool_id,
+                "session_id": session_id,
+                "tool_id": tool_id,
                 "name": name
             }
         })
@@ -485,11 +545,11 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "tool.complete",
-                "sessionId": session_id,
-                "toolId": tool_id,
+                "session_id": session_id,
+                "tool_id": tool_id,
                 "name": name,
                 "output": output,
-                "durationMs": 42
+                "duration_ms": 42
             }
         })
     }
@@ -507,13 +567,13 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "approval.request",
-                "sessionId": session_id,
-                "requestId": request_id,
-                "toolId": tool_id,
+                "session_id": session_id,
+                "request_id": request_id,
+                "tool_id": tool_id,
                 "name": name,
                 "command": command,
                 "action": "execute",
-                "commandClass": "write"
+                "command_class": "write"
             }
         })
     }
@@ -525,7 +585,7 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "status.update",
-                "sessionId": session_id,
+                "session_id": session_id,
                 "text": text
             }
         })
@@ -545,12 +605,12 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "pipeline.status",
-                "sessionId": session_id,
+                "session_id": session_id,
                 "backend": backend,
                 "model": model,
-                "tokensUsed": tokens_used,
-                "tokensLimit": tokens_limit,
-                "costUsd": cost_usd
+                "tokens_used": tokens_used,
+                "tokens_limit": tokens_limit,
+                "cost_usd": cost_usd
             }
         })
     }
@@ -562,7 +622,7 @@ pub mod fixtures {
             "message": message
         });
         if let Some(sid) = session_id {
-            params["sessionId"] = json!(sid);
+            params["session_id"] = json!(sid);
         }
         json!({
             "jsonrpc": "2.0",
@@ -578,7 +638,7 @@ pub mod fixtures {
             "method": "event",
             "params": {
                 "type": "message.end",
-                "sessionId": session_id
+                "session_id": session_id
             }
         })
     }
@@ -601,11 +661,60 @@ mod tests {
     }
 
     #[test]
+    fn session_create_result_deserializes_real_wire_format() {
+        // Real Hermes wire format has snake_case fields
+        let json = r#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "session_id": "abc-123",
+                "stored_session_id": "stored-456",
+                "message_count": 0,
+                "messages": [],
+                "info": {
+                    "desktop_contract": 4
+                }
+            }
+        }"#;
+
+        let envelope: JsonRpcResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let result: SessionCreateResult = serde_json::from_value(envelope.result).unwrap();
+
+        assert_eq!(result.session_id, "abc-123");
+        assert_eq!(result.stored_session_id, "stored-456");
+        assert_eq!(result.message_count, 0);
+        assert_eq!(result.messages.len(), 0);
+        assert_eq!(result.info.desktop_contract, 4);
+    }
+
+    #[test]
+    fn prompt_submit_result_deserializes_real_wire_format() {
+        let json = r#"{
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "session_id": "abc-123",
+                "response": "Hello world",
+                "tools_called": [],
+                "tokens": {"input": 10, "output": 20, "total": 30}
+            }
+        }"#;
+
+        let envelope: JsonRpcResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let result: PromptSubmitResult = serde_json::from_value(envelope.result).unwrap();
+
+        assert_eq!(result.session_id, "abc-123");
+        assert_eq!(result.response, "Hello world");
+        assert_eq!(result.tools_called.len(), 0);
+        assert_eq!(result.tokens.total, 30);
+    }
+
+    #[test]
     fn prompt_submit_request_serializes_correctly() {
         let req = build_prompt_submit_request(2, "sess-123", "Hello world");
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["method"], "prompt.submit");
-        assert_eq!(json["params"]["sessionId"], "sess-123");
+        assert_eq!(json["params"]["session_id"], "sess-123");
         assert_eq!(json["params"]["text"], "Hello world");
     }
 
@@ -618,6 +727,32 @@ mod tests {
                 assert_eq!(payload.version, Some("0.5.8".to_string()));
             }
             _ => panic!("expected GatewayReady"),
+        }
+    }
+
+    #[test]
+    fn gateway_event_deserializes_snake_case_payload() {
+        // Real Hermes wire format has snake_case payload fields
+        let json = r#"{
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {
+                "type": "tool.start",
+                "session_id": "sess-123",
+                "tool_id": "t1",
+                "name": "read_file"
+            }
+        }"#;
+
+        let event =
+            parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
+        match event {
+            GatewayEvent::ToolStart(payload) => {
+                assert_eq!(payload.session_id, "sess-123");
+                assert_eq!(payload.tool_id, "t1");
+                assert_eq!(payload.name, "read_file");
+            }
+            _ => panic!("expected ToolStart"),
         }
     }
 
@@ -711,6 +846,12 @@ mod tests {
     fn json_rpc_response_roundtrip() {
         let result = SessionCreateResult {
             session_id: "test-123".to_string(),
+            stored_session_id: "stored-test-123".to_string(),
+            message_count: 0,
+            messages: vec![],
+            info: SessionCreateInfo {
+                desktop_contract: 4,
+            },
         };
         let response = JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
