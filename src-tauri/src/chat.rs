@@ -621,7 +621,7 @@ pub async fn send_via_ws_persistent_local(
                 // Create a new "desktop" session (the default chat surface).
                 let sid = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| format!("{:?}", e))?;
                 *ws_state.session_id.lock().await = Some(sid.clone());
                 sid
             }
@@ -631,7 +631,7 @@ pub async fn send_via_ws_persistent_local(
     // Submit the prompt — events stream back via chat_event.
     crate::ws_transport::submit_prompt_on_connection(ws_state, &session_id, &request.text)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{:?}", e))?;
 
     Ok(session_id)
 }
