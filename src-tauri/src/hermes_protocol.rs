@@ -22,6 +22,53 @@ pub fn next_request_id() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Protocol-level errors for event parsing.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+pub enum ProtocolError {
+    #[error("Not an event envelope (method != \"event\")")]
+    NotAnEvent,
+    #[error("Missing or invalid params: {0}")]
+    InvalidParams(String),
+    #[error("Unknown event type: {0}")]
+    UnknownType(String),
+    #[error("Malformed known event '{event_type}': {error}")]
+    MalformedKnown { event_type: String, error: String },
+    #[error("JSON deserialization failed: {0}")]
+    JsonError(String),
+}
+
+/// Result type for parsed gateway events.
+pub type ParseResult = Result<Option<RoutedGatewayEvent>, ProtocolError>;
+
+/// Event type returned by parse_gateway_event — includes session_id for routing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutedGatewayEvent {
+    pub session_id: Option<String>,
+    pub event: ParsedGatewayEvent,
+}
+
+/// Discriminated union of parsing outcomes.
+/// - Known: successfully parsed a recognized event type
+/// - UnknownType: forward-compatible unknown event
+/// - MalformedKnown: recognized type but payload didn't match schema (log + telemetry!)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ParsedGatewayEvent {
+    Known(GatewayEvent),
+    UnknownType {
+        event_type: String,
+        session_id: Option<String>,
+        payload: Value,
+    },
+    MalformedKnown {
+        event_type: String,
+        session_id: Option<String>,
+        payload: Value,
+        error: String,
+    },
+}
+
 // ── Request / Response envelope ──────────────────────────────────────────────
 
 /// Generic JSON-RPC 2.0 request.
@@ -224,13 +271,25 @@ pub enum GatewayEvent {
     #[serde(rename = "message.complete")]
     MessageComplete(MessageCompletePayload),
 
+    /// Message start (beginning of assistant reply).
+    #[serde(rename = "message.start")]
+    MessageStart(MessageStartPayload),
+
     /// Reasoning / chain-of-thought delta.
     #[serde(rename = "reasoning.delta")]
     ReasoningDelta(ReasoningDeltaPayload),
 
+    /// Thinking delta (alternative to reasoning).
+    #[serde(rename = "thinking.delta")]
+    ThinkingDelta(ThinkingDeltaPayload),
+
     /// Tool call started.
     #[serde(rename = "tool.start")]
     ToolStart(ToolStartPayload),
+
+    /// Tool call generating (streaming tool output).
+    #[serde(rename = "tool.generating")]
+    ToolGenerating(ToolGeneratingPayload),
 
     /// Tool call completed.
     #[serde(rename = "tool.complete")]
@@ -239,6 +298,30 @@ pub enum GatewayEvent {
     /// Approval request for a tool action.
     #[serde(rename = "approval.request")]
     ApprovalRequest(ApprovalRequestPayload),
+
+    /// Clarification request from agent.
+    #[serde(rename = "clarify.request")]
+    ClarifyRequest(ClarifyRequestPayload),
+
+    /// Sudo request for elevated operations.
+    #[serde(rename = "sudo.request")]
+    SudoRequest(SudoRequestPayload),
+
+    /// Sudo session expired.
+    #[serde(rename = "sudo.expire")]
+    SudoExpire(SudoExpirePayload),
+
+    /// Secret request (API keys, tokens).
+    #[serde(rename = "secret.request")]
+    SecretRequest(SecretRequestPayload),
+
+    /// Secret session expired.
+    #[serde(rename = "secret.expire")]
+    SecretExpire(SecretExpirePayload),
+
+    /// Session info (running state, model/provider, tools, skills, usage, stored_session_id, desktop_contract).
+    #[serde(rename = "session.info")]
+    SessionInfo(SessionInfoPayload),
 
     /// Status update (e.g., "thinking", "processing").
     #[serde(rename = "status.update")]
@@ -255,6 +338,14 @@ pub enum GatewayEvent {
     /// Turn ended (may carry session_id for turn linking).
     #[serde(rename = "message.end")]
     MessageEnd(MessageEndPayload),
+
+    /// Notification show.
+    #[serde(rename = "notification.show")]
+    NotificationShow(NotificationShowPayload),
+
+    /// Notification clear.
+    #[serde(rename = "notification.clear")]
+    NotificationClear(NotificationClearPayload),
 
     /// Unknown/forward-compatible event - preserves raw payload.
     Unknown {
@@ -337,6 +428,18 @@ pub struct ApprovalRequestPayload {
     pub command_class: Option<String>,
     pub smart_denied: Option<bool>,
     pub allow_permanent: Option<bool>,
+    #[serde(default)]
+    pub choices: Vec<ApprovalChoice>,
+}
+
+/// Authoritative approval choices from Hermes (not derived from flags).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalChoice {
+    Once,
+    Session,
+    Always,
+    Deny,
 }
 
 /// Payload for `status.update` — nested inside params.payload.
@@ -381,9 +484,117 @@ pub struct MessageEndPayload {
     pub text: Option<String>,
 }
 
-/// Parse a raw JSON-RPC value into a GatewayEvent using two-stage parsing.
+/// Payload for `message.start` — beginning of assistant reply.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MessageStartPayload {
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Payload for `thinking.delta` — alternative to reasoning.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ThinkingDeltaPayload {
+    pub text: String,
+}
+
+/// Payload for `tool.generating` — streaming tool output.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolGeneratingPayload {
+    pub tool_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Payload for `clarify.request` — agent needs clarification.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ClarifyRequestPayload {
+    pub request_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+/// Payload for `sudo.request` — elevated operations.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SudoRequestPayload {
+    pub request_id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Payload for `sudo.expire` — sudo session expired.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SudoExpirePayload {
+    pub request_id: String,
+}
+
+/// Payload for `secret.request` — API keys, tokens.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SecretRequestPayload {
+    pub request_id: String,
+    pub secret_name: String,
+    pub description: Option<String>,
+}
+
+/// Payload for `secret.expire` — secret session expired.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SecretExpirePayload {
+    pub request_id: String,
+}
+
+/// Payload for `session.info` — running state, model/provider, tools, skills, usage, stored_session_id, desktop_contract.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionInfoPayload {
+    pub session_id: String,
+    pub stored_session_id: String,
+    pub state: String, // "running", "waiting", "completed", etc.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub usage: Option<Value>,
+    #[serde(default)]
+    pub desktop_contract: Option<u32>,
+}
+
+/// Payload for `notification.show`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct NotificationShowPayload {
+    pub notification_id: String,
+    pub title: String,
+    pub body: Option<String>,
+    #[serde(default)]
+    pub level: Option<String>, // "info", "warning", "error"
+}
+
+/// Payload for `notification.clear`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct NotificationClearPayload {
+    pub notification_id: String,
+}
+
+/// Parse a raw JSON-RPC value into a RoutedGatewayEvent using two-stage parsing.
 /// First extracts envelope.params, then dispatches on params.event_type.
-pub fn parse_gateway_event(value: &Value) -> Option<GatewayEvent> {
+/// Returns ParsedGatewayEvent with Known/UnknownType/MalformedKnown discrimination.
+pub fn parse_gateway_event(value: &Value) -> ParseResult {
     // Must be an event envelope
     let is_event = value
         .get("method")
@@ -391,72 +602,230 @@ pub fn parse_gateway_event(value: &Value) -> Option<GatewayEvent> {
         .map(|m| m == "event")
         .unwrap_or(false);
     if !is_event {
-        return None;
+        return Ok(None);
     }
 
     // Extract params and deserialize as GatewayEventParams
-    let params = value.get("params")?;
-    let params: GatewayEventParams = serde_json::from_value(params.clone()).ok()?;
+    let params = value.get("params").ok_or_else(|| ProtocolError::InvalidParams("missing params".into()))?;
+    let params: GatewayEventParams = serde_json::from_value(params.clone())
+        .map_err(|e| ProtocolError::JsonError(e.to_string()))?;
 
     // Dispatch based on event type
     let event_type = params.event_type.as_str();
     let session_id = params.session_id;
     let payload = params.payload;
 
-    let event = match event_type {
+    let parsed_event = match event_type {
         "gateway.ready" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::GatewayReady(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::GatewayReady(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "message.delta" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::MessageDelta(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::MessageDelta(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "message.complete" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::MessageComplete(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::MessageComplete(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "message.start" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::MessageStart(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "reasoning.delta" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::ReasoningDelta(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "thinking.delta" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ThinkingDelta(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "tool.start" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::ToolStart(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ToolStart(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "tool.generating" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ToolGenerating(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "tool.complete" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::ToolComplete(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ToolComplete(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "approval.request" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::ApprovalRequest(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ApprovalRequest(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "clarify.request" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ClarifyRequest(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "sudo.request" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::SudoRequest(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "sudo.expire" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::SudoExpire(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "secret.request" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::SecretRequest(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "secret.expire" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::SecretExpire(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "session.info" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "status.update" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::StatusUpdate(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::StatusUpdate(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "pipeline.status" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::PipelineStatus(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::PipelineStatus(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "error" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::Error(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::Error(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
         "message.end" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => GatewayEvent::MessageEnd(p),
-            Err(_) => GatewayEvent::Unknown { event_type: event_type.to_string(), session_id, payload },
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
         },
-        // Unknown event - preserve for forward compatibility
-        _ => GatewayEvent::Unknown {
+        "notification.show" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::NotificationShow(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        "notification.clear" => match serde_json::from_value(payload.clone()) {
+            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)),
+            Err(e) => ParsedGatewayEvent::MalformedKnown {
+                event_type: event_type.to_string(),
+                session_id: session_id.clone(),
+                payload: payload.clone(),
+                error: e.to_string(),
+            },
+        },
+        // Unknown event type - forward compatible
+        _ => ParsedGatewayEvent::UnknownType {
             event_type: event_type.to_string(),
-            session_id,
-            payload,
+            session_id: session_id.clone(),
+            payload: payload.clone(),
         },
     };
 
-    Some(event)
+    Ok(Some(RoutedGatewayEvent {
+        session_id,
+        event: parsed_event,
+    }))
 }
 
 // ── Fixtures for testing (Phase 0) ───────────────────────────────────────────
@@ -509,9 +878,16 @@ pub mod fixtures {
         })
     }
 
-    /// `gateway.ready` event — Hermes sends skin inside payload.
+    /// `gateway.ready` event — Hermes sends skin inside payload, NO session_id in params.
     pub fn gateway_ready_event() -> Value {
-        event_with_payload("gateway.ready", "", json!({ "skin": "default" }))
+        json!({
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {
+                "type": "gateway.ready",
+                "payload": { "skin": "default" }
+            }
+        })
     }
 
     /// `message.delta` (token) event — real wire format with payload.text.
@@ -688,16 +1064,18 @@ mod tests {
         assert_eq!(json["params"]["text"], "Hello world");
     }
 
-    #[test]
+#[test]
     fn parse_gateway_ready_event() {
         let raw = fixtures::gateway_ready_event();
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
-            GatewayEvent::GatewayReady(payload) => {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::GatewayReady(payload)) => {
                 assert_eq!(payload.skin, Some("default".to_string()));
             }
             _ => panic!("expected GatewayReady"),
         }
+        assert_eq!(routed.session_id, None); // gateway.ready has no session_id
     }
 
     #[test]
@@ -716,121 +1094,165 @@ mod tests {
             }
         }"#;
 
-        let event =
-            parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
-        match event {
-            GatewayEvent::ToolStart(payload) => {
+        let result = parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::ToolStart(payload)) => {
                 assert_eq!(payload.tool_id, "t1");
                 assert_eq!(payload.name, "read_file");
             }
             _ => panic!("expected ToolStart"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
     #[test]
     fn parse_message_delta_event_real_format() {
         let raw = fixtures::message_delta_event("sess-123", "Hello");
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
-            GatewayEvent::MessageDelta(payload) => {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::MessageDelta(payload)) => {
                 assert_eq!(payload.text, "Hello");
             }
             _ => panic!("expected MessageDelta"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
 #[test]
     fn parse_message_delta_event_legacy_format() {
         let raw = fixtures::message_delta_event_legacy("sess-123", "Hello");
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
             // Legacy format has "text" at params level (no payload wrapper),
-            // so GatewayEventParams.payload is null, fails to deserialize MessageDeltaPayload,
-            // and falls through to Unknown
-            GatewayEvent::Unknown { event_type, session_id, payload: _ } => {
+            // so params.payload is null/missing, fails to deserialize MessageDeltaPayload,
+            // and falls through to MalformedKnown
+            ParsedGatewayEvent::MalformedKnown { event_type, session_id, payload, error: _ } => {
                 assert_eq!(event_type, "message.delta");
                 assert_eq!(session_id, Some("sess-123".to_string()));
-                // Note: the original text is at params level, not in payload
+                // In legacy format, payload is null (missing), text is at params level
+                assert!(payload.is_null(), "payload should be null in legacy format");
             }
-            _ => panic!("expected Unknown for legacy format"),
+            _ => panic!("expected MalformedKnown for legacy format"),
         }
     }
 
     #[test]
     fn parse_reasoning_delta_event() {
         let raw = fixtures::reasoning_delta_event("sess-123", "thinking...");
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
-            GatewayEvent::ReasoningDelta(payload) => {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(payload)) => {
                 assert_eq!(payload.text, "thinking...");
             }
             _ => panic!("expected ReasoningDelta"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
     #[test]
     fn parse_tool_start_then_complete() {
         let start = fixtures::tool_start_event("sess-123", "t1", "read_file");
-        let event = parse_gateway_event(&start).unwrap();
-        match event {
-            GatewayEvent::ToolStart(p) => {
+        let result = parse_gateway_event(&start).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::ToolStart(p)) => {
                 assert_eq!(p.name, "read_file");
                 assert_eq!(p.tool_id, "t1");
             }
             _ => panic!("expected ToolStart"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
 
         let complete = fixtures::tool_complete_event("sess-123", "t1", "read_file", "file content");
-        let event = parse_gateway_event(&complete).unwrap();
-        match event {
-            GatewayEvent::ToolComplete(p) => {
+        let result = parse_gateway_event(&complete).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::ToolComplete(p)) => {
                 assert_eq!(p.name, "read_file");
                 assert_eq!(p.result_text, Some("file content".to_string()));
             }
             _ => panic!("expected ToolComplete"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
     #[test]
     fn parse_approval_request() {
         let raw =
             fixtures::approval_request_event("sess-123", "req-1", "t1", "write_file", "echo hi");
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
-            GatewayEvent::ApprovalRequest(p) => {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::ApprovalRequest(p)) => {
                 assert_eq!(p.request_id, "req-1");
                 assert_eq!(p.name, "write_file");
                 assert_eq!(p.command, Some("echo hi".to_string()));
+                // choices should be empty by default in fixture
+                assert!(p.choices.is_empty());
             }
             _ => panic!("expected ApprovalRequest"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
     #[test]
     fn parse_message_end_carries_session_id() {
         let raw = fixtures::message_end_event("desk-123-abc");
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
-            GatewayEvent::MessageEnd(p) => {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(_p)) => {
                 // session_id is in GatewayEventParams, not in payload
                 // This test just verifies the event parses correctly
                 assert!(true);
             }
             _ => panic!("expected MessageEnd"),
         }
+        assert_eq!(routed.session_id, Some("desk-123-abc".to_string()));
     }
 
     #[test]
     fn parse_unknown_event_preserved() {
         let raw = fixtures::unknown_event("custom.event", "sess-123");
-        let event = parse_gateway_event(&raw).unwrap();
-        match event {
-            GatewayEvent::Unknown { event_type, session_id, payload: _ } => {
+        let result = parse_gateway_event(&raw).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::UnknownType { event_type, session_id, payload: _ } => {
                 assert_eq!(event_type, "custom.event");
                 assert_eq!(session_id, Some("sess-123".to_string()));
             }
             _ => panic!("expected Unknown event"),
         }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
+    }
+
+    #[test]
+    fn parse_malformed_known_event_falls_to_malformed() {
+        // tool.start with missing required field "name"
+        let json = r#"{
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {
+                "type": "tool.start",
+                "session_id": "sess-123",
+                "payload": { "tool_id": "t1" }
+            }
+        }"#;
+        
+        let result = parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
+        let routed = result.unwrap();
+        match routed.event {
+            ParsedGatewayEvent::MalformedKnown { event_type, error, .. } => {
+                assert_eq!(event_type, "tool.start");
+                assert!(error.contains("missing field") || error.contains("name"));
+            }
+            _ => panic!("expected MalformedKnown, got {:?}", routed.event),
+        }
+        assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
     #[test]
