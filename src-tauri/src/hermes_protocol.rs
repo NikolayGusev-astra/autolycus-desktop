@@ -485,6 +485,7 @@ pub struct MessageEndPayload {
 }
 
 /// Payload for `message.start` — beginning of assistant reply.
+/// Hermes emits this with empty/no payload (just `_emit("message.start", sid)`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MessageStartPayload {
@@ -500,31 +501,36 @@ pub struct ThinkingDeltaPayload {
 }
 
 /// Payload for `tool.generating` — streaming tool output.
+/// Hermes sends only `name`, `tool_id` is optional.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolGeneratingPayload {
-    pub tool_id: String,
     pub name: String,
+    #[serde(default)]
+    pub tool_id: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
 }
 
 /// Payload for `clarify.request` — agent needs clarification.
+/// Hermes uses `choices` field (not `options`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ClarifyRequestPayload {
     pub request_id: String,
     pub question: String,
     #[serde(default)]
-    pub options: Vec<String>,
+    pub choices: Vec<String>,
 }
 
 /// Payload for `sudo.request` — elevated operations.
+/// Hermes sends only request_id (reason is optional).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SudoRequestPayload {
     pub request_id: String,
-    pub reason: String,
+    #[serde(default)]
+    pub reason: Option<String>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -537,12 +543,15 @@ pub struct SudoExpirePayload {
 }
 
 /// Payload for `secret.request` — API keys, tokens.
+/// Hermes sends: request_id, prompt, env_var, metadata.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SecretRequestPayload {
     pub request_id: String,
-    pub secret_name: String,
-    pub description: Option<String>,
+    pub prompt: String,
+    pub env_var: String,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 /// Payload for `secret.expire` — secret session expired.
@@ -553,42 +562,62 @@ pub struct SecretExpirePayload {
 }
 
 /// Payload for `session.info` — running state, model/provider, tools, skills, usage, stored_session_id, desktop_contract.
+/// Hermes uses `running: bool` (not `state`), tools/skills are objects grouped by category,
+/// and includes extra fields like reasoning_effort, service_tier, approval_mode, etc.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionInfoPayload {
-    pub session_id: String,
+    #[serde(default)]
     pub stored_session_id: String,
-    pub state: String, // "running", "waiting", "completed", etc.
+
+    #[serde(default)]
+    pub running: bool,
+
     #[serde(default)]
     pub model: Option<String>,
+
     #[serde(default)]
     pub provider: Option<String>,
+
     #[serde(default)]
-    pub tools: Vec<String>,
+    pub tools: Value,
+
     #[serde(default)]
-    pub skills: Vec<String>,
+    pub skills: Value,
+
     #[serde(default)]
     pub usage: Option<Value>,
+
     #[serde(default)]
     pub desktop_contract: Option<u32>,
+
+    // Capture any additional fields Hermes may add
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, Value>,
 }
 
 /// Payload for `notification.show`.
+/// Hermes sends: id, key, text, level, kind, ttl_ms.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NotificationShowPayload {
-    pub notification_id: String,
-    pub title: String,
-    pub body: Option<String>,
+    pub id: String,
+    pub key: String,
+    pub text: String,
     #[serde(default)]
     pub level: Option<String>, // "info", "warning", "error"
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
 }
 
 /// Payload for `notification.clear`.
+/// Hermes sends: key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NotificationClearPayload {
-    pub notification_id: String,
+    pub key: String,
 }
 
 /// Parse a raw JSON-RPC value into a RoutedGatewayEvent using two-stage parsing.
@@ -643,14 +672,23 @@ pub fn parse_gateway_event(value: &Value) -> ParseResult {
                 error: e.to_string(),
             },
         },
-        "message.start" => match serde_json::from_value(payload.clone()) {
-            Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::MessageStart(p)),
-            Err(e) => ParsedGatewayEvent::MalformedKnown {
-                event_type: event_type.to_string(),
-                session_id: session_id.clone(),
-                payload: payload.clone(),
-                error: e.to_string(),
-            },
+        "message.start" => {
+            // Hermes emits message.start with NO payload (null/missing)
+            // Use empty object as default
+            let payload_for_parse = if payload.is_null() || payload.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                payload.clone()
+            };
+            match serde_json::from_value(payload_for_parse) {
+                Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::MessageStart(p)),
+                Err(e) => ParsedGatewayEvent::MalformedKnown {
+                    event_type: event_type.to_string(),
+                    session_id: session_id.clone(),
+                    payload: payload.clone(),
+                    error: e.to_string(),
+                },
+            }
         },
         "reasoning.delta" => match serde_json::from_value(payload.clone()) {
             Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(p)),
@@ -983,9 +1021,81 @@ pub mod fixtures {
         event_with_payload("error", sid, payload)
     }
 
-    /// `message.end` event.
+/// `message.end` event.
     pub fn message_end_event(session_id: &str) -> Value {
         event_with_payload("message.end", session_id, json!({}))
+    }
+
+    /// `message.start` event — Hermes emits with NO payload.
+    pub fn message_start_event(session_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {
+                "type": "message.start",
+                "session_id": session_id
+            }
+        })
+    }
+
+    /// `tool.generating` event — only name required, tool_id optional.
+    pub fn tool_generating_event(session_id: &str, name: &str, tool_id: Option<&str>) -> Value {
+        let mut payload = json!({ "name": name });
+        if let Some(tid) = tool_id {
+            payload["tool_id"] = json!(tid);
+        }
+        event_with_payload("tool.generating", session_id, payload)
+    }
+
+    /// `clarify.request` event — uses choices (not options).
+    pub fn clarify_request_event(session_id: &str, request_id: &str, question: &str, choices: Vec<&str>) -> Value {
+        event_with_payload("clarify.request", session_id, json!({
+            "request_id": request_id,
+            "question": question,
+            "choices": choices
+        }))
+    }
+
+    /// `sudo.request` event — reason optional.
+    pub fn sudo_request_event(session_id: &str, request_id: &str, reason: Option<&str>) -> Value {
+        let mut payload = json!({ "request_id": request_id });
+        if let Some(r) = reason {
+            payload["reason"] = json!(r);
+        }
+        event_with_payload("sudo.request", session_id, payload)
+    }
+
+    /// `secret.request` event — Hermes format with env_var/prompt/metadata.
+    pub fn secret_request_event(session_id: &str, request_id: &str, prompt: &str, env_var: &str) -> Value {
+        event_with_payload("secret.request", session_id, json!({
+            "request_id": request_id,
+            "prompt": prompt,
+            "env_var": env_var
+        }))
+    }
+
+    /// `session.info` event — Hermes format with running bool and tools/skills as objects.
+    pub fn session_info_event(session_id: &str, running: bool, model: Option<&str>) -> Value {
+        event_with_payload("session.info", session_id, json!({
+            "running": running,
+            "model": model,
+            "tools": {},
+            "skills": {}
+        }))
+    }
+
+    /// `notification.show` event — Hermes format with id/key/text/level/kind/ttl_ms.
+    pub fn notification_show_event(session_id: &str, id: &str, key: &str, text: &str) -> Value {
+        event_with_payload("notification.show", session_id, json!({
+            "id": id,
+            "key": key,
+            "text": text
+        }))
+    }
+
+    /// `notification.clear` event — Hermes format with key only.
+    pub fn notification_clear_event(session_id: &str, key: &str) -> Value {
+        event_with_payload("notification.clear", session_id, json!({ "key": key }))
     }
 
     /// Unknown event type for forward-compatibility testing.
