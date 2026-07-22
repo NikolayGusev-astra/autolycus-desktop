@@ -9,21 +9,25 @@
 //
 // Phase 0 (ADR-004): connect-per-message, no persistent connection yet.
 
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use std::fmt::Debug;
-use serde::Serialize;
 
 use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::chat::{parse_ws_message, ChatEvent};
-use crate::hermes_protocol::{self, RoutedGatewayEvent, ParsedGatewayEvent, GatewayEvent, JsonRpcResult, JsonRpcError, SessionCreateParams, SessionCreateResult, PromptSubmitParams, PromptSubmitResult};
+use crate::hermes_protocol::{
+    self, GatewayEvent, JsonRpcError, JsonRpcResult, ParsedGatewayEvent, PromptSubmitParams,
+    PromptSubmitResult, RoutedGatewayEvent, SessionCreateParams, SessionCreateResult,
+};
 
 /// Generic RPC timeout duration.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,9 +53,9 @@ where
     R: for<'de> Deserialize<'de> + std::fmt::Debug,
 {
     let tx_guard = ws_state.cmd_tx.lock().await;
-    let tx = tx_guard
-        .as_ref()
-        .ok_or(GatewayClientError::Protocol("not connected: no cmd_tx".into()))?;
+    let tx = tx_guard.as_ref().ok_or(GatewayClientError::Protocol(
+        "not connected: no cmd_tx".into(),
+    ))?;
     let id = next_rpc_id();
     let params_value = serde_json::to_value(&params)
         .map_err(|e| GatewayClientError::Protocol(format!("serialize params: {}", e)))?;
@@ -74,7 +78,8 @@ where
     // Parse the response as a typed result
     let parsed: JsonRpcResult<R> = serde_json::from_value(response_value)
         .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))?;
-    parsed.into_result()
+    parsed
+        .into_result()
         .map_err(|e| GatewayClientError::BackendError(format!("{}: {}", e.message, e.code)))
 }
 
@@ -316,25 +321,6 @@ where
     }
 }
 
-/// Send `prompt.submit` for the given session.
-async fn submit_prompt<S>(ws: &mut S, session_id: &str, text: &str) -> Result<(), WsError>
-where
-    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
-    // We don't wait for the prompt.submit response (it only acks turn-start;
-    // real content arrives as events). The id is still sent per JSON-RPC.
-    let req = json!({
-        "jsonrpc": "2.0",
-        "id": next_rpc_id(),
-        "method": "prompt.submit",
-        "params": {
-            "session_id": session_id,
-            "text": text,
-        },
-    });
-    send_json(ws, &req).await
-}
-
 /// Read streaming events until done/error or socket close.
 ///
 /// Returns `Ok(Some(session_id))` on a clean `Done` (carrying the session id),
@@ -541,10 +527,16 @@ fn classify_frame(value: &Value) -> Option<IncomingFrame> {
     // Has "id" → JSON-RPC response
     if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
         if let Some(result) = value.get("result") {
-            return Some(IncomingFrame::RpcResponse { id, result: result.clone() });
+            return Some(IncomingFrame::RpcResponse {
+                id,
+                result: result.clone(),
+            });
         }
         if let Some(error) = value.get("error") {
-            return Some(IncomingFrame::RpcError { id, error: error.clone() });
+            return Some(IncomingFrame::RpcError {
+                id,
+                error: error.clone(),
+            });
         }
         return None;
     }
@@ -603,10 +595,8 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
         ParsedGatewayEvent::Known(GatewayEvent::MessageStart(_)) => Some(ChatEvent::Status {
             status: "streaming".to_string(),
         }),
-        ParsedGatewayEvent::Known(GatewayEvent::MessageComplete(p)) => Some(ChatEvent::Done {
-            session_id: Some(routed.session_id.clone().unwrap_or_default()),
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)) => Some(ChatEvent::Done {
+        ParsedGatewayEvent::Known(GatewayEvent::MessageComplete(_))
+        | ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(_)) => Some(ChatEvent::Done {
             session_id: Some(routed.session_id.clone().unwrap_or_default()),
         }),
         ParsedGatewayEvent::Known(GatewayEvent::ToolStart(p)) => Some(ChatEvent::ToolStart {
@@ -619,39 +609,47 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
             output: p.result_text.clone().unwrap_or_default(),
             duration_ms: p.duration_s.map(|s| (s * 1000.0) as u64).unwrap_or(0),
         }),
-        ParsedGatewayEvent::Known(GatewayEvent::ApprovalRequest(p)) => Some(ChatEvent::ApprovalRequest {
-            request_id: p.request_id.clone(),
-            tool_name: p.name.clone(),
-            tool_input: p.tool_input.clone().unwrap_or_default(),
-            action: p.action.clone().unwrap_or_default(),
-            command_class: p.command_class.clone().unwrap_or("write".to_string()),
-        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ApprovalRequest(p)) => {
+            Some(ChatEvent::ApprovalRequest {
+                request_id: p.request_id.clone(),
+                tool_name: p.name.clone(),
+                tool_input: p.tool_input.clone().unwrap_or_default(),
+                action: p.action.clone().unwrap_or_default(),
+                command_class: p.command_class.clone().unwrap_or("write".to_string()),
+            })
+        }
         ParsedGatewayEvent::Known(GatewayEvent::StatusUpdate(p)) => Some(ChatEvent::Status {
-            status: p.text.clone().unwrap_or_else(|| p.kind.clone().unwrap_or("unknown".to_string())),
+            status: p
+                .text
+                .clone()
+                .unwrap_or_else(|| p.kind.clone().unwrap_or("unknown".to_string())),
         }),
-        ParsedGatewayEvent::Known(GatewayEvent::PipelineStatus(p)) => Some(ChatEvent::PipelineStatus {
-            backend: p.backend.clone(),
-            model: p.model.clone(),
-            tokens_used: p.tokens_used,
-            tokens_limit: p.tokens_limit,
-            cost_usd: p.cost_usd,
-        }),
+        ParsedGatewayEvent::Known(GatewayEvent::PipelineStatus(p)) => {
+            Some(ChatEvent::PipelineStatus {
+                backend: p.backend.clone(),
+                model: p.model.clone(),
+                tokens_used: p.tokens_used,
+                tokens_limit: p.tokens_limit,
+                cost_usd: p.cost_usd,
+            })
+        }
         ParsedGatewayEvent::Known(GatewayEvent::Error(p)) => Some(ChatEvent::Error {
             message: p.message.clone(),
         }),
-        ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(p)) => Some(ChatEvent::Reasoning {
-            content: p.text.clone(),
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::ToolGenerating(p)) => Some(ChatEvent::ToolGenerating {
-            name: p.name.clone(),
-            tool_call_id: p.tool_id.clone(),
-            content: p.text.clone(),
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::ClarifyRequest(p)) => Some(ChatEvent::ClarifyRequest {
-            request_id: p.request_id.clone(),
-            question: p.question.clone(),
-            choices: p.choices.clone().unwrap_or_default(),
-        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ToolGenerating(p)) => {
+            Some(ChatEvent::ToolGenerating {
+                name: p.name.clone(),
+                tool_call_id: p.tool_id.clone(),
+                content: p.text.clone(),
+            })
+        }
+        ParsedGatewayEvent::Known(GatewayEvent::ClarifyRequest(p)) => {
+            Some(ChatEvent::ClarifyRequest {
+                request_id: p.request_id.clone(),
+                question: p.question.clone(),
+                choices: p.choices.clone().unwrap_or_default(),
+            })
+        }
         ParsedGatewayEvent::Known(GatewayEvent::SudoRequest(p)) => Some(ChatEvent::SudoRequest {
             request_id: p.request_id.clone(),
             reason: p.reason.clone(),
@@ -660,12 +658,14 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
         ParsedGatewayEvent::Known(GatewayEvent::SudoExpire(p)) => Some(ChatEvent::SudoExpire {
             request_id: p.request_id.clone(),
         }),
-        ParsedGatewayEvent::Known(GatewayEvent::SecretRequest(p)) => Some(ChatEvent::SecretRequest {
-            request_id: p.request_id.clone(),
-            prompt: p.prompt.clone(),
-            env_var: p.env_var.clone(),
-            metadata: p.metadata.clone(),
-        }),
+        ParsedGatewayEvent::Known(GatewayEvent::SecretRequest(p)) => {
+            Some(ChatEvent::SecretRequest {
+                request_id: p.request_id.clone(),
+                prompt: p.prompt.clone(),
+                env_var: p.env_var.clone(),
+                metadata: p.metadata.clone(),
+            })
+        }
         ParsedGatewayEvent::Known(GatewayEvent::SecretExpire(p)) => Some(ChatEvent::SecretExpire {
             request_id: p.request_id.clone(),
         }),
@@ -680,34 +680,19 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
             usage: p.usage.clone(),
             desktop_contract: p.desktop_contract,
         }),
-        ParsedGatewayEvent::Known(GatewayEvent::NotificationShow(p)) => Some(ChatEvent::Notification {
-            id: p.id.clone(),
-            key: p.key.clone(),
-            text: p.text.clone(),
-            level: p.level.clone(),
-            kind: p.kind.clone(),
-            ttl_ms: p.ttl_ms,
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)) => Some(ChatEvent::NotificationClear {
-            key: p.key.clone(),
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)) => Some(ChatEvent::Done {
-            session_id: Some(routed.session_id.clone().unwrap_or_default()),
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::NotificationShow(p)) => Some(ChatEvent::Notification {
-            id: p.id.clone(),
-            key: p.key.clone(),
-            text: p.text.clone(),
-            level: p.level.clone(),
-            kind: p.kind.clone(),
-            ttl_ms: p.ttl_ms,
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)) => Some(ChatEvent::NotificationClear {
-            key: p.key.clone(),
-        }),
-        ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)) => Some(ChatEvent::Done {
-            session_id: Some(routed.session_id.clone().unwrap_or_default()),
-        }),
+        ParsedGatewayEvent::Known(GatewayEvent::NotificationShow(p)) => {
+            Some(ChatEvent::Notification {
+                id: p.id.clone(),
+                key: p.key.clone(),
+                text: p.text.clone(),
+                level: p.level.clone(),
+                kind: p.kind.clone(),
+                ttl_ms: p.ttl_ms,
+            })
+        }
+        ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)) => {
+            Some(ChatEvent::NotificationClear { key: p.key.clone() })
+        }
         ParsedGatewayEvent::MalformedKnown {
             event_type,
             session_id: _,
@@ -717,7 +702,7 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
             tracing::warn!(target: "steersman_desktop_lib::ws", event_type, error, "malformed known event, falling back to legacy parser");
             // Could fall back to legacy parser here if needed
             None
-        },
+        }
         ParsedGatewayEvent::UnknownType {
             event_type,
             session_id: _,
@@ -725,7 +710,7 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
         } => {
             tracing::warn!(target: "steersman_desktop_lib::ws", event_type, "unknown event type");
             None
-        },
+        }
     }
 }
 /// Extracted for testing — the reader task calls this before `ws.send`.
@@ -773,7 +758,9 @@ impl WsState {
 
     /// Bump generation and return the new value.
     pub fn next_generation(&self) -> u64 {
-        self.generation.fetch_add(1, std::sync::atomic::Ordering::Release) + 1
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1
     }
 }
 
@@ -790,100 +777,103 @@ impl Default for WsState {
 // entire lifetime, reading events and dispatching WsCommand via mpsc.
 
 /// Ensure the persistent WS connection is open. Idempotent: if already
-    /// `Connected` or `Connecting`, returns `Ok(())` without re-connecting.
-    ///
-    /// On first call: connects, waits for `gateway.ready`, spawns the reader task,
-    /// stores the `cmd_tx` sender into `ws_state`, and sets state to `Connected`.
-    /// On socket drop (detected by the reader task), state returns to
-    /// `Disconnected` and the next call re-connects.
-    pub async fn ensure_ws_connection(
-        ws_url: &str,
-        emit_fn: EmitFn,
-        ws_state: &Arc<WsState>,
-    ) -> Result<(), WsError> {
-        // Fast path: already connected.
-        {
-            let state = ws_state.state.lock().await;
-            if *state == ConnectionState::Connected {
-                return Ok(());
-            }
-            if *state == ConnectionState::Connecting {
-                drop(state);
-                for _ in 0..50 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let s = ws_state.state.lock().await;
-                    if *s == ConnectionState::Connected {
-                        return Ok(());
-                    }
-                    if *s == ConnectionState::Disconnected {
-                        break;
-                    }
+/// `Connected` or `Connecting`, returns `Ok(())` without re-connecting.
+///
+/// On first call: connects, waits for `gateway.ready`, spawns the reader task,
+/// stores the `cmd_tx` sender into `ws_state`, and sets state to `Connected`.
+/// On socket drop (detected by the reader task), state returns to
+/// `Disconnected` and the next call re-connects.
+pub async fn ensure_ws_connection(
+    ws_url: &str,
+    emit_fn: EmitFn,
+    ws_state: &Arc<WsState>,
+) -> Result<(), WsError> {
+    // Fast path: already connected.
+    {
+        let state = ws_state.state.lock().await;
+        if *state == ConnectionState::Connected {
+            return Ok(());
+        }
+        if *state == ConnectionState::Connecting {
+            drop(state);
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let s = ws_state.state.lock().await;
+                if *s == ConnectionState::Connected {
+                    return Ok(());
+                }
+                if *s == ConnectionState::Disconnected {
+                    break;
                 }
             }
         }
-
-        // Set Connecting.
-        {
-            let mut state = ws_state.state.lock().await;
-            if *state == ConnectionState::Connected {
-                return Ok(());
-            }
-            *state = ConnectionState::Connecting;
-        }
-
-        // Connect.
-        tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
-        let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
-            Ok(result) => result,
-            Err(e) => {
-                *ws_state.state.lock().await = ConnectionState::Disconnected;
-                return Err(WsError::Connect(e.to_string()));
-            }
-        };
-
-        // Strict gateway.ready barrier: fail if ready not received within timeout.
-        let ws = match tokio::time::timeout(
-            Duration::from_secs(5),
-            wait_for_gateway_ready(ws),
-        )
-        .await
-        {
-            Ok(Ok(ws)) => ws,
-            Ok(Err(e)) => {
-                *ws_state.state.lock().await = ConnectionState::Disconnected;
-                return Err(WsError::Connect(e.to_string()));
-            }
-            Err(_) => {
-                *ws_state.state.lock().await = ConnectionState::Disconnected;
-                return Err(WsError::Connect("gateway.ready timeout".into()));
-            }
-        };
-
-        // Create the mpsc channel for command handlers → reader task.
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-
-        // Bump generation before storing cmd_tx.
-        let generation = ws_state.next_generation();
-
-        *ws_state.ws_url.lock().await = ws_url.to_string();
-        *ws_state.cmd_tx.lock().await = Some(cmd_tx);
-
-        // Spawn the reader task with the generation.
-        tokio::spawn(reader_task(ws, cmd_rx, emit_fn, Arc::clone(ws_state), generation));
-
-        *ws_state.state.lock().await = ConnectionState::Connected;
-        tracing::info!(target: "steersman_desktop_lib::ws", generation, "persistent connection established");
-
-        Ok(())
     }
+
+    // Set Connecting.
+    {
+        let mut state = ws_state.state.lock().await;
+        if *state == ConnectionState::Connected {
+            return Ok(());
+        }
+        *state = ConnectionState::Connecting;
+    }
+
+    // Connect.
+    tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
+    let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
+        Ok(result) => result,
+        Err(e) => {
+            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            return Err(WsError::Connect(e.to_string()));
+        }
+    };
+
+    // Strict gateway.ready barrier: fail if ready not received within timeout.
+    let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
+            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            return Err(WsError::Connect(e.to_string()));
+        }
+        Err(_) => {
+            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            return Err(WsError::Connect("gateway.ready timeout".into()));
+        }
+    };
+
+    // Create the mpsc channel for command handlers → reader task.
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+
+    // Bump generation before storing cmd_tx.
+    let generation = ws_state.next_generation();
+
+    *ws_state.ws_url.lock().await = ws_url.to_string();
+    *ws_state.cmd_tx.lock().await = Some(cmd_tx);
+
+    // Spawn the reader task with the generation.
+    tokio::spawn(reader_task(
+        ws,
+        cmd_rx,
+        emit_fn,
+        Arc::clone(ws_state),
+        generation,
+    ));
+
+    *ws_state.state.lock().await = ConnectionState::Connected;
+    tracing::info!(target: "steersman_desktop_lib::ws", generation, "persistent connection established");
+
+    Ok(())
+}
 
 /// Strict gateway.ready barrier. Returns Err on any read error before ready.
 async fn wait_for_gateway_ready<S>(mut ws: S) -> Result<S, GatewayClientError>
 where
-    S: futures::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin
-       + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin
-       + Send
-       + 'static,
+    S: futures::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin
+        + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send
+        + 'static,
 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -907,7 +897,11 @@ where
             }
             Ok(Some(Ok(_))) => {} // Non-text frames - ignore
             Ok(Some(Err(e))) => return Err(GatewayClientError::Stream(e.to_string())),
-            _ => return Err(GatewayClientError::Connect("connection closed before gateway.ready".into())),
+            _ => {
+                return Err(GatewayClientError::Connect(
+                    "connection closed before gateway.ready".into(),
+                ))
+            }
         }
     }
 }
@@ -932,129 +926,150 @@ async fn reader_task<S>(
     // Pending RPC map: resolves responses by ID.
     let mut pending: HashMap<RpcId, PendingRequest> = HashMap::new();
 
+    // Periodic timer for pending RPC expiration (every 5s).
+    let mut cleanup_tick = tokio::time::interval(Duration::from_secs(5));
+    cleanup_tick.tick().await; // suppress initial immediate tick
+
     loop {
         // Check for expired pending RPCs
         let now = Instant::now();
         let mut expired_ids: Vec<RpcId> = Vec::new();
         for (id, pending_req) in &pending {
-            if now.duration_since(pending_req.timeout) > Duration::from_secs(30) {
+            if now >= pending_req.timeout {
                 expired_ids.push(*id);
             }
         }
         for id in expired_ids {
-            if let Some(mut pending_req) = pending.remove(&id) {
+            if let Some(pending_req) = pending.remove(&id) {
                 let _ = pending_req.reply.send(Err(GatewayClientError::RpcTimeout));
             }
         }
 
         tokio::select! {
+            // Periodic cleanup of expired pending RPCs
+            _ = cleanup_tick.tick() => {
+                let now = Instant::now();
+                let mut expired_ids: Vec<RpcId> = Vec::new();
+                for (id, pending_req) in &pending {
+                    if now >= pending_req.timeout {
+                        expired_ids.push(*id);
+                    }
+                }
+                for id in expired_ids {
+                    if let Some(pending_req) = pending.remove(&id) {
+                        let _ = pending_req.reply.send(Err(GatewayClientError::RpcTimeout));
+                    }
+                }
+            }
             // Read incoming WS frames
             msg = ws.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        let value: Value = match serde_json::from_str(&text) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                let value: Value = match serde_json::from_str(&text) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
 
-                        match classify_frame(&value) {
-                            Some(IncomingFrame::RpcResponse { id, result }) => {
-                                if let Some(pending_req) = pending.remove(&id) {
-                                    let _ = pending_req.reply.send(Ok(result));
-                                } else {
-                                    tracing::warn!(target: "steersman_desktop_lib::ws", id, "RPC response for unknown request");
-                                }
-                            }
-                            Some(IncomingFrame::RpcError { id, error }) => {
-                                if let Some(pending_req) = pending.remove(&id) {
-                                    let msg = error.get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("RPC error");
-                                    let _ = pending_req.reply.send(
-                                        Err(GatewayClientError::BackendError(msg.to_string()))
-                                    );
-                                }
-                            }
-                            Some(IncomingFrame::Event(routed_event)) => {
-                                // Convert via typed parser to ChatEvent (replaces legacy parse_ws_message)
-                                if let Some(chat_event) = translate_gateway_event(&routed_event) {
-                                    (emit_fn)(&chat_event);
-                                    // Update session_id from Done events
-                                    if let ChatEvent::Done { session_id: Some(ref sid) } = chat_event {
-                                        let mut sid_lock = ws_state.session_id.lock().await;
-                                        if !sid.is_empty() {
-                                            *sid_lock = Some(sid.clone());
+                                match classify_frame(&value) {
+                                    Some(IncomingFrame::RpcResponse { id, result }) => {
+                                        if let Some(pending_req) = pending.remove(&id) {
+                                            let _ = pending_req.reply.send(Ok(result));
+                                        } else {
+                                            tracing::warn!(target: "steersman_desktop_lib::ws", id, "RPC response for unknown request");
                                         }
                                     }
-                                }
-// Track session_id from session.info events (use live session_id from params, not stored_session_id)
-                            if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(_)) = &routed_event.event {
-                                if let Some(live_sid) = &routed_event.session_id {
-                                    if !live_sid.is_empty() {
-                                        *ws_state.session_id.lock().await = Some(live_sid.clone());
+                                    Some(IncomingFrame::RpcError { id, error }) => {
+                                        if let Some(pending_req) = pending.remove(&id) {
+                                            let msg = error.get("message")
+                                                .and_then(|m| m.as_str())
+                                                .unwrap_or("RPC error");
+                                            let _ = pending_req.reply.send(
+                                                Err(GatewayClientError::BackendError(msg.to_string()))
+                                            );
+                                        }
+                                    }
+                                    Some(IncomingFrame::Event(routed_event)) => {
+                                        // Convert via typed parser to ChatEvent (replaces legacy parse_ws_message)
+                                        if let Some(chat_event) = translate_gateway_event(&routed_event) {
+                                            (emit_fn)(&chat_event);
+                                            // Update session_id from Done events
+                                            if let ChatEvent::Done { session_id: Some(ref sid) } = chat_event {
+                                                let mut sid_lock = ws_state.session_id.lock().await;
+                                                if !sid.is_empty() {
+                                                    *sid_lock = Some(sid.clone());
+                                                }
+                                            }
+                                        }
+        // Track session_id from session.info events (use live session_id from params, not stored_session_id)
+                                    if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(_)) = &routed_event.event {
+                                        if let Some(live_sid) = &routed_event.session_id {
+                                            if !live_sid.is_empty() {
+                                                *ws_state.session_id.lock().await = Some(live_sid.clone());
+                                            }
+                                        }
+                                    }
+                                    }
+                                    None => {
+                                        // Unrecognized frame - log and skip
+                                        tracing::warn!(target: "steersman_desktop_lib::ws", "unrecognized frame");
                                     }
                                 }
                             }
+                            Some(Ok(Message::Close(_))) => {
+                                tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
+                                break;
+                            }
+                            Some(Ok(_)) => {} // Binary, Ping, Pong — ignore
+                            Some(Err(e)) => {
+                                tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, "ws read error");
+                                break;
                             }
                             None => {
-                                // Unrecognized frame - log and skip
-                                tracing::warn!(target: "steersman_desktop_lib::ws", "unrecognized frame");
+                                tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
+                                break;
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
-                        break;
-                    }
-                    Some(Ok(_)) => {} // Binary, Ping, Pong — ignore
-                    Some(Err(e)) => {
-                        tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, "ws read error");
-                        break;
-                    }
-                    None => {
-                        tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
-                        break;
-                    }
-                }
-            }
-            // Process commands from Tauri command handlers.
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(WsCommand::Rpc { id, method, params, reply }) => {
-                        // Build JSON-RPC 2.0 request
-                        let req = json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "method": method,
-                            "params": params,
-                        });
-                        // Register pending before sending
-                        pending.insert(id, PendingRequest {
-                            reply,
-                            method: method.clone(),
-                            timeout: Instant::now() + Duration::from_secs(30),
-                        });
-                        // Send
-                        if let Err(e) = send_json_gateway(&mut ws, &req).await {
-                            tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, method, "RPC send failed");
-                            // Remove from pending and notify caller
-                            if let Some(p) = pending.remove(&id) {
-                                let _ = p.reply.send(Err(GatewayClientError::Protocol(e.to_string())));
+                    // Process commands from Tauri command handlers.
+                    cmd = cmd_rx.recv() => {
+                        match cmd {
+                            Some(WsCommand::Rpc { id, method, params, reply }) => {
+                                // Build JSON-RPC 2.0 request
+                                let req = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "method": method,
+                                    "params": params,
+                                });
+                                // Register pending before sending
+                                pending.insert(id, PendingRequest {
+                                    reply,
+                                    method: method.clone(),
+                                    timeout: Instant::now() + Duration::from_secs(30),
+                                });
+                                // Send
+                                if let Err(e) = send_json_gateway(&mut ws, &req).await {
+                                    tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, method, "RPC send failed");
+                                    // Remove from pending and notify caller
+                                    if let Some(p) = pending.remove(&id) {
+                                        let _ = p.reply.send(Err(GatewayClientError::Protocol(e.to_string())));
+                                    }
+                                    break;
+                                }
                             }
-                            break;
+                            Some(WsCommand::Shutdown) | None => {
+                                tracing::info!(target: "steersman_desktop_lib::ws", "reader task shutting down");
+                                break;
+                            }
                         }
                     }
-                    Some(WsCommand::Shutdown) | None => {
-                        tracing::info!(target: "steersman_desktop_lib::ws", "reader task shutting down");
-                        break;
-                    }
                 }
-            }
-        }
     }
 
     // Generation-guarded cleanup: only clear state if we are still the current generation.
-    let current_gen = ws_state.generation.load(std::sync::atomic::Ordering::Acquire);
+    let current_gen = ws_state
+        .generation
+        .load(std::sync::atomic::Ordering::Acquire);
     if current_gen == my_generation {
         *ws_state.state.lock().await = ConnectionState::Disconnected;
         *ws_state.cmd_tx.lock().await = None;
@@ -1062,7 +1077,9 @@ async fn reader_task<S>(
 
     // Complete all pending RPCs with ConnectionLost.
     for (_, pending_req) in pending.drain() {
-        let _ = pending_req.reply.send(Err(GatewayClientError::ConnectionLost));
+        let _ = pending_req
+            .reply
+            .send(Err(GatewayClientError::ConnectionLost));
     }
 
     tracing::info!(target: "steersman_desktop_lib::ws", generation = my_generation, "reader task exited");
@@ -1071,53 +1088,18 @@ async fn reader_task<S>(
 /// Internal helper for the reader task to send JSON-RPC frames.
 async fn send_json_gateway<S>(ws: &mut S, value: &Value) -> Result<(), GatewayClientError>
 where
-    S: futures::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin
-       + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin
-       + Send
-       + 'static,
+    S: futures::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin
+        + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send
+        + 'static,
 {
-    let text =
-        serde_json::to_string(value).map_err(|e| GatewayClientError::Protocol(format!("encode: {}", e)))?;
+    let text = serde_json::to_string(value)
+        .map_err(|e| GatewayClientError::Protocol(format!("encode: {}", e)))?;
     ws.send(Message::Text(text))
         .await
         .map_err(|e| GatewayClientError::Protocol(format!("ws send: {}", e)))
-}
-
-/// Submit a prompt on the persistent connection using the generic RPC dispatcher.
-/// Waits for the RPC acknowledgement from Hermes before returning.
-pub async fn submit_prompt_on_connection(
-    ws_state: &WsState,
-    session_id: &str,
-    text: &str,
-) -> Result<PromptSubmitResult, WsError> {
-    call_rpc(
-        ws_state,
-        "prompt.submit",
-        PromptSubmitParams {
-            session_id: session_id.to_owned(),
-            text: text.to_owned(),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
-/// Create a new session on the persistent connection using the generic RPC dispatcher.
-/// Waits for the RPC acknowledgement with timeout.
-pub async fn create_session_on_connection(
-    ws_state: &WsState,
-    source: &str,
-) -> Result<SessionCreateResult, WsError> {
-    call_rpc(
-        ws_state,
-        "session.create",
-        SessionCreateParams {
-            source: source.to_owned(),
-            cols: 96,
-        },
-        RPC_TIMEOUT,
-    )
-    .await
 }
 
 // Callback type for emitting chat events. Production wraps `app_handle.emit`;
@@ -1307,7 +1289,12 @@ mod tests {
         .unwrap();
         let cmd = rx.recv().await.unwrap();
         match cmd {
-            WsCommand::Rpc { id: _, method, params, reply } => {
+            WsCommand::Rpc {
+                id: _,
+                method,
+                params,
+                reply,
+            } => {
                 assert_eq!(method, "session.create");
                 assert_eq!(params["source"], "briefing_smart");
                 // Simulate the reader task sending back a session_id.

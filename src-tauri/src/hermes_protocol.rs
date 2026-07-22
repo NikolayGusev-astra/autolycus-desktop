@@ -635,7 +635,9 @@ pub fn parse_gateway_event(value: &Value) -> ParseResult {
     }
 
     // Extract params and deserialize as GatewayEventParams
-    let params = value.get("params").ok_or_else(|| ProtocolError::InvalidParams("missing params".into()))?;
+    let params = value
+        .get("params")
+        .ok_or_else(|| ProtocolError::InvalidParams("missing params".into()))?;
     let params: GatewayEventParams = serde_json::from_value(params.clone())
         .map_err(|e| ProtocolError::JsonError(e.to_string()))?;
 
@@ -675,7 +677,9 @@ pub fn parse_gateway_event(value: &Value) -> ParseResult {
         "message.start" => {
             // Hermes emits message.start with NO payload (null/missing)
             // Use empty object as default
-            let payload_for_parse = if payload.is_null() || payload.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+            let payload_for_parse = if payload.is_null()
+                || payload.as_object().map(|o| o.is_empty()).unwrap_or(false)
+            {
                 serde_json::Value::Object(serde_json::Map::new())
             } else {
                 payload.clone()
@@ -689,7 +693,7 @@ pub fn parse_gateway_event(value: &Value) -> ParseResult {
                     error: e.to_string(),
                 },
             }
-        },
+        }
         "reasoning.delta" => match serde_json::from_value(payload.clone()) {
             Ok(p) => ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(p)),
             Err(e) => ParsedGatewayEvent::MalformedKnown {
@@ -953,24 +957,37 @@ pub mod fixtures {
 
     /// `tool.start` event.
     pub fn tool_start_event(session_id: &str, tool_id: &str, name: &str) -> Value {
-        event_with_payload("tool.start", session_id, json!({
-            "tool_id": tool_id,
-            "name": name
-        }))
+        event_with_payload(
+            "tool.start",
+            session_id,
+            json!({
+                "tool_id": tool_id,
+                "name": name
+            }),
+        )
     }
 
     /// `tool.complete` event — matches Hermes wire format.
-    pub fn tool_complete_event(session_id: &str, tool_id: &str, name: &str, result_text: &str) -> Value {
-        event_with_payload("tool.complete", session_id, json!({
-            "tool_id": tool_id,
-            "name": name,
-            "args": {},
-            "result": { "text": result_text },
-            "duration_s": 0.042,
-            "summary": "completed",
-            "result_text": result_text,
-            "inline_diff": null
-        }))
+    pub fn tool_complete_event(
+        session_id: &str,
+        tool_id: &str,
+        name: &str,
+        result_text: &str,
+    ) -> Value {
+        event_with_payload(
+            "tool.complete",
+            session_id,
+            json!({
+                "tool_id": tool_id,
+                "name": name,
+                "args": {},
+                "result": { "text": result_text },
+                "duration_s": 0.042,
+                "summary": "completed",
+                "result_text": result_text,
+                "inline_diff": null
+            }),
+        )
     }
 
     /// `approval.request` event.
@@ -981,14 +998,18 @@ pub mod fixtures {
         name: &str,
         command: &str,
     ) -> Value {
-        event_with_payload("approval.request", session_id, json!({
-            "request_id": request_id,
-            "tool_id": tool_id,
-            "name": name,
-            "command": command,
-            "action": "execute",
-            "command_class": "write"
-        }))
+        event_with_payload(
+            "approval.request",
+            session_id,
+            json!({
+                "request_id": request_id,
+                "tool_id": tool_id,
+                "name": name,
+                "command": command,
+                "action": "execute",
+                "command_class": "write"
+            }),
+        )
     }
 
     /// `status.update` event.
@@ -1005,13 +1026,17 @@ pub mod fixtures {
         tokens_limit: u64,
         cost_usd: f64,
     ) -> Value {
-        event_with_payload("pipeline.status", session_id, json!({
-            "backend": backend,
-            "model": model,
-            "tokens_used": tokens_used,
-            "tokens_limit": tokens_limit,
-            "cost_usd": cost_usd
-        }))
+        event_with_payload(
+            "pipeline.status",
+            session_id,
+            json!({
+                "backend": backend,
+                "model": model,
+                "tokens_used": tokens_used,
+                "tokens_limit": tokens_limit,
+                "cost_usd": cost_usd
+            }),
+        )
     }
 
     /// `error` streaming event.
@@ -1021,7 +1046,7 @@ pub mod fixtures {
         event_with_payload("error", sid, payload)
     }
 
-/// `message.end` event.
+    /// `message.end` event.
     pub fn message_end_event(session_id: &str) -> Value {
         event_with_payload("message.end", session_id, json!({}))
     }
@@ -1048,12 +1073,21 @@ pub mod fixtures {
     }
 
     /// `clarify.request` event — uses choices (not options).
-    pub fn clarify_request_event(session_id: &str, request_id: &str, question: &str, choices: Vec<&str>) -> Value {
-        event_with_payload("clarify.request", session_id, json!({
-            "request_id": request_id,
-            "question": question,
-            "choices": choices
-        }))
+    pub fn clarify_request_event(
+        session_id: &str,
+        request_id: &str,
+        question: &str,
+        choices: Vec<&str>,
+    ) -> Value {
+        event_with_payload(
+            "clarify.request",
+            session_id,
+            json!({
+                "request_id": request_id,
+                "question": question,
+                "choices": choices
+            }),
+        )
     }
 
     /// `sudo.request` event — reason optional.
@@ -1066,31 +1100,48 @@ pub mod fixtures {
     }
 
     /// `secret.request` event — Hermes format with env_var/prompt/metadata.
-    pub fn secret_request_event(session_id: &str, request_id: &str, prompt: &str, env_var: &str) -> Value {
-        event_with_payload("secret.request", session_id, json!({
-            "request_id": request_id,
-            "prompt": prompt,
-            "env_var": env_var
-        }))
+    pub fn secret_request_event(
+        session_id: &str,
+        request_id: &str,
+        prompt: &str,
+        env_var: &str,
+    ) -> Value {
+        event_with_payload(
+            "secret.request",
+            session_id,
+            json!({
+                "request_id": request_id,
+                "prompt": prompt,
+                "env_var": env_var
+            }),
+        )
     }
 
     /// `session.info` event — Hermes format with running bool and tools/skills as objects.
     pub fn session_info_event(session_id: &str, running: bool, model: Option<&str>) -> Value {
-        event_with_payload("session.info", session_id, json!({
-            "running": running,
-            "model": model,
-            "tools": {},
-            "skills": {}
-        }))
+        event_with_payload(
+            "session.info",
+            session_id,
+            json!({
+                "running": running,
+                "model": model,
+                "tools": {},
+                "skills": {}
+            }),
+        )
     }
 
     /// `notification.show` event — Hermes format with id/key/text/level/kind/ttl_ms.
     pub fn notification_show_event(session_id: &str, id: &str, key: &str, text: &str) -> Value {
-        event_with_payload("notification.show", session_id, json!({
-            "id": id,
-            "key": key,
-            "text": text
-        }))
+        event_with_payload(
+            "notification.show",
+            session_id,
+            json!({
+                "id": id,
+                "key": key,
+                "text": text
+            }),
+        )
     }
 
     /// `notification.clear` event — Hermes format with key only.
@@ -1147,7 +1198,7 @@ mod tests {
         assert_eq!(result.info.desktop_contract, 4);
     }
 
-#[test]
+    #[test]
     fn prompt_submit_result_deserializes_real_wire_format() {
         let json = r#"{
             "jsonrpc": "2.0",
@@ -1157,10 +1208,10 @@ mod tests {
                 "turn_isolation": true
             }
         }"#;
-        
+
         let envelope: JsonRpcResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
         let result: PromptSubmitResult = serde_json::from_value(envelope.result).unwrap();
-        
+
         assert_eq!(result.status, PromptSubmitStatus::Streaming);
         assert_eq!(result.turn_isolation, true);
     }
@@ -1174,7 +1225,7 @@ mod tests {
         assert_eq!(json["params"]["text"], "Hello world");
     }
 
-#[test]
+    #[test]
     fn parse_gateway_ready_event() {
         let raw = fixtures::gateway_ready_event();
         let result = parse_gateway_event(&raw).unwrap();
@@ -1204,7 +1255,8 @@ mod tests {
             }
         }"#;
 
-        let result = parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
+        let result =
+            parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
         let routed = result.unwrap();
         match routed.event {
             ParsedGatewayEvent::Known(GatewayEvent::ToolStart(payload)) => {
@@ -1230,7 +1282,7 @@ mod tests {
         assert_eq!(routed.session_id, Some("sess-123".to_string()));
     }
 
-#[test]
+    #[test]
     fn parse_message_delta_event_legacy_format() {
         let raw = fixtures::message_delta_event_legacy("sess-123", "Hello");
         let result = parse_gateway_event(&raw).unwrap();
@@ -1239,7 +1291,12 @@ mod tests {
             // Legacy format has "text" at params level (no payload wrapper),
             // so params.payload is null/missing, fails to deserialize MessageDeltaPayload,
             // and falls through to MalformedKnown
-            ParsedGatewayEvent::MalformedKnown { event_type, session_id, payload, error: _ } => {
+            ParsedGatewayEvent::MalformedKnown {
+                event_type,
+                session_id,
+                payload,
+                error: _,
+            } => {
                 assert_eq!(event_type, "message.delta");
                 assert_eq!(session_id, Some("sess-123".to_string()));
                 // In legacy format, payload is null (missing), text is at params level
@@ -1331,7 +1388,11 @@ mod tests {
         let result = parse_gateway_event(&raw).unwrap();
         let routed = result.unwrap();
         match routed.event {
-            ParsedGatewayEvent::UnknownType { event_type, session_id, payload: _ } => {
+            ParsedGatewayEvent::UnknownType {
+                event_type,
+                session_id,
+                payload: _,
+            } => {
                 assert_eq!(event_type, "custom.event");
                 assert_eq!(session_id, Some("sess-123".to_string()));
             }
@@ -1352,11 +1413,14 @@ mod tests {
                 "payload": { "tool_id": "t1" }
             }
         }"#;
-        
-        let result = parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
+
+        let result =
+            parse_gateway_event(&serde_json::from_str::<serde_json::Value>(json).unwrap()).unwrap();
         let routed = result.unwrap();
         match routed.event {
-            ParsedGatewayEvent::MalformedKnown { event_type, error, .. } => {
+            ParsedGatewayEvent::MalformedKnown {
+                event_type, error, ..
+            } => {
                 assert_eq!(event_type, "tool.start");
                 assert!(error.contains("missing field") || error.contains("name"));
             }

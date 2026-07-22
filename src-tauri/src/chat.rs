@@ -343,7 +343,7 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .and_then(|p| p.get("session_id"))
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string());
-            
+
             Some(ChatEvent::SessionInfo {
                 session_id: session_id_param.unwrap_or_default(),
                 stored_session_id: stored_session_id.to_string(),
@@ -384,7 +384,11 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .and_then(|p| p.get("payload"))
                 .and_then(|pl| pl.get("choices"))
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             Some(ChatEvent::ClarifyRequest {
                 request_id: request_id.to_string(),
