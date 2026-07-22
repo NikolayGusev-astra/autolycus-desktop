@@ -11,8 +11,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::fmt::Debug;
+use serde::Serialize;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -21,16 +23,95 @@ use tokio::sync::{oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::chat::{parse_ws_message, ChatEvent};
-use crate::hermes_protocol::{self, RoutedGatewayEvent, ParsedGatewayEvent, GatewayEvent};
+use crate::hermes_protocol::{self, RoutedGatewayEvent, ParsedGatewayEvent, GatewayEvent, JsonRpcResult, JsonRpcError, SessionCreateParams, SessionCreateResult, PromptSubmitParams, PromptSubmitResult};
 
-/// RPC request ID type.
-pub type RpcId = u64;
+/// Generic RPC timeout duration.
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// JSON-RPC request id counter (process-wide).
 static NEXT_RPC_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_rpc_id() -> RpcId {
     NEXT_RPC_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Generic RPC dispatcher for the persistent connection.
+/// Sends a command through the mpsc channel, waits for the response with timeout,
+/// and returns the parsed result or a typed error.
+pub async fn call_rpc<P, R>(
+    ws_state: &WsState,
+    method: &'static str,
+    params: P,
+    timeout: Duration,
+) -> Result<R, GatewayClientError>
+where
+    P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    R: for<'de> Deserialize<'de> + std::fmt::Debug,
+{
+    let tx_guard = ws_state.cmd_tx.lock().await;
+    let tx = tx_guard
+        .as_ref()
+        .ok_or(GatewayClientError::Protocol("not connected: no cmd_tx".into()))?;
+    let id = next_rpc_id();
+    let params_value = serde_json::to_value(&params)
+        .map_err(|e| GatewayClientError::Protocol(format!("serialize params: {}", e)))?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(WsCommand::Rpc {
+        id,
+        method: method.to_string(),
+        params: params_value,
+        reply: reply_tx,
+    })
+    .await
+    .map_err(|_| GatewayClientError::Protocol("reader task closed".into()))?;
+    drop(tx_guard); // Release lock before awaiting
+
+    // Wait for RPC response with timeout
+    let response_value = tokio::time::timeout(timeout, reply_rx)
+        .await
+        .map_err(|_| GatewayClientError::RpcTimeout)??;
+
+    // Parse the response as a typed result
+    let parsed: JsonRpcResult<R> = serde_json::from_value(response_value)
+        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))?;
+    parsed.into_result()
+        .map_err(|e| GatewayClientError::BackendError(format!("{}: {}", e.message, e.code)))
+}
+
+/// Submit a prompt on the persistent connection using the generic RPC dispatcher.
+/// Waits for the RPC acknowledgement from Hermes before returning.
+pub async fn submit_prompt_on_connection(
+    ws_state: &WsState,
+    session_id: &str,
+    text: &str,
+) -> Result<PromptSubmitResult, WsError> {
+    call_rpc(
+        ws_state,
+        "prompt.submit",
+        PromptSubmitParams {
+            session_id: session_id.to_owned(),
+            text: text.to_owned(),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Create a session on the persistent connection using the generic RPC dispatcher.
+pub async fn create_session_on_connection(
+    ws_state: &WsState,
+    source: &str,
+) -> Result<SessionCreateResult, WsError> {
+    call_rpc(
+        ws_state,
+        "session.create",
+        SessionCreateParams {
+            source: source.to_owned(),
+            cols: 96,
+        },
+        RPC_TIMEOUT,
+    )
+    .await
 }
 
 /// Send one chat message over the /api/ws transport.
@@ -427,6 +508,7 @@ pub type WsError = GatewayClientError;
 struct PendingRequest {
     reply: oneshot::Sender<Result<Value, GatewayClientError>>,
     method: String,
+    timeout: Instant,
 }
 
 // ── Commands sent to the reader task ────────────────────────────────────────
@@ -505,7 +587,147 @@ pub enum ConnectionState {
     Connected,
 }
 
-/// Build the `prompt.submit` JSON-RPC frame for a given session_id + text.
+/// Translate a typed RoutedGatewayEvent to a frontend ChatEvent.
+/// This replaces the legacy parse_ws_message for the persistent path.
+fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
+    match &routed.event {
+        ParsedGatewayEvent::Known(GatewayEvent::MessageDelta(p)) => Some(ChatEvent::Token {
+            content: p.text.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(p)) => Some(ChatEvent::Reasoning {
+            content: p.text.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ThinkingDelta(p)) => Some(ChatEvent::Thinking {
+            content: p.text.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::MessageStart(_)) => Some(ChatEvent::Status {
+            status: "streaming".to_string(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::MessageComplete(p)) => Some(ChatEvent::Done {
+            session_id: Some(routed.session_id.clone().unwrap_or_default()),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)) => Some(ChatEvent::Done {
+            session_id: Some(routed.session_id.clone().unwrap_or_default()),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ToolStart(p)) => Some(ChatEvent::ToolStart {
+            name: p.name.clone(),
+            tool_call_id: p.tool_id.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ToolComplete(p)) => Some(ChatEvent::ToolComplete {
+            name: p.name.clone(),
+            tool_call_id: p.tool_id.clone(),
+            output: p.result_text.clone().unwrap_or_default(),
+            duration_ms: p.duration_s.map(|s| (s * 1000.0) as u64).unwrap_or(0),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ApprovalRequest(p)) => Some(ChatEvent::ApprovalRequest {
+            request_id: p.request_id.clone(),
+            tool_name: p.name.clone(),
+            tool_input: p.tool_input.clone().unwrap_or_default(),
+            action: p.action.clone().unwrap_or_default(),
+            command_class: p.command_class.clone().unwrap_or("write".to_string()),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::StatusUpdate(p)) => Some(ChatEvent::Status {
+            status: p.text.clone().unwrap_or_else(|| p.kind.clone().unwrap_or("unknown".to_string())),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::PipelineStatus(p)) => Some(ChatEvent::PipelineStatus {
+            backend: p.backend.clone(),
+            model: p.model.clone(),
+            tokens_used: p.tokens_used,
+            tokens_limit: p.tokens_limit,
+            cost_usd: p.cost_usd,
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::Error(p)) => Some(ChatEvent::Error {
+            message: p.message.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ReasoningDelta(p)) => Some(ChatEvent::Reasoning {
+            content: p.text.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ToolGenerating(p)) => Some(ChatEvent::ToolGenerating {
+            name: p.name.clone(),
+            tool_call_id: p.tool_id.clone(),
+            content: p.text.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::ClarifyRequest(p)) => Some(ChatEvent::ClarifyRequest {
+            request_id: p.request_id.clone(),
+            question: p.question.clone(),
+            choices: p.choices.clone().unwrap_or_default(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::SudoRequest(p)) => Some(ChatEvent::SudoRequest {
+            request_id: p.request_id.clone(),
+            reason: p.reason.clone(),
+            timeout_secs: p.timeout_secs,
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::SudoExpire(p)) => Some(ChatEvent::SudoExpire {
+            request_id: p.request_id.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::SecretRequest(p)) => Some(ChatEvent::SecretRequest {
+            request_id: p.request_id.clone(),
+            prompt: p.prompt.clone(),
+            env_var: p.env_var.clone(),
+            metadata: p.metadata.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::SecretExpire(p)) => Some(ChatEvent::SecretExpire {
+            request_id: p.request_id.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) => Some(ChatEvent::SessionInfo {
+            session_id: routed.session_id.clone().unwrap_or_default(),
+            stored_session_id: p.stored_session_id.clone(),
+            running: p.running,
+            model: p.model.clone(),
+            provider: p.provider.clone(),
+            tools: p.tools.clone(),
+            skills: p.skills.clone(),
+            usage: p.usage.clone(),
+            desktop_contract: p.desktop_contract,
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::NotificationShow(p)) => Some(ChatEvent::Notification {
+            id: p.id.clone(),
+            key: p.key.clone(),
+            text: p.text.clone(),
+            level: p.level.clone(),
+            kind: p.kind.clone(),
+            ttl_ms: p.ttl_ms,
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)) => Some(ChatEvent::NotificationClear {
+            key: p.key.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)) => Some(ChatEvent::Done {
+            session_id: Some(routed.session_id.clone().unwrap_or_default()),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::NotificationShow(p)) => Some(ChatEvent::Notification {
+            id: p.id.clone(),
+            key: p.key.clone(),
+            text: p.text.clone(),
+            level: p.level.clone(),
+            kind: p.kind.clone(),
+            ttl_ms: p.ttl_ms,
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)) => Some(ChatEvent::NotificationClear {
+            key: p.key.clone(),
+        }),
+        ParsedGatewayEvent::Known(GatewayEvent::MessageEnd(p)) => Some(ChatEvent::Done {
+            session_id: Some(routed.session_id.clone().unwrap_or_default()),
+        }),
+        ParsedGatewayEvent::MalformedKnown {
+            event_type,
+            session_id: _,
+            payload,
+            error,
+        } => {
+            tracing::warn!(target: "steersman_desktop_lib::ws", event_type, error, "malformed known event, falling back to legacy parser");
+            // Could fall back to legacy parser here if needed
+            None
+        },
+        ParsedGatewayEvent::UnknownType {
+            event_type,
+            session_id: _,
+            payload,
+        } => {
+            tracing::warn!(target: "steersman_desktop_lib::ws", event_type, "unknown event type");
+            None
+        },
+    }
+}
 /// Extracted for testing — the reader task calls this before `ws.send`.
 fn build_prompt_submit_request(id: u64, session_id: &str, text: &str) -> Value {
     json!({
@@ -568,103 +790,100 @@ impl Default for WsState {
 // entire lifetime, reading events and dispatching WsCommand via mpsc.
 
 /// Ensure the persistent WS connection is open. Idempotent: if already
-/// `Connected` or `Connecting`, returns `Ok(())` without re-connecting.
-///
-/// On first call: connects, waits for `gateway.ready`, spawns the reader task,
-/// stores the `cmd_tx` sender into `ws_state`, and sets state to `Connected`.
-/// On socket drop (detected by the reader task), state returns to
-/// `Disconnected` and the next call re-connects.
-/// Callback type for emitting chat events. Production wraps `app_handle.emit`;
-/// tests pass a mock that records events.
-pub type EmitFn = Arc<dyn Fn(&ChatEvent) + Send + Sync + 'static>;
-
-/// Build an EmitFn from a Tauri AppHandle. This is the production path.
-pub fn make_tauri_emitter<R>(app_handle: AppHandle<R>) -> EmitFn
-where
-    R: tauri::Runtime,
-    AppHandle<R>: Emitter<R>,
-{
-    Arc::new(move |event: &ChatEvent| {
-        let _ = app_handle.emit("chat_event", event);
-    })
-}
-
-pub async fn ensure_ws_connection(
-    ws_url: &str,
-    emit_fn: EmitFn,
-    ws_state: &Arc<WsState>,
-) -> Result<(), WsError> {
-    // Fast path: already connected.
-    {
-        let state = ws_state.state.lock().await;
-        if *state == ConnectionState::Connected {
-            return Ok(());
-        }
-        if *state == ConnectionState::Connecting {
-            drop(state);
-            for _ in 0..50 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let s = ws_state.state.lock().await;
-                if *s == ConnectionState::Connected {
-                    return Ok(());
-                }
-                if *s == ConnectionState::Disconnected {
-                    break;
+    /// `Connected` or `Connecting`, returns `Ok(())` without re-connecting.
+    ///
+    /// On first call: connects, waits for `gateway.ready`, spawns the reader task,
+    /// stores the `cmd_tx` sender into `ws_state`, and sets state to `Connected`.
+    /// On socket drop (detected by the reader task), state returns to
+    /// `Disconnected` and the next call re-connects.
+    pub async fn ensure_ws_connection(
+        ws_url: &str,
+        emit_fn: EmitFn,
+        ws_state: &Arc<WsState>,
+    ) -> Result<(), WsError> {
+        // Fast path: already connected.
+        {
+            let state = ws_state.state.lock().await;
+            if *state == ConnectionState::Connected {
+                return Ok(());
+            }
+            if *state == ConnectionState::Connecting {
+                drop(state);
+                for _ in 0..50 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let s = ws_state.state.lock().await;
+                    if *s == ConnectionState::Connected {
+                        return Ok(());
+                    }
+                    if *s == ConnectionState::Disconnected {
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    // Set Connecting.
-    {
-        let mut state = ws_state.state.lock().await;
-        if *state == ConnectionState::Connected {
-            return Ok(());
+        // Set Connecting.
+        {
+            let mut state = ws_state.state.lock().await;
+            if *state == ConnectionState::Connected {
+                return Ok(());
+            }
+            *state = ConnectionState::Connecting;
         }
-        *state = ConnectionState::Connecting;
-    }
 
-    /// Connect.
-    tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
-    let (ws, _resp) = tokio_tungstenite::connect_async(ws_url)
+        // Connect.
+        tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
+        let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
+            Ok(result) => result,
+            Err(e) => {
+                *ws_state.state.lock().await = ConnectionState::Disconnected;
+                return Err(WsError::Connect(e.to_string()));
+            }
+        };
+
+        // Strict gateway.ready barrier: fail if ready not received within timeout.
+        let ws = match tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_gateway_ready(ws),
+        )
         .await
-        .map_err(|e| WsError::Connect(e.to_string()))?;
+        {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => {
+                *ws_state.state.lock().await = ConnectionState::Disconnected;
+                return Err(WsError::Connect(e.to_string()));
+            }
+            Err(_) => {
+                *ws_state.state.lock().await = ConnectionState::Disconnected;
+                return Err(WsError::Connect("gateway.ready timeout".into()));
+            }
+        };
 
-    // Strict gateway.ready barrier: fail if ready not received within timeout.
-    let ws = tokio::time::timeout(
-        Duration::from_secs(5),
-        wait_for_gateway_ready(ws),
-    )
-    .await
-    .map_err(|_| {
-        tracing::warn!(target: "steersman_desktop_lib::ws", "gateway.ready timeout");
-        WsError::Connect("gateway.ready timeout".into())
-    })?
-    .map_err(|e| WsError::Connect(e.to_string()))?;
+        // Create the mpsc channel for command handlers → reader task.
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
 
-    // Create the mpsc channel for command handlers → reader task.
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        // Bump generation before storing cmd_tx.
+        let generation = ws_state.next_generation();
 
-    // Bump generation before storing cmd_tx.
-    let generation = ws_state.next_generation();
+        *ws_state.ws_url.lock().await = ws_url.to_string();
+        *ws_state.cmd_tx.lock().await = Some(cmd_tx);
 
-    *ws_state.ws_url.lock().await = ws_url.to_string();
-    *ws_state.cmd_tx.lock().await = Some(cmd_tx);
+        // Spawn the reader task with the generation.
+        tokio::spawn(reader_task(ws, cmd_rx, emit_fn, Arc::clone(ws_state), generation));
 
-    // Spawn the reader task with the generation.
-    tokio::spawn(reader_task(ws, cmd_rx, emit_fn, Arc::clone(ws_state), generation));
+        *ws_state.state.lock().await = ConnectionState::Connected;
+        tracing::info!(target: "steersman_desktop_lib::ws", generation, "persistent connection established");
 
-    *ws_state.state.lock().await = ConnectionState::Connected;
-    tracing::info!(target: "steersman_desktop_lib::ws", generation, "persistent connection established");
-
-    Ok(())
-}
+        Ok(())
+    }
 
 /// Strict gateway.ready barrier. Returns Err on any read error before ready.
 async fn wait_for_gateway_ready<S>(mut ws: S) -> Result<S, GatewayClientError>
 where
     S: futures::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin
-       + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+       + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin
+       + Send
+       + 'static,
 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -714,6 +933,20 @@ async fn reader_task<S>(
     let mut pending: HashMap<RpcId, PendingRequest> = HashMap::new();
 
     loop {
+        // Check for expired pending RPCs
+        let now = Instant::now();
+        let mut expired_ids: Vec<RpcId> = Vec::new();
+        for (id, pending_req) in &pending {
+            if now.duration_since(pending_req.timeout) > Duration::from_secs(30) {
+                expired_ids.push(*id);
+            }
+        }
+        for id in expired_ids {
+            if let Some(mut pending_req) = pending.remove(&id) {
+                let _ = pending_req.reply.send(Err(GatewayClientError::RpcTimeout));
+            }
+        }
+
         tokio::select! {
             // Read incoming WS frames
             msg = ws.next() => {
@@ -743,8 +976,8 @@ async fn reader_task<S>(
                                 }
                             }
                             Some(IncomingFrame::Event(routed_event)) => {
-                                // Convert via legacy parser for frontend compat
-                                if let Some(chat_event) = parse_ws_message(&text) {
+                                // Convert via typed parser to ChatEvent (replaces legacy parse_ws_message)
+                                if let Some(chat_event) = translate_gateway_event(&routed_event) {
                                     (emit_fn)(&chat_event);
                                     // Update session_id from Done events
                                     if let ChatEvent::Done { session_id: Some(ref sid) } = chat_event {
@@ -754,12 +987,14 @@ async fn reader_task<S>(
                                         }
                                     }
                                 }
-                                // Track session_id from session.info events
-                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(ref info)) = routed_event.event {
-                                    if !info.stored_session_id.is_empty() {
-                                        *ws_state.session_id.lock().await = Some(info.stored_session_id.clone());
+// Track session_id from session.info events (use live session_id from params, not stored_session_id)
+                            if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(_)) = &routed_event.event {
+                                if let Some(live_sid) = &routed_event.session_id {
+                                    if !live_sid.is_empty() {
+                                        *ws_state.session_id.lock().await = Some(live_sid.clone());
                                     }
                                 }
+                            }
                             }
                             None => {
                                 // Unrecognized frame - log and skip
@@ -797,6 +1032,7 @@ async fn reader_task<S>(
                         pending.insert(id, PendingRequest {
                             reply,
                             method: method.clone(),
+                            timeout: Instant::now() + Duration::from_secs(30),
                         });
                         // Send
                         if let Err(e) = send_json_gateway(&mut ws, &req).await {
@@ -848,67 +1084,55 @@ where
 }
 
 /// Submit a prompt on the persistent connection using the generic RPC dispatcher.
+/// Waits for the RPC acknowledgement from Hermes before returning.
 pub async fn submit_prompt_on_connection(
     ws_state: &WsState,
     session_id: &str,
     text: &str,
-) -> Result<String, WsError> {
-    let tx_guard = ws_state.cmd_tx.lock().await;
-    let tx = tx_guard
-        .as_ref()
-        .ok_or(WsError::Protocol("not connected: no cmd_tx".into()))?;
-    let id = next_rpc_id();
-    let params = json!({
-        "session_id": session_id,
-        "text": text,
-    });
-    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(WsCommand::Rpc {
-        id,
-        method: "prompt.submit".to_string(),
-        params,
-        reply: reply_tx,
-    })
+) -> Result<PromptSubmitResult, WsError> {
+    call_rpc(
+        ws_state,
+        "prompt.submit",
+        PromptSubmitParams {
+            session_id: session_id.to_owned(),
+            text: text.to_owned(),
+        },
+        RPC_TIMEOUT,
+    )
     .await
-    .map_err(|_| WsError::Protocol("reader task closed".into()))?;
-    // Note: prompt.submit response is not the assistant reply.
-    // The full reply arrives as streaming events.
-    Ok(session_id.to_string())
 }
 
 /// Create a new session on the persistent connection using the generic RPC dispatcher.
+/// Waits for the RPC acknowledgement with timeout.
 pub async fn create_session_on_connection(
     ws_state: &WsState,
     source: &str,
-) -> Result<String, WsError> {
-    let tx_guard = ws_state.cmd_tx.lock().await;
-    let tx = tx_guard
-        .as_ref()
-        .ok_or(WsError::Protocol("not connected: no cmd_tx".into()))?;
-    let id = next_rpc_id();
-    let params = json!({
-        "source": source,
-        "cols": 96,
-    });
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(WsCommand::Rpc {
-        id,
-        method: "session.create".to_string(),
-        params,
-        reply: reply_tx,
-    })
+) -> Result<SessionCreateResult, WsError> {
+    call_rpc(
+        ws_state,
+        "session.create",
+        SessionCreateParams {
+            source: source.to_owned(),
+            cols: 96,
+        },
+        RPC_TIMEOUT,
+    )
     .await
-    .map_err(|_| WsError::Protocol("reader task closed".into()))?;
-    drop(tx_guard);
-    let response = reply_rx
-        .await
-        .map_err(|_| WsError::Protocol("reader task dropped reply".into()))??;
-    // Extract session_id from the response value
-    let sid = response
-        .get("session_id")
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| WsError::SessionCreate("no session_id in response".to_string()))?;
-    Ok(sid.to_string())
+}
+
+// Callback type for emitting chat events. Production wraps `app_handle.emit`;
+// tests pass a mock that records events.
+pub type EmitFn = Arc<dyn Fn(&ChatEvent) + Send + Sync + 'static>;
+
+/// Build an EmitFn from a Tauri AppHandle. This is the production path.
+pub fn make_tauri_emitter<R>(app_handle: AppHandle<R>) -> EmitFn
+where
+    R: tauri::Runtime,
+    AppHandle<R>: Emitter<R>,
+{
+    Arc::new(move |event: &ChatEvent| {
+        let _ = app_handle.emit("chat_event", event);
+    })
 }
 
 #[cfg(test)]
