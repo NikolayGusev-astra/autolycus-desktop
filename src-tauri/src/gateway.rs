@@ -378,9 +378,10 @@ pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result
         // Graceful shutdown: SIGTERM → wait → SIGKILL
         #[cfg(unix)]
         {
-            let pid = gw.child.id();
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
+            if let Some(pid) = gw.child.id() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
             }
         }
 
