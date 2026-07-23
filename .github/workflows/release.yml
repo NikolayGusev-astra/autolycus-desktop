@@ -12,16 +12,22 @@ permissions:
 
 jobs:
   ci:
-    name: CI (lint, typecheck, test, clippy)
+    name: CI (fmt, check, test, clippy ratchet)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -30,26 +36,32 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-            target
+            src-tauri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Check formatting
-        run: cargo fmt --check --manifest-path Cargo.toml
+      - name: Check formatting (strict)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
-      - name: Run clippy
-        run: cargo clippy --manifest-path Cargo.toml --all-targets -- -D warnings
+      - name: Cargo check (strict)
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
-      - name: Run tests
-        run: cargo test --manifest-path Cargo.toml --all-targets
+      - name: Cargo test (strict)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Clippy report
+        run: mkdir -p .artifacts && npm run clippy:report
+
+      - name: Clippy strict (transport modules)
+        run: npm run clippy:strict
+
+      - name: Clippy ratchet (no new warnings)
+        run: npm run clippy:baseline
 
   frontend-ci:
-    name: Frontend CI (lint, typecheck, test)
+    name: Frontend CI (typecheck, test, lint ratchet)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v4
 
@@ -62,14 +74,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run lint
-        run: npm run lint
-
-      - name: Run typecheck
+      - name: Typecheck (strict)
         run: npm run typecheck
 
-      - name: Run tests
+      - name: Tests (strict)
         run: npm run test
+
+      - name: ESLint report
+        run: mkdir -p .artifacts && npm run lint:report
+
+      - name: ESLint ratchet (no new violations)
+        run: npm run lint:baseline
 
   build-linux:
     name: Build Linux

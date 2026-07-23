@@ -37,7 +37,7 @@ export default {
       },
     ],
     messages: {
-      noRawInvoke: "Direct invoke() call detected in component. Use typed services from '@/services/' instead (ADR-001 Phase 0).",
+      noRawInvoke: "Direct invoke('{{ command }}') in component. Use typed services from '@/services/' instead (ADR-001 Phase 0).",
     },
   },
 

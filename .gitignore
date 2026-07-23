@@ -54,6 +54,7 @@ linux-deb/
 windows-msi/
 
 # AI agent scaffolding — never commit workflow artifacts
+.artifacts/
 BUILD_PLAN.md
 BUILD_STAGES.md
 INTEGRATION_REVIEWER_PROMPT.md

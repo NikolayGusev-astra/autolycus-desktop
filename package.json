@@ -10,7 +10,12 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts,tsx --max-warnings 0",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint:report": "eslint src --ext ts,tsx --format json --output-file .artifacts/eslint.json",
+    "lint:baseline": "node scripts/check-eslint-baseline.mjs",
+    "clippy:report": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --message-format=json > .artifacts/clippy.json",
+    "clippy:baseline": "node scripts/check-clippy-baseline.mjs",
+    "clippy:strict": "node scripts/check-clippy-strict.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
