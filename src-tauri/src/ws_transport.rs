@@ -9,7 +9,6 @@
 //
 // Phase 0 (ADR-004): connect-per-message, no persistent connection yet.
 
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,17 +19,20 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::chat::{parse_ws_message, ChatEvent};
 use crate::hermes_protocol::{
-    self, GatewayEvent, JsonRpcError, JsonRpcResult, ParsedGatewayEvent, PromptSubmitParams,
-    PromptSubmitResult, RoutedGatewayEvent, SessionCreateParams, SessionCreateResult,
+    self, GatewayEvent, ParsedGatewayEvent, PromptSubmitParams, PromptSubmitResult,
+    RoutedGatewayEvent, SessionCreateParams, SessionCreateResult,
 };
 
 /// Generic RPC timeout duration.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// JSON-RPC request id type.
+pub type RpcId = u64;
 
 /// JSON-RPC request id counter (process-wide).
 static NEXT_RPC_ID: AtomicU64 = AtomicU64::new(1);
@@ -70,17 +72,20 @@ where
     .map_err(|_| GatewayClientError::Protocol("reader task closed".into()))?;
     drop(tx_guard); // Release lock before awaiting
 
-    // Wait for RPC response with timeout
+    // Wait for RPC response with timeout.
+    // reply_rx is `oneshot::Receiver<Result<Value, GatewayClientError>>`, so
+    // three unwrap layers: timeout → oneshot RecvError → inner GatewayClientError.
+    // The reader task already discriminates success (Ok(result_value)) from
+    // RPC error (Err(BackendError)), so response_value is the bare `result`.
     let response_value = tokio::time::timeout(timeout, reply_rx)
         .await
-        .map_err(|_| GatewayClientError::RpcTimeout)??;
+        .map_err(|_| GatewayClientError::RpcTimeout)? // Elapsed
+        .map_err(|_| GatewayClientError::ConnectionLost)??; // RecvError, then inner error
 
-    // Parse the response as a typed result
-    let parsed: JsonRpcResult<R> = serde_json::from_value(response_value)
-        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))?;
-    parsed
-        .into_result()
-        .map_err(|e| GatewayClientError::BackendError(format!("{}: {}", e.message, e.code)))
+    // Parse the result directly into R — the error envelope was already handled
+    // by the reader task (IncomingFrame::RpcError → BackendError).
+    serde_json::from_value::<R>(response_value)
+        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))
 }
 
 /// Submit a prompt on the persistent connection using the generic RPC dispatcher.
@@ -222,7 +227,7 @@ where
         match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(msg))) => {
                 if let Message::Text(text) = msg {
-                    if let Some(value) = serde_json::from_str::<Value>(&text).ok() {
+                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
                         let is_ready = value
                             .get("method")
                             .and_then(|m| m.as_str())
@@ -319,6 +324,18 @@ where
             _ => return Err(WsError::Stream("session.create: stream closed".to_string())),
         }
     }
+}
+
+/// Send `prompt.submit` for the given session (connect-per-message path).
+///
+/// We don't wait for the prompt.submit response (it only acks turn-start;
+/// real content arrives as events). The id is still sent per JSON-RPC.
+async fn submit_prompt<S>(ws: &mut S, session_id: &str, text: &str) -> Result<(), WsError>
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let req = build_prompt_submit_request(next_rpc_id(), session_id, text);
+    send_json(ws, &req).await
 }
 
 /// Read streaming events until done/error or socket close.
@@ -516,6 +533,7 @@ pub enum WsCommand {
 // ── Incoming frame classification ───────────────────────────────────────────
 
 /// Classifies one parsed JSON-RPC frame.
+#[allow(clippy::large_enum_variant)]
 enum IncomingFrame {
     RpcResponse { id: RpcId, result: Value },
     RpcError { id: RpcId, error: Value },
@@ -647,7 +665,7 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
             Some(ChatEvent::ClarifyRequest {
                 request_id: p.request_id.clone(),
                 question: p.question.clone(),
-                choices: p.choices.clone().unwrap_or_default(),
+                choices: p.choices.clone(),
             })
         }
         ParsedGatewayEvent::Known(GatewayEvent::SudoRequest(p)) => Some(ChatEvent::SudoRequest {
@@ -693,10 +711,15 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
         ParsedGatewayEvent::Known(GatewayEvent::NotificationClear(p)) => {
             Some(ChatEvent::NotificationClear { key: p.key.clone() })
         }
+        ParsedGatewayEvent::Known(GatewayEvent::GatewayReady(_)) => None,
+        ParsedGatewayEvent::Known(GatewayEvent::Unknown { event_type, .. }) => {
+            tracing::trace!(target: "steersman_desktop_lib::ws", event_type, "ignored gateway event");
+            None
+        }
         ParsedGatewayEvent::MalformedKnown {
             event_type,
             session_id: _,
-            payload,
+            payload: _,
             error,
         } => {
             tracing::warn!(target: "steersman_desktop_lib::ws", event_type, error, "malformed known event, falling back to legacy parser");
@@ -706,7 +729,7 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
         ParsedGatewayEvent::UnknownType {
             event_type,
             session_id: _,
-            payload,
+            payload: _,
         } => {
             tracing::warn!(target: "steersman_desktop_lib::ws", event_type, "unknown event type");
             None
@@ -740,6 +763,9 @@ pub struct WsState {
     pub session_id: tokio::sync::Mutex<Option<String>>,
     /// Sender into the reader task's mpsc channel.
     pub cmd_tx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsCommand>>>,
+    /// Serializes concurrent `ensure_ws_connection` calls so only one task
+    /// performs the actual connect+handshake.
+    pub connect_lock: tokio::sync::Mutex<()>,
     /// Monotonically increasing generation counter. Incremented on each new connection.
     pub generation: std::sync::atomic::AtomicU64,
 }
@@ -752,6 +778,7 @@ impl WsState {
             ws_url: tokio::sync::Mutex::new(String::new()),
             session_id: tokio::sync::Mutex::new(None),
             cmd_tx: tokio::sync::Mutex::new(None),
+            connect_lock: tokio::sync::Mutex::new(()),
             generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -777,7 +804,11 @@ impl Default for WsState {
 // entire lifetime, reading events and dispatching WsCommand via mpsc.
 
 /// Ensure the persistent WS connection is open. Idempotent: if already
-/// `Connected` or `Connecting`, returns `Ok(())` without re-connecting.
+/// `Connected`, returns `Ok(())` without re-connecting.
+///
+/// Concurrent calls are serialized via a dedicated `connect_lock` so that only
+/// one task performs the actual TCP+handshake; others wait for the result and
+/// then observe `Connected` (or the first caller's `Disconnected` on failure).
 ///
 /// On first call: connects, waits for `gateway.ready`, spawns the reader task,
 /// stores the `cmd_tx` sender into `ws_state`, and sets state to `Connected`.
@@ -788,35 +819,36 @@ pub async fn ensure_ws_connection(
     emit_fn: EmitFn,
     ws_state: &Arc<WsState>,
 ) -> Result<(), WsError> {
-    // Fast path: already connected.
+    // Fast path: already connected (no lock contention on connect_lock).
     {
         let state = ws_state.state.lock().await;
         if *state == ConnectionState::Connected {
             return Ok(());
         }
-        if *state == ConnectionState::Connecting {
-            drop(state);
-            for _ in 0..50 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let s = ws_state.state.lock().await;
-                if *s == ConnectionState::Connected {
-                    return Ok(());
-                }
-                if *s == ConnectionState::Disconnected {
-                    break;
-                }
-            }
-        }
     }
 
-    // Set Connecting.
+    // Serialize concurrent connect attempts. The first caller does the actual
+    // connect; subsequent callers acquire the lock after the first finishes
+    // and observe the final state.
+    let _connect_guard = ws_state.connect_lock.lock().await;
+
+    // Double-check after acquiring the lock — the first caller may have already
+    // connected while we were waiting.
     {
-        let mut state = ws_state.state.lock().await;
-        if *state == ConnectionState::Connected {
-            return Ok(());
+        let state = ws_state.state.lock().await;
+        match *state {
+            ConnectionState::Connected => return Ok(()),
+            ConnectionState::Connecting => {
+                // Should not happen under connect_lock, but guard anyway.
+                return Err(WsError::Protocol("concurrent connect race".into()));
+            }
+            ConnectionState::Disconnected => {}
         }
-        *state = ConnectionState::Connecting;
+        drop(state);
     }
+
+    // We are the single connector. Set Connecting.
+    *ws_state.state.lock().await = ConnectionState::Connecting;
 
     // Connect.
     tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
@@ -829,15 +861,17 @@ pub async fn ensure_ws_connection(
     };
 
     // Strict gateway.ready barrier: fail if ready not received within timeout.
+    // Preserves the typed error from wait_for_gateway_ready (ReadyTimeout,
+    // Stream, Connect) instead of wrapping everything in Connect.
     let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => {
             *ws_state.state.lock().await = ConnectionState::Disconnected;
-            return Err(WsError::Connect(e.to_string()));
+            return Err(e);
         }
         Err(_) => {
             *ws_state.state.lock().await = ConnectionState::Disconnected;
-            return Err(WsError::Connect("gateway.ready timeout".into()));
+            return Err(WsError::ReadyTimeout);
         }
     };
 
@@ -883,7 +917,7 @@ where
         }
         match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
-                if let Some(value) = serde_json::from_str::<Value>(&text).ok() {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
                     let is_ready = value.get("method").and_then(|m| m.as_str()) == Some("event")
                         && value
                             .get("params")
@@ -941,6 +975,11 @@ async fn reader_task<S>(
         }
         for id in expired_ids {
             if let Some(pending_req) = pending.remove(&id) {
+                tracing::warn!(
+                    target: "steersman_desktop_lib::ws",
+                    id, method = %pending_req.method,
+                    "pending RPC expired"
+                );
                 let _ = pending_req.reply.send(Err(GatewayClientError::RpcTimeout));
             }
         }
@@ -957,6 +996,11 @@ async fn reader_task<S>(
                 }
                 for id in expired_ids {
                     if let Some(pending_req) = pending.remove(&id) {
+                        tracing::warn!(
+                            target: "steersman_desktop_lib::ws",
+                            id, method = %pending_req.method,
+                            "pending RPC expired (timer)"
+                        );
                         let _ = pending_req.reply.send(Err(GatewayClientError::RpcTimeout));
                     }
                 }
@@ -1437,8 +1481,16 @@ mod tests {
                             } else {
                                 "chat-sess"
                             };
-                            let resp =
-                                json!({"jsonrpc":"2.0","id":id,"result":{"session_id":new_sid}});
+                            let resp = json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {
+                                    "session_id": new_sid,
+                                    "stored_session_id": new_sid,
+                                    "message_count": 0,
+                                    "messages": [],
+                                    "info": { "desktop_contract": 3 }
+                                }
+                            });
                             let _ = ws.send(Message::Text(resp.to_string())).await;
                         }
                         "prompt.submit" => {
@@ -1471,11 +1523,11 @@ mod tests {
     fn mock_emitter() -> (EmitFn, Arc<tokio::sync::Mutex<Vec<ChatEvent>>>) {
         let events: Arc<tokio::sync::Mutex<Vec<ChatEvent>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let events_clone = Arc::clone(&events);
+        let _events_clone = Arc::clone(&events);
         let emit_fn: EmitFn = Arc::new(move |event: &ChatEvent| {
             // ChatEvent is not Clone, so we capture a debug snapshot.
             let snapshot = format!("{:?}", event);
-            let events = events_clone.clone();
+            let _events = _events_clone.clone();
             // Can't move ChatEvent (not Clone), so record the type tag.
             let tag = match event {
                 ChatEvent::Token { .. } => "token",
@@ -1484,11 +1536,11 @@ mod tests {
                 ChatEvent::ToolComplete { .. } => "tool_complete",
                 ChatEvent::Done { session_id } => {
                     if let Some(_sid) = session_id {
-                        let ec = events.clone();
+                        let _ec = _events.clone();
                         let _ = snapshot; // keep for potential future use
                                           // Record done with session_id for session reuse tests.
                                           // We use a side-channel: push the sid string.
-                        let _ = ec;
+                        let _ = _ec;
                     }
                     "done"
                 }
@@ -1505,6 +1557,7 @@ mod tests {
                 ChatEvent::SecretRequest { .. } => "secret_request",
                 ChatEvent::SecretExpire { .. } => "secret_expire",
                 ChatEvent::Notification { .. } => "notification",
+                ChatEvent::NotificationClear { .. } => "notification_clear",
             };
             let _ = tag;
             // We can't store ChatEvent (no Clone), but tests check WsState
@@ -1554,10 +1607,10 @@ mod tests {
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let sid = create_session_on_connection(&ws_state, "desktop")
+        let result = create_session_on_connection(&ws_state, "desktop")
             .await
             .unwrap();
-        assert_eq!(sid, "chat-sess");
+        assert_eq!(result.session_id, "chat-sess");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let frames = received.lock().await;
@@ -1576,10 +1629,10 @@ mod tests {
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let sid = create_session_on_connection(&ws_state, "briefing_smart")
+        let result = create_session_on_connection(&ws_state, "briefing_smart")
             .await
             .unwrap();
-        assert_eq!(sid, "brief-sess");
+        assert_eq!(result.session_id, "brief-sess");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let frames = received.lock().await;
@@ -1604,7 +1657,8 @@ mod tests {
 
         let sid = create_session_on_connection(&ws_state, "desktop")
             .await
-            .unwrap();
+            .unwrap()
+            .session_id;
         submit_prompt_on_connection(&ws_state, &sid, "test prompt")
             .await
             .unwrap();
