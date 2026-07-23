@@ -965,25 +965,6 @@ async fn reader_task<S>(
     cleanup_tick.tick().await; // suppress initial immediate tick
 
     loop {
-        // Check for expired pending RPCs
-        let now = Instant::now();
-        let mut expired_ids: Vec<RpcId> = Vec::new();
-        for (id, pending_req) in &pending {
-            if now >= pending_req.timeout {
-                expired_ids.push(*id);
-            }
-        }
-        for id in expired_ids {
-            if let Some(pending_req) = pending.remove(&id) {
-                tracing::warn!(
-                    target: "steersman_desktop_lib::ws",
-                    id, method = %pending_req.method,
-                    "pending RPC expired"
-                );
-                let _ = pending_req.reply.send(Err(GatewayClientError::RpcTimeout));
-            }
-        }
-
         tokio::select! {
             // Periodic cleanup of expired pending RPCs
             _ = cleanup_tick.tick() => {
@@ -1007,107 +988,122 @@ async fn reader_task<S>(
             }
             // Read incoming WS frames
             msg = ws.next() => {
-                        match msg {
-                            Some(Ok(Message::Text(text))) => {
-                                let value: Value = match serde_json::from_str(&text) {
-                                    Ok(v) => v,
-                                    Err(_) => continue,
-                                };
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let value: Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
 
-                                match classify_frame(&value) {
-                                    Some(IncomingFrame::RpcResponse { id, result }) => {
-                                        if let Some(pending_req) = pending.remove(&id) {
-                                            let _ = pending_req.reply.send(Ok(result));
-                                        } else {
-                                            tracing::warn!(target: "steersman_desktop_lib::ws", id, "RPC response for unknown request");
-                                        }
-                                    }
-                                    Some(IncomingFrame::RpcError { id, error }) => {
-                                        if let Some(pending_req) = pending.remove(&id) {
-                                            let msg = error.get("message")
-                                                .and_then(|m| m.as_str())
-                                                .unwrap_or("RPC error");
-                                            let _ = pending_req.reply.send(
-                                                Err(GatewayClientError::BackendError(msg.to_string()))
-                                            );
-                                        }
-                                    }
-                                    Some(IncomingFrame::Event(routed_event)) => {
-                                        // Convert via typed parser to ChatEvent (replaces legacy parse_ws_message)
-                                        if let Some(chat_event) = translate_gateway_event(&routed_event) {
-                                            (emit_fn)(&chat_event);
-                                            // Update session_id from Done events
-                                            if let ChatEvent::Done { session_id: Some(ref sid) } = chat_event {
-                                                let mut sid_lock = ws_state.session_id.lock().await;
-                                                if !sid.is_empty() {
-                                                    *sid_lock = Some(sid.clone());
-                                                }
-                                            }
-                                        }
-        // Track session_id from session.info events (use live session_id from params, not stored_session_id)
-                                    if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(_)) = &routed_event.event {
-                                        if let Some(live_sid) = &routed_event.session_id {
-                                            if !live_sid.is_empty() {
-                                                *ws_state.session_id.lock().await = Some(live_sid.clone());
-                                            }
-                                        }
-                                    }
-                                    }
-                                    None => {
-                                        // Unrecognized frame - log and skip
-                                        tracing::warn!(target: "steersman_desktop_lib::ws", "unrecognized frame");
-                                    }
+                        match classify_frame(&value) {
+                            Some(IncomingFrame::RpcResponse { id, result }) => {
+                                if let Some(pending_req) = pending.remove(&id) {
+                                    let _ = pending_req.reply.send(Ok(result));
+                                } else {
+                                    tracing::warn!(
+                                        target: "steersman_desktop_lib::ws",
+                                        id, "RPC response for unknown request"
+                                    );
                                 }
                             }
-                            Some(Ok(Message::Close(_))) => {
-                                tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
-                                break;
+                            Some(IncomingFrame::RpcError { id, error }) => {
+                                if let Some(pending_req) = pending.remove(&id) {
+                                    let msg = error
+                                        .get("message")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("RPC error");
+                                    let _ = pending_req
+                                        .reply
+                                        .send(Err(GatewayClientError::BackendError(msg.to_string())));
+                                }
                             }
-                            Some(Ok(_)) => {} // Binary, Ping, Pong — ignore
-                            Some(Err(e)) => {
-                                tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, "ws read error");
-                                break;
+                            Some(IncomingFrame::Event(routed_event)) => {
+                                // Translate via typed parser to ChatEvent
+                                // (replaces legacy parse_ws_message on the persistent path).
+                                if let Some(chat_event) = translate_gateway_event(&routed_event) {
+                                    (emit_fn)(&chat_event);
+                                    // Update session_id from Done events.
+                                    if let ChatEvent::Done { session_id: Some(ref sid) } = chat_event {
+                                        let mut sid_lock = ws_state.session_id.lock().await;
+                                        if !sid.is_empty() {
+                                            *sid_lock = Some(sid.clone());
+                                        }
+                                    }
+                                }
+                                // Track session_id from session.info events
+                                // (use live session_id from params, not stored_session_id).
+                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(_)) =
+                                    &routed_event.event
+                                {
+                                    if let Some(live_sid) = &routed_event.session_id {
+                                        if !live_sid.is_empty() {
+                                            *ws_state.session_id.lock().await = Some(live_sid.clone());
+                                        }
+                                    }
+                                }
                             }
                             None => {
-                                tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
-                                break;
+                                tracing::warn!(target: "steersman_desktop_lib::ws", "unrecognized frame");
                             }
                         }
                     }
-                    // Process commands from Tauri command handlers.
-                    cmd = cmd_rx.recv() => {
-                        match cmd {
-                            Some(WsCommand::Rpc { id, method, params, reply }) => {
-                                // Build JSON-RPC 2.0 request
-                                let req = json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id,
-                                    "method": method,
-                                    "params": params,
-                                });
-                                // Register pending before sending
-                                pending.insert(id, PendingRequest {
-                                    reply,
-                                    method: method.clone(),
-                                    timeout: Instant::now() + Duration::from_secs(30),
-                                });
-                                // Send
-                                if let Err(e) = send_json_gateway(&mut ws, &req).await {
-                                    tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, method, "RPC send failed");
-                                    // Remove from pending and notify caller
-                                    if let Some(p) = pending.remove(&id) {
-                                        let _ = p.reply.send(Err(GatewayClientError::Protocol(e.to_string())));
-                                    }
-                                    break;
-                                }
-                            }
-                            Some(WsCommand::Shutdown) | None => {
-                                tracing::info!(target: "steersman_desktop_lib::ws", "reader task shutting down");
-                                break;
-                            }
-                        }
+                    Some(Ok(Message::Close(_))) => {
+                        tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
+                        break;
+                    }
+                    Some(Ok(_)) => {} // Binary, Ping, Pong — ignore
+                    Some(Err(e)) => {
+                        tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, "ws read error");
+                        break;
+                    }
+                    None => {
+                        tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
+                        break;
                     }
                 }
+            }
+            // Process commands from Tauri command handlers.
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(WsCommand::Rpc { id, method, params, reply }) => {
+                        // Build JSON-RPC 2.0 request
+                        let req = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "method": method,
+                            "params": params,
+                        });
+                        // Register pending before sending
+                        pending.insert(
+                            id,
+                            PendingRequest {
+                                reply,
+                                method: method.clone(),
+                                timeout: Instant::now() + Duration::from_secs(30),
+                            },
+                        );
+                        // Send
+                        if let Err(e) = send_json_gateway(&mut ws, &req).await {
+                            tracing::warn!(
+                                target: "steersman_desktop_lib::ws",
+                                error = %e, method, "RPC send failed"
+                            );
+                            // Remove from pending and notify caller
+                            if let Some(p) = pending.remove(&id) {
+                                let _ = p
+                                    .reply
+                                    .send(Err(GatewayClientError::Protocol(e.to_string())));
+                            }
+                            break;
+                        }
+                    }
+                    Some(WsCommand::Shutdown) | None => {
+                        tracing::info!(target: "steersman_desktop_lib::ws", "reader task shutting down");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // Generation-guarded cleanup: only clear state if we are still the current generation.
