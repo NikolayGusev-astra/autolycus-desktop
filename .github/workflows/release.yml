@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Tauri system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -51,7 +56,14 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: Clippy report
+        # clippy:report may exit non-zero when warnings exist; that's expected —
+        # the JSON report is still written and the baseline step below does the
+        # actual gating.
+        continue-on-error: true
         run: mkdir -p .artifacts && npm run clippy:report
+
+      - name: Verify clippy report exists
+        run: test -f .artifacts/clippy.json
 
       - name: Clippy strict (transport modules)
         run: npm run clippy:strict
@@ -81,7 +93,13 @@ jobs:
         run: npm run test
 
       - name: ESLint report
+        # lint:report exits 1 when violations exist; the JSON is still written.
+        # The ratchet step below does the actual gating.
+        continue-on-error: true
         run: mkdir -p .artifacts && npm run lint:report
+
+      - name: Verify ESLint report exists
+        run: test -f .artifacts/eslint.json
 
       - name: ESLint ratchet (no new violations)
         run: npm run lint:baseline
