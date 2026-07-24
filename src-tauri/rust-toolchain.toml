@@ -1,0 +1,8 @@
+# Pin the Rust toolchain so clippy warning messages (and thus the lint baseline
+# fingerprints) are stable. A new Rust release can add diagnostics or reword
+# messages, which would make baselined fingerprints disappear and the ratchet
+# report false "resolved" entries. Bump this only in a dedicated PR that also
+# regenerates ci/clippy-baseline.json.
+[toolchain]
+channel = "1.93.1"
+components = ["rustfmt", "clippy"]

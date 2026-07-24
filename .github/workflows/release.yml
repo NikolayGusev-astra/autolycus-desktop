@@ -1,117 +1,32 @@
-name: CI and Release
+name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to build (e.g. main, v1.2.3)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  ci:
-    name: CI (fmt, check, test, clippy ratchet)
+  build-linux:
+    name: Build Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Tauri system dependencies (Linux)
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting (strict)
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-
-      - name: Cargo check (strict)
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
-
-      - name: Cargo test (strict)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-
-      - name: Clippy report
-        # clippy:report may exit non-zero when warnings exist; that's expected —
-        # the JSON report is still written and the baseline step below does the
-        # actual gating.
-        continue-on-error: true
-        run: mkdir -p .artifacts && npm run clippy:report
-
-      - name: Verify clippy report exists
-        run: test -f .artifacts/clippy.json
-
-      - name: Clippy strict (transport modules)
-        run: npm run clippy:strict
-
-      - name: Clippy ratchet (no new warnings)
-        run: npm run clippy:baseline
-
-  frontend-ci:
-    name: Frontend CI (typecheck, test, lint ratchet)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck (strict)
-        run: npm run typecheck
-
-      - name: Tests (strict)
-        run: npm run test
-
-      - name: ESLint report
-        # lint:report exits 1 when violations exist; the JSON is still written.
-        # The ratchet step below does the actual gating.
-        continue-on-error: true
-        run: mkdir -p .artifacts && npm run lint:report
-
-      - name: Verify ESLint report exists
-        run: test -f .artifacts/eslint.json
-
-      - name: ESLint ratchet (no new violations)
-        run: npm run lint:baseline
-
-  build-linux:
-    name: Build Linux
-    needs: [ci, frontend-ci]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -129,7 +44,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -146,8 +61,7 @@ jobs:
 
       - name: Build (Linux)
         shell: bash
-        run: |
-          npx tauri build --target x86_64-unknown-linux-gnu
+        run: npx tauri build --target x86_64-unknown-linux-gnu
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -159,11 +73,11 @@ jobs:
 
   build-windows:
     name: Build Windows
-    needs: [ci, frontend-ci]
-    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -182,7 +96,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -211,11 +125,11 @@ jobs:
 
   build-macos:
     name: Build macOS
-    needs: [ci, frontend-ci]
-    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -235,7 +149,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -280,7 +194,6 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
-          # .app is a directory, need to zip it
           find artifacts -type d -name "*.app" -exec zip -r {}.zip {} \; -exec mv {}.zip release-assets/ \;
           ls -la release-assets/
 

@@ -1,37 +1,49 @@
 # CI Baseline & Ratchet
 
-This directory holds **frozen technical-debt snapshots** that let `main` stay
-green while pre-existing lint/clippy violations are paid down incrementally.
+Frozen technical-debt snapshots that let `main` stay green while pre-existing
+lint/clippy violations are paid down incrementally. The system is a **ratchet**,
+not an amnesty.
 
-The system is a **ratchet**, not an amnesty:
+## Design principles
 
-- existing debt is recorded once as a set of stable fingerprints;
-- **new** violations fail CI immediately;
-- resolved violations are reported and can be locked in by shrinking the
-  baseline;
-- the total count is never compared — only individual fingerprints — so
-  swapping one old violation for a new one still fails.
+1. **Multiset, not set.** Each baseline maps `fingerprint → count`. Adding a
+   second identical violation where one was baselined is caught (count grows).
+2. **Baseline never grows silently.** `guard` compares the committed baseline
+   against `origin/main` and fails on any growth. Shrinking is allowed.
+3. **No `continue-on-error` on analyzers.** ESLint exit 1 (violations) is
+   tolerated by a wrapper; exit 2+ (config/runtime error) aborts CI. Clippy
+   warnings never set a non-zero exit without `-D warnings`, so no wrapper.
+4. **Strict modules have no baseline.** `src/ws_transport.rs` must be warning-
+   free; `clippy:strict` fails on any warning there.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `ci/eslint-baseline.json` | Frozen ESLint fingerprints (rule \| file \| message). |
-| `ci/clippy-baseline.json` | Frozen Clippy fingerprints (code \| file \| message). |
+| `ci/eslint-baseline.json` | `{ "fingerprint": count }` — frozen ESLint violations. |
+| `ci/clippy-baseline.json` | `{ "fingerprint": count }` — frozen Clippy warnings. |
+| `scripts/lint-ratchet.mjs` | Unified comparator: `extract`, `check`, `strict`, `guard`. |
 
-## Fingerprint stability
+## Fingerprint format
 
-A fingerprint is `ruleId|relativeFile|normalizedMessage`. Line/column numbers
-are deliberately excluded — they drift on unrelated edits (added imports,
-reordered code) and would cause false "new violation" reports.
+`ruleId|relativeFile|normalizedMessage` — line/column excluded (they drift on
+unrelated edits). Whitespace in messages is collapsed.
 
-The `hermes-rpc/no-raw-invoke` rule embeds the offending command name in its
-message (`Direct invoke('<cmd>') ...`), so two different commands in the same
-file produce two distinct fingerprints.
+## npm scripts
 
-## What is strict (never baseline-able)
+| Script | What it does |
+|--------|--------------|
+| `lint:report` | Run ESLint → `.artifacts/eslint.json` (tolerates exit 1, fails on 2+). |
+| `lint:check` | Ratchet: live multiset ≤ baseline multiset. |
+| `lint:guard` | Baseline monotonicity: PR baseline ≤ `origin/main` baseline. |
+| `lint:baseline:gen` | Regenerate `ci/eslint-baseline.json` from current report. |
+| `clippy:report` | Run clippy → `.artifacts/clippy.json`. |
+| `clippy:check` | Ratchet for clippy. |
+| `clippy:guard` | Baseline guard for clippy. |
+| `clippy:strict` | Zero warnings in strict modules (`src/ws_transport.rs`). |
+| `clippy:baseline:gen` | Regenerate clippy baseline. |
 
-These checks run **without** any baseline and always block on failure:
+## Strict (always block, no baseline)
 
 ```
 cargo fmt --check
@@ -39,55 +51,36 @@ cargo check --all-targets
 cargo test --all-targets
 npm run typecheck
 npm run test
-npm run clippy:strict     # zero clippy warnings in src/ws_transport.rs
+npm run clippy:strict
 ```
 
-Compilation, formatting, type, and test failures are not technical debt.
+## When you fix violations
 
-## What is ratcheted
+```bash
+npm run lint:report && npm run lint:baseline:gen > ci/eslint-baseline.json
+npm run clippy:report && npm run clippy:baseline:gen > ci/clippy-baseline.json
+git add ci/*-baseline.json
+```
 
-| Check | Script | Behavior |
-|-------|--------|----------|
-| ESLint | `npm run lint:baseline` | Fails on any `hermes-rpc/no-raw-invoke` (or other) fingerprint not in the baseline. |
-| Clippy (all targets) | `npm run clippy:baseline` | Fails on any clippy warning fingerprint not in the baseline, excluding strict modules. |
-| Clippy (strict modules) | `npm run clippy:strict` | Fails on ANY warning in `src/ws_transport.rs`. |
+The ratchet reports the shrinkage; committing the smaller baseline locks it in.
+
+## When you need to add debt
+
+You don't — fix the violation. If genuinely unavoidable (temporary migration
+bridge), a maintainer must review the baseline diff in the PR. The `guard`
+step makes baseline growth visible and reviewable; it is never automatic.
 
 ## Strict modules
 
-Defined in `scripts/extract-clippy-baseline.mjs` and `scripts/check-clippy-strict.mjs`
-(both must list the same set):
+Defined in `scripts/lint-ratchet.mjs::STRICT_FILES`:
 
-- `src/ws_transport.rs` — actively-developed persistent gateway client (Phase 1B).
+- `src/ws_transport.rs` — Phase 1B persistent gateway client.
 
-`src/hermes_protocol.rs` currently has ~50 `dead_code` warnings from Phase 1A
-DTO fields not yet wired into production callers. It is **baselined**, not
-strict, and joins the strict set once Phase 1C consumes those types.
+`src/hermes_protocol.rs` has ~50 `dead_code` from Phase 1A DTO fields; it is
+baselined and joins strict when Phase 1C consumes those types.
 
-## Workflow after resolving violations
+## Toolchain pinning
 
-When you fix a violation, the ratchet reports it as resolved and passes, but
-the stale entry lingers in the baseline. To lock the win in and prevent
-regression:
-
-```bash
-npm run lint:report
-node scripts/extract-eslint-baseline.mjs > ci/eslint-baseline.json
-
-npm run clippy:report
-node scripts/extract-clippy-baseline.mjs > ci/clippy-baseline.json
-```
-
-Commit the shrunken baseline alongside your fix.
-
-## Workflow when adding intentional new debt
-
-Normally: don't. Fix the violation instead. If a violation is genuinely
-intended (e.g. a temporary bridge during a migration), regenerate the baseline
-and explain why in the commit message and PR description:
-
-```bash
-npm run lint:report && node scripts/extract-eslint-baseline.mjs > ci/eslint-baseline.json
-git add ci/eslint-baseline.json
-```
-
-The ratchet will then treat the new fingerprint as pre-existing.
+`src-tauri/rust-toolchain.toml` pins Rust 1.93.1 so clippy messages (and thus
+fingerprints) stay stable. Bump only in a dedicated PR that also regenerates
+the clippy baseline.

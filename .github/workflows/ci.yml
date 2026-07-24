@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust-ci:
+    name: Rust (fmt, check, test, clippy ratchet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the baseline guard can diff against origin/main.
+          fetch-depth: 0
+
+      - name: Install Tauri system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting (strict)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Cargo check (strict)
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Cargo test (strict)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Clippy report
+        run: mkdir -p .artifacts && npm run clippy:report
+
+      - name: Verify clippy report exists
+        run: test -s .artifacts/clippy.json
+
+      - name: Clippy strict (transport modules)
+        run: npm run clippy:strict
+
+      - name: Clippy ratchet (no new warnings)
+        run: npm run clippy:check
+
+      - name: Clippy baseline guard (no baseline growth vs main)
+        if: github.event_name == 'pull_request'
+        run: npm run clippy:guard
+
+  frontend-ci:
+    name: Frontend (typecheck, test, lint ratchet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (strict)
+        run: npm run typecheck
+
+      - name: Tests (strict)
+        run: npm run test
+
+      - name: ESLint report
+        run: mkdir -p .artifacts && npm run lint:report
+
+      - name: Verify ESLint report exists
+        run: test -s .artifacts/eslint.json
+
+      - name: ESLint ratchet (no new violations)
+        run: npm run lint:check
+
+      - name: ESLint baseline guard (no baseline growth vs main)
+        if: github.event_name == 'pull_request'
+        run: npm run lint:guard
