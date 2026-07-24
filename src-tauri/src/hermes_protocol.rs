@@ -15,6 +15,56 @@ use serde_json::Value;
 /// JSON-RPC 2.0 version string (constant per spec).
 pub const JSONRPC_VERSION: &str = "2.0";
 
+/// Desktop contract version this build implements. Bumping the range is a
+/// deliberate release decision: a lower value means "this desktop supports
+/// Hermes back to contract N", a higher value means "requires Hermes with
+/// at least contract N". The single supported version today is 4.
+pub const MIN_HERMES_DESKTOP_CONTRACT: u32 = 4;
+pub const MAX_HERMES_DESKTOP_CONTRACT: u32 = 4;
+
+/// Result of a compatibility handshake against the connected Hermes backend.
+///
+/// Stored separately from the network [`ConnectionState`](crate::ws_transport::ConnectionState):
+/// a live socket is not evidence of compatibility. `prompt.submit` must not
+/// proceed while this is `Unknown` or an incompatible variant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuntimeCompatibility {
+    /// Handshake not yet performed (fresh connection).
+    Unknown,
+    /// Handshake in progress.
+    Checking,
+    /// Backend contract is within the supported range.
+    Compatible { contract: u32 },
+    /// Backend is older than the minimum this desktop supports.
+    HermesUpgradeRequired { received: u32, minimum: u32 },
+    /// Backend is newer than the maximum this desktop supports.
+    DesktopUpgradeRequired { received: u32, maximum: u32 },
+}
+
+impl RuntimeCompatibility {
+    /// Evaluate a received desktop_contract against the supported range.
+    pub fn evaluate(received: u32) -> Self {
+        if received < MIN_HERMES_DESKTOP_CONTRACT {
+            RuntimeCompatibility::HermesUpgradeRequired {
+                received,
+                minimum: MIN_HERMES_DESKTOP_CONTRACT,
+            }
+        } else if received > MAX_HERMES_DESKTOP_CONTRACT {
+            RuntimeCompatibility::DesktopUpgradeRequired {
+                received,
+                maximum: MAX_HERMES_DESKTOP_CONTRACT,
+            }
+        } else {
+            RuntimeCompatibility::Compatible { contract: received }
+        }
+    }
+
+    /// True when the backend is compatible and user work may proceed.
+    pub fn is_compatible(&self) -> bool {
+        matches!(self, RuntimeCompatibility::Compatible { .. })
+    }
+}
+
 /// Generate a fresh JSON-RPC request ID.
 pub fn next_request_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};

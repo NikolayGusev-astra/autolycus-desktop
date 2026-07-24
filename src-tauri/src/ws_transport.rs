@@ -90,11 +90,30 @@ where
 
 /// Submit a prompt on the persistent connection using the generic RPC dispatcher.
 /// Waits for the RPC acknowledgement from Hermes before returning.
+///
+/// Refuses to send if the compatibility handshake has not completed or failed
+/// (Phase 1C.1): `prompt.submit` must not proceed against an unknown or
+/// incompatible backend.
 pub async fn submit_prompt_on_connection(
     ws_state: &WsState,
     session_id: &str,
     text: &str,
 ) -> Result<PromptSubmitResult, WsError> {
+    // Compatibility gate: do not allow user work until the handshake succeeds.
+    {
+        let compat = ws_state.compatibility.lock().await;
+        match &*compat {
+            crate::hermes_protocol::RuntimeCompatibility::Compatible { .. } => {}
+            crate::hermes_protocol::RuntimeCompatibility::Unknown => {
+                return Err(WsError::Protocol(
+                    "prompt.submit before compatibility handshake".into(),
+                ));
+            }
+            other => {
+                return Err(WsError::Incompatible(other.clone()));
+            }
+        }
+    }
     call_rpc(
         ws_state,
         "prompt.submit",
@@ -483,6 +502,10 @@ pub enum GatewayClientError {
     ConnectionLost,
     RpcTimeout,
     SessionCreate(String),
+    /// Hermes backend is not version-compatible with this desktop build.
+    /// Distinct from connection failures so callers can branch (prompt the
+    /// user to upgrade Hermes or the desktop, not to reconnect).
+    Incompatible(crate::hermes_protocol::RuntimeCompatibility),
 }
 
 impl std::fmt::Display for GatewayClientError {
@@ -498,6 +521,27 @@ impl std::fmt::Display for GatewayClientError {
             GatewayClientError::ConnectionLost => write!(f, "connection lost"),
             GatewayClientError::RpcTimeout => write!(f, "RPC timeout"),
             GatewayClientError::SessionCreate(s) => write!(f, "session create failed: {}", s),
+            GatewayClientError::Incompatible(c) => match c {
+                crate::hermes_protocol::RuntimeCompatibility::HermesUpgradeRequired {
+                    received,
+                    minimum,
+                } => write!(
+                    f,
+                    "Hermes upgrade required: backend contract {} < desktop minimum {}",
+                    received, minimum
+                ),
+                crate::hermes_protocol::RuntimeCompatibility::DesktopUpgradeRequired {
+                    received,
+                    maximum,
+                } => write!(
+                    f,
+                    "Desktop upgrade required: backend contract {} > desktop maximum {}",
+                    received, maximum
+                ),
+                // Unknown/Checking should never be surfaced as Incompatible, but
+                // provide a fallback rather than panicking.
+                _ => write!(f, "incompatible runtime: {:?}", c),
+            },
         }
     }
 }
@@ -766,6 +810,10 @@ pub struct WsState {
     /// Serializes concurrent `ensure_ws_connection` calls so only one task
     /// performs the actual connect+handshake.
     pub connect_lock: tokio::sync::Mutex<()>,
+    /// Runtime compatibility result, separate from the network connection
+    /// state. A live socket is not evidence of compatibility: `prompt.submit`
+    /// must check this before proceeding. Reset to `Unknown` on each connect.
+    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
     /// Monotonically increasing generation counter. Incremented on each new connection.
     pub generation: std::sync::atomic::AtomicU64,
 }
@@ -779,6 +827,9 @@ impl WsState {
             session_id: tokio::sync::Mutex::new(None),
             cmd_tx: tokio::sync::Mutex::new(None),
             connect_lock: tokio::sync::Mutex::new(()),
+            compatibility: tokio::sync::Mutex::new(
+                crate::hermes_protocol::RuntimeCompatibility::Unknown,
+            ),
             generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -893,10 +944,107 @@ pub async fn ensure_ws_connection(
         generation,
     ));
 
+    // ── Compatibility handshake (Phase 1C.1) ────────────────────────────────
+    // The reader task is now running, so call_rpc can dispatch. We probe the
+    // backend with a throwaway session.create, read its desktop_contract, and
+    // refuse to enter Connected until the contract is supported. The probe
+    // session is closed immediately after (best-effort).
+    {
+        *ws_state.compatibility.lock().await =
+            crate::hermes_protocol::RuntimeCompatibility::Checking;
+    }
+    match run_compatibility_handshake(ws_state).await {
+        Ok(c) => {
+            tracing::info!(
+                target: "steersman_desktop_lib::ws",
+                compatibility = ?c,
+                generation,
+                "compatibility handshake passed"
+            );
+            *ws_state.compatibility.lock().await = c;
+        }
+        Err(e) => {
+            *ws_state.compatibility.lock().await =
+                crate::hermes_protocol::RuntimeCompatibility::Unknown;
+            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            *ws_state.cmd_tx.lock().await = None;
+            // Signal the reader task to shut down.
+            return Err(e);
+        }
+    }
+
     *ws_state.state.lock().await = ConnectionState::Connected;
     tracing::info!(target: "steersman_desktop_lib::ws", generation, "persistent connection established");
 
     Ok(())
+}
+
+/// Probe the backend with a throwaway `session.create` to read its
+/// `desktop_contract`, evaluate compatibility, then close the probe session.
+///
+/// Returns `Ok(RuntimeCompatibility::Compatible{..})` on success, or
+/// `Err(Incompatible(..))` / other transport errors on failure. The probe
+/// session is closed best-effort: a close failure does not mask the real
+/// compatibility result.
+async fn run_compatibility_handshake(
+    ws_state: &Arc<WsState>,
+) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
+    // Probe with source "compat_probe" so the backend marks it as a service
+    // session (hidden from the feed, like briefing_smart).
+    let probe_result = create_session_on_connection(ws_state, "compat_probe")
+        .await
+        .map_err(|e| match e {
+            // Surface backend errors from the probe distinctly.
+            WsError::BackendError(msg) => {
+                WsError::Protocol(format!("compatibility probe failed: {}", msg))
+            }
+            other => other,
+        })?;
+
+    let received = probe_result.info.desktop_contract;
+    let compat = crate::hermes_protocol::RuntimeCompatibility::evaluate(received);
+
+    // Close the probe session best-effort. session.close is non-critical: if it
+    // fails the probe session simply expires server-side. We must not let a
+    // close failure mask the compatibility verdict.
+    if let Err(e) = close_session_best_effort(ws_state, &probe_result.session_id).await {
+        tracing::warn!(
+            target: "steersman_desktop_lib::ws",
+            error = %e,
+            session_id = %probe_result.session_id,
+            "probe session close failed (non-fatal)"
+        );
+    }
+
+    if !compat.is_compatible() {
+        return Err(WsError::Incompatible(compat));
+    }
+    Ok(compat)
+}
+
+/// Best-effort `session.close` via the generic RPC dispatcher. Returns Ok(())
+/// on success or if the backend does not support the method.
+async fn close_session_best_effort(
+    ws_state: &Arc<WsState>,
+    session_id: &str,
+) -> Result<(), WsError> {
+    // Use serde_json::Value as the params type to avoid imposing Deserialize
+    // on a request-only struct. session.close is best-effort: we only care that
+    // it was accepted, not its result body.
+    let params = serde_json::json!({ "session_id": session_id });
+    match call_rpc::<serde_json::Value, serde_json::Value>(
+        ws_state,
+        "session.close",
+        params,
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        // Backend may not implement session.close — treat as acceptable.
+        Err(WsError::BackendError(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Strict gateway.ready barrier. Returns Err on any read error before ready.
@@ -1426,13 +1574,17 @@ mod tests {
 
     /// Start a mock backend that:
     /// - sends gateway.ready on connect
-    /// - responds to session.create with session_id "mock-sess"
+    /// - responds to session.create with `contract` in info.desktop_contract
+    /// - handles session.close (probe cleanup)
     /// - on prompt.submit: ACKs, streams message.start → delta("Hello") →
     ///   message.complete(session_id)
     ///
+    /// `contract` controls the reported desktop_contract version, letting
+    /// handshake accept/reject tests vary it.
+    ///
     /// Returns (ws_url, received_frames) where received_frames captures all
     /// JSON-RPC requests the server got (for assertions).
-    async fn start_mock_backend() -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+    async fn start_mock_backend(contract: u32) -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let received: Arc<tokio::sync::Mutex<Vec<Value>>> =
@@ -1474,9 +1626,12 @@ mod tests {
                                 .unwrap_or("desktop");
                             let new_sid = if source == "briefing_smart" {
                                 "brief-sess"
+                            } else if source == "compat_probe" {
+                                "probe-sess"
                             } else {
                                 "chat-sess"
                             };
+                            // Contract version configurable per-test.
                             let resp = json!({
                                 "jsonrpc": "2.0", "id": id,
                                 "result": {
@@ -1484,9 +1639,14 @@ mod tests {
                                     "stored_session_id": new_sid,
                                     "message_count": 0,
                                     "messages": [],
-                                    "info": { "desktop_contract": 3 }
+                                    "info": { "desktop_contract": contract }
                                 }
                             });
+                            let _ = ws.send(Message::Text(resp.to_string())).await;
+                        }
+                        "session.close" => {
+                            // Acknowledge the close (probe session cleanup).
+                            let resp = json!({"jsonrpc":"2.0","id":id,"result":{}});
                             let _ = ws.send(Message::Text(resp.to_string())).await;
                         }
                         "prompt.submit" => {
@@ -1580,7 +1740,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_ensure_connection_reaches_connected() {
-        let (ws_url, _) = start_mock_backend().await;
+        let (ws_url, _) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
@@ -1595,7 +1755,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_create_session_returns_mock_id() {
-        let (ws_url, received) = start_mock_backend().await;
+        let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
         ensure_ws_connection(&ws_url, emit_fn, &ws_state)
@@ -1617,7 +1777,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_create_briefing_session_uses_correct_source() {
-        let (ws_url, received) = start_mock_backend().await;
+        let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
         ensure_ws_connection(&ws_url, emit_fn, &ws_state)
@@ -1643,7 +1803,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_submit_prompt_streams_events_and_caches_session() {
-        let (ws_url, received) = start_mock_backend().await;
+        let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
         ensure_ws_connection(&ws_url, emit_fn, &ws_state)
@@ -1690,7 +1850,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_ensure_connection_idempotent() {
-        let (ws_url, _) = start_mock_backend().await;
+        let (ws_url, _) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
 
         let (emit_fn, _) = mock_emitter();
@@ -1706,5 +1866,196 @@ mod tests {
             .unwrap();
 
         assert_eq!(*ws_state.state.lock().await, ConnectionState::Connected);
+    }
+
+    // ── Phase 1C.1: Compatibility Handshake tests ────────────────────────────
+    //
+    // Mandatory tests 1-5 and 14 from the Phase 1C spec.
+
+    /// Test 1: Contract 4 (supported) is accepted; connection reaches Connected.
+    #[tokio::test]
+    async fn handshake_accepts_supported_contract() {
+        let (ws_url, _) = start_mock_backend(4).await;
+        let ws_state = Arc::new(WsState::new());
+        let (emit_fn, _) = mock_emitter();
+
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .expect("contract 4 must be accepted");
+        wait_connected(&ws_state, 3000).await;
+
+        let compat = ws_state.compatibility.lock().await;
+        assert!(
+            matches!(
+                *compat,
+                crate::hermes_protocol::RuntimeCompatibility::Compatible { contract: 4 }
+            ),
+            "expected Compatible, got {:?}",
+            *compat
+        );
+    }
+
+    /// Test 2: Contract below minimum (3 < 4) is rejected → HermesUpgradeRequired.
+    #[tokio::test]
+    async fn handshake_rejects_contract_below_minimum() {
+        let (ws_url, _) = start_mock_backend(3).await;
+        let ws_state = Arc::new(WsState::new());
+        let (emit_fn, _) = mock_emitter();
+
+        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .expect_err("contract 3 must be rejected");
+        assert!(
+            matches!(
+                err,
+                WsError::Incompatible(
+                    crate::hermes_protocol::RuntimeCompatibility::HermesUpgradeRequired {
+                        received: 3,
+                        minimum: 4
+                    }
+                )
+            ),
+            "expected HermesUpgradeRequired, got {:?}",
+            err
+        );
+        // Connection must NOT be Connected after a failed handshake.
+        assert_eq!(
+            *ws_state.state.lock().await,
+            ConnectionState::Disconnected,
+            "state must be Disconnected after handshake failure"
+        );
+    }
+
+    /// Test 3: Contract above maximum (5 > 4) is rejected → DesktopUpgradeRequired.
+    #[tokio::test]
+    async fn handshake_rejects_contract_above_maximum() {
+        let (ws_url, _) = start_mock_backend(5).await;
+        let ws_state = Arc::new(WsState::new());
+        let (emit_fn, _) = mock_emitter();
+
+        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .expect_err("contract 5 must be rejected");
+        assert!(
+            matches!(
+                err,
+                WsError::Incompatible(
+                    crate::hermes_protocol::RuntimeCompatibility::DesktopUpgradeRequired {
+                        received: 5,
+                        maximum: 4
+                    }
+                )
+            ),
+            "expected DesktopUpgradeRequired, got {:?}",
+            err
+        );
+    }
+
+    /// Test 4: prompt.submit is blocked until the handshake completes.
+    /// On a fresh WsState (Unknown compatibility), submit must error immediately
+    /// without even attempting the RPC.
+    #[tokio::test]
+    async fn prompt_submit_blocked_before_handshake() {
+        let ws = Arc::new(WsState::new());
+        // No ensure_ws_connection called — compatibility stays Unknown.
+        let err = submit_prompt_on_connection(&ws, "some-sess", "text")
+            .await
+            .expect_err("submit must be blocked with Unknown compatibility");
+        assert!(
+            matches!(err, WsError::Protocol(ref msg) if msg.contains("before compatibility")),
+            "expected pre-handshake block, got {:?}",
+            err
+        );
+    }
+
+    /// Test 5 + probe close: the probe session created during handshake is
+    /// closed via session.close. Verify the mock backend received session.close
+    /// for the probe session id ("probe-sess").
+    #[tokio::test]
+    async fn handshake_probe_session_is_closed() {
+        let (ws_url, received) = start_mock_backend(4).await;
+        let ws_state = Arc::new(WsState::new());
+        let (emit_fn, _) = mock_emitter();
+
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .expect("handshake should pass");
+        // Give the close RPC a moment to be sent/received.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let frames = received.lock().await;
+        let close_sent = frames.iter().any(|v| {
+            v.get("method").and_then(|m| m.as_str()) == Some("session.close")
+                && v.get("params")
+                    .and_then(|p| p.get("session_id"))
+                    .and_then(|s| s.as_str())
+                    == Some("probe-sess")
+        });
+        assert!(
+            close_sent,
+            "expected session.close for probe-sess, frames: {:?}",
+            frames
+                .iter()
+                .map(|f| f.get("method").and_then(|m| m.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Test 14: Incompatible runtime surfaces as a distinct Incompatible error,
+    /// not as Connect or ConnectionFailed.
+    #[tokio::test]
+    async fn incompatible_runtime_is_distinct_error_not_connect() {
+        let (ws_url, _) = start_mock_backend(2).await;
+        let ws_state = Arc::new(WsState::new());
+        let (emit_fn, _) = mock_emitter();
+
+        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+            .await
+            .expect_err("must fail");
+        // Must be Incompatible, NOT Connect.
+        assert!(
+            matches!(err, WsError::Incompatible(_)),
+            "expected Incompatible, got {:?}",
+            err
+        );
+        assert!(
+            !matches!(err, WsError::Connect(_)),
+            "Incompatible must not masquerade as Connect"
+        );
+        // Display must mention the upgrade direction.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("upgrade required"),
+            "error message must explain the upgrade, got: {}",
+            msg
+        );
+    }
+
+    /// Unit test: RuntimeCompatibility::evaluate boundary logic.
+    #[test]
+    fn runtime_compatibility_evaluate_boundaries() {
+        use crate::hermes_protocol::RuntimeCompatibility as RC;
+        // Below minimum.
+        assert!(matches!(
+            RC::evaluate(3),
+            RC::HermesUpgradeRequired {
+                received: 3,
+                minimum: 4
+            }
+        ));
+        // In range.
+        assert!(matches!(RC::evaluate(4), RC::Compatible { contract: 4 }));
+        // Above maximum.
+        assert!(matches!(
+            RC::evaluate(5),
+            RC::DesktopUpgradeRequired {
+                received: 5,
+                maximum: 4
+            }
+        ));
+        // is_compatible only for Compatible.
+        assert!(!RC::Unknown.is_compatible());
+        assert!(RC::evaluate(4).is_compatible());
+        assert!(!RC::evaluate(3).is_compatible());
     }
 }
