@@ -232,6 +232,37 @@ pub fn build_session_create_request(
     )
 }
 
+// ── session.resume ──────────────────────────────────────────────────────────
+
+/// Request params for `session.resume` (reconnect reconciliation).
+/// Carries the durable stored_session_id so the backend can reattach to the
+/// existing session and return a fresh live session_id for the new connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionResumeParams {
+    /// The durable stored session ID (survives reconnects).
+    pub stored_session_id: String,
+}
+
+/// Response result for `session.resume`.
+/// The backend returns a new live `session_id` for this connection while the
+/// `stored_session_id` stays constant across reconnects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionResumeResult {
+    /// The NEW live session ID valid for the current connection.
+    pub session_id: String,
+    /// The durable stored session ID (unchanged from the original create).
+    #[serde(default)]
+    pub stored_session_id: String,
+    /// Number of messages in the resumed session.
+    #[serde(default)]
+    pub message_count: usize,
+    /// Recent message history (may be empty or truncated by the backend).
+    #[serde(default)]
+    pub messages: Vec<serde_json::Value>,
+}
+
 // ── prompt.submit ────────────────────────────────────────────────────────────
 
 /// Request params for `prompt.submit`.

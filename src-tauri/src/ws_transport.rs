@@ -79,7 +79,19 @@ where
     // RPC error (Err(BackendError)), so response_value is the bare `result`.
     let response_value = tokio::time::timeout(timeout, reply_rx)
         .await
-        .map_err(|_| GatewayClientError::RpcTimeout)? // Elapsed
+        .map_err(|_| {
+            // A timeout means we don't know if the backend processed the
+            // request. For non-idempotent methods this is OutcomeUnknown (do
+            // not auto-retry); for idempotent methods a plain RpcTimeout is
+            // fine (caller may retry).
+            if is_idempotent(method) {
+                GatewayClientError::RpcTimeout
+            } else {
+                GatewayClientError::OutcomeUnknown {
+                    method: method.to_string(),
+                }
+            }
+        })?
         .map_err(|_| GatewayClientError::ConnectionLost)??; // RecvError, then inner error
 
     // Parse the result directly into R — the error envelope was already handled
@@ -137,6 +149,24 @@ pub async fn create_session_on_connection(
         SessionCreateParams {
             source: source.to_owned(),
             cols: 96,
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Resume a session by its durable stored_session_id. Used by the reconnect
+/// reconciliation loop to obtain a fresh live session_id for the new connection
+/// while preserving conversation history.
+pub async fn resume_session_on_connection(
+    ws_state: &WsState,
+    stored_session_id: &str,
+) -> Result<crate::hermes_protocol::SessionResumeResult, WsError> {
+    call_rpc(
+        ws_state,
+        "session.resume",
+        crate::hermes_protocol::SessionResumeParams {
+            stored_session_id: stored_session_id.to_owned(),
         },
         RPC_TIMEOUT,
     )
@@ -832,8 +862,6 @@ pub struct WsState {
     pub state: tokio::sync::Mutex<ConnectionState>,
     /// The full WS URL.
     pub ws_url: tokio::sync::Mutex<String>,
-    /// Default chat session_id.
-    pub session_id: tokio::sync::Mutex<Option<String>>,
     /// Sender into the reader task's mpsc channel.
     pub cmd_tx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsCommand>>>,
     /// Serializes concurrent `ensure_ws_connection` calls so only one task
@@ -853,7 +881,6 @@ impl WsState {
         Self {
             state: tokio::sync::Mutex::new(ConnectionState::Disconnected),
             ws_url: tokio::sync::Mutex::new(String::new()),
-            session_id: tokio::sync::Mutex::new(None),
             cmd_tx: tokio::sync::Mutex::new(None),
             connect_lock: tokio::sync::Mutex::new(()),
             compatibility: tokio::sync::Mutex::new(
@@ -1004,10 +1031,87 @@ pub async fn ensure_ws_connection(
         }
     }
 
+    // ── Reconnect reconciliation (Phase 1C.4) ────────────────────────────────
+    // Before declaring Connected, resume any conversations that were Suspended
+    // by a prior disconnect and have a durable stored_session_id. Each resume
+    // obtains a fresh live ID for the new generation. Failures leave the
+    // binding in ResumeFailed (durable retained for manual retry); they do NOT
+    // block the connection from going Connected (other conversations proceed).
+    if let Some(sessions) = &sessions {
+        reconcile_sessions(ws_state, sessions, generation).await;
+    }
+
     *ws_state.state.lock().await = ConnectionState::Connected;
     tracing::info!(target: "steersman_desktop_lib::ws", generation, "persistent connection established");
 
     Ok(())
+}
+
+/// Resume all suspended conversations that have a durable stored_session_id.
+/// Called after the compatibility handshake passes, before Connected.
+///
+/// On success: the binding gets a fresh live ID for the new generation and
+/// returns to Active. On failure: the binding is marked ResumeFailed (durable
+/// ID retained) and logged — it does not block other conversations or the
+/// connection from reaching Connected.
+async fn reconcile_sessions(
+    ws_state: &Arc<WsState>,
+    sessions: &Arc<crate::session_registry::SessionRegistry>,
+    generation: u64,
+) {
+    let to_resume = sessions.take_suspended_for_resume().await;
+    if to_resume.is_empty() {
+        return;
+    }
+    tracing::info!(
+        target: "steersman_desktop_lib::ws",
+        count = to_resume.len(),
+        generation,
+        "reconciling suspended sessions"
+    );
+    for (conv, stored_id) in to_resume {
+        match resume_session_on_connection(ws_state, &stored_id).await {
+            Ok(result) => {
+                let new_live = if result.session_id.is_empty() {
+                    // Backend returned no live ID — treat as resume failure.
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %stored_id,
+                        "resume returned empty live session_id"
+                    );
+                    sessions.mark_resume_failed(&conv).await;
+                    continue;
+                } else {
+                    result.session_id
+                };
+                let new_stored = if result.stored_session_id.is_empty() {
+                    stored_id
+                } else {
+                    result.stored_session_id
+                };
+                sessions
+                    .set_live(conv.clone(), new_live, Some(new_stored), generation)
+                    .await;
+                tracing::info!(
+                    target: "steersman_desktop_lib::ws",
+                    conversation = %conv,
+                    generation,
+                    "session resumed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "steersman_desktop_lib::ws",
+                    conversation = %conv,
+                    stored_id = %stored_id,
+                    error = %e,
+                    "session.resume failed; marking ResumeFailed"
+                );
+                sessions.mark_resume_failed(&conv).await;
+            }
+        }
+    }
 }
 
 /// Probe the backend with a throwaway `session.create` to read its
@@ -1200,38 +1304,55 @@ async fn reader_task<S>(
                                 }
                             }
                             Some(IncomingFrame::Event(routed_event)) => {
-                                // Translate via typed parser to ChatEvent
-                                // (replaces legacy parse_ws_message on the persistent path).
-                                if let Some(chat_event) = translate_gateway_event(&routed_event) {
-                                    (emit_fn)(&chat_event);
-                                    // Update session_id from Done events.
-                                    if let ChatEvent::Done { session_id: Some(ref sid) } = chat_event {
-                                        let mut sid_lock = ws_state.session_id.lock().await;
-                                        if !sid.is_empty() {
-                                            *sid_lock = Some(sid.clone());
-                                        }
-                                    }
-                                }
-                                // Track session_id from session.info events
-                                // (use live session_id from params, not stored_session_id).
-                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) =
-                                    &routed_event.event
-                                {
-                                    if let Some(live_sid) = &routed_event.session_id {
-                                        if !live_sid.is_empty() {
-                                            *ws_state.session_id.lock().await = Some(live_sid.clone());
-                                        }
-                                    }
-                                    // Phase 1C.2: update the registry's stored
-                                    // (durable) session ID for this conversation.
-                                    // stored_session_id never overwrites the live ID.
-                                    if let (Some(sessions), Some(live_sid)) = (&sessions, &routed_event.session_id) {
-                                        if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
-                                            if let Some(conv) = sessions.route_event(live_sid).await {
-                                                sessions.set_stored(&conv, p.stored_session_id.clone()).await;
+                                // Resolve the owning conversation via the live
+                                // session_id in params. Every event is routed
+                                // through the registry — unknown live sessions
+                                // are logged and NOT emitted to a random convo.
+                                let conversation_id = match (
+                                    &sessions,
+                                    routed_event.session_id.as_deref(),
+                                ) {
+                                    (Some(sessions), Some(live_sid)) if !live_sid.is_empty() => {
+                                        match sessions.route_event(live_sid).await {
+                                            Some(conv) => Some(conv.0),
+                                            None => {
+                                                tracing::debug!(
+                                                    target: "steersman_desktop_lib::ws",
+                                                    live_session_id = live_sid,
+                                                    "event for unknown live session (not emitted)"
+                                                );
+                                                None
                                             }
                                         }
                                     }
+                                    _ => None,
+                                };
+
+                                // For session.info events, update the registry's
+                                // stored_session_id (never overwrites live ID).
+                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) =
+                                    &routed_event.event
+                                {
+                                    if let (Some(sessions), Some(live_sid)) =
+                                        (&sessions, &routed_event.session_id)
+                                    {
+                                        if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
+                                            if let Some(conv) = sessions.route_event(live_sid).await {
+                                                sessions
+                                                    .set_stored(&conv, p.stored_session_id.clone())
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Translate via typed parser to ChatEvent.
+                                if let Some(chat_event) = translate_gateway_event(&routed_event) {
+                                    let routed = RoutedChatEvent {
+                                        conversation_id,
+                                        event: chat_event,
+                                    };
+                                    (emit_fn)(&routed);
                                 }
                             }
                             None => {
@@ -1280,11 +1401,19 @@ async fn reader_task<S>(
                                 target: "steersman_desktop_lib::ws",
                                 error = %e, method, "RPC send failed"
                             );
-                            // Remove from pending and notify caller
+                            // Remove from pending and notify caller. A send
+                            // failure means the frame may have been partially
+                            // sent — for non-idempotent methods the outcome is
+                            // unknown (server may have processed it).
                             if let Some(p) = pending.remove(&id) {
-                                let _ = p
-                                    .reply
-                                    .send(Err(GatewayClientError::Protocol(e.to_string())));
+                                let err = if is_idempotent(&p.method) {
+                                    GatewayClientError::Protocol(e.to_string())
+                                } else {
+                                    GatewayClientError::OutcomeUnknown {
+                                        method: p.method.clone(),
+                                    }
+                                };
+                                let _ = p.reply.send(Err(err));
                             }
                             break;
                         }
@@ -1310,7 +1439,9 @@ async fn reader_task<S>(
         // of reconciliation (Phase 1C.3); the reconnect/resume half runs in
         // ensure_ws_connection after the handshake.
         if let Some(sessions) = &sessions {
-            sessions.mark_stale_for_generation(my_generation).await;
+            // Suspend THIS generation's bindings (== match). The dead socket's
+            // live IDs become stale; durable IDs retained for resume.
+            sessions.suspend_generation(my_generation).await;
         }
     }
 
@@ -1348,9 +1479,22 @@ where
         .map_err(|e| GatewayClientError::Protocol(format!("ws send: {}", e)))
 }
 
-// Callback type for emitting chat events. Production wraps `app_handle.emit`;
-// tests pass a mock that records events.
-pub type EmitFn = Arc<dyn Fn(&ChatEvent) + Send + Sync + 'static>;
+/// Envelope wrapping a ChatEvent with its owning conversation_id. The frontend
+/// uses conversation_id to route streaming tokens, tool events, approvals, etc.
+/// to the correct conversation view when multiple are open.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoutedChatEvent {
+    /// The conversation this event belongs to (resolved from the live session
+    /// ID via the SessionRegistry). None for events with no owning conversation
+    /// (e.g. gateway-level status not tied to a session).
+    pub conversation_id: Option<String>,
+    #[serde(flatten)]
+    pub event: ChatEvent,
+}
+
+// Callback type for emitting routed chat events. Production wraps
+// `app_handle.emit`; tests pass a mock that records events.
+pub type EmitFn = Arc<dyn Fn(&RoutedChatEvent) + Send + Sync + 'static>;
 
 /// Build an EmitFn from a Tauri AppHandle. This is the production path.
 pub fn make_tauri_emitter<R>(app_handle: AppHandle<R>) -> EmitFn
@@ -1358,7 +1502,7 @@ where
     R: tauri::Runtime,
     AppHandle<R>: Emitter<R>,
 {
-    Arc::new(move |event: &ChatEvent| {
+    Arc::new(move |event: &RoutedChatEvent| {
         let _ = app_handle.emit("chat_event", event);
     })
 }
@@ -1476,15 +1620,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_state_holds_session_id() {
+    async fn ws_state_starts_with_no_compatibility() {
+        // The global session_id field is removed (Phase 1C.4): the registry is
+        // the authoritative source. Verify compatibility starts Unknown.
         let ws = WsState::new();
-        // Initially None.
-        assert!(ws.session_id.lock().await.is_none());
-        // Set after first session.create.
-        *ws.session_id.lock().await = Some("abc123".to_string());
-        assert_eq!(ws.session_id.lock().await.as_deref(), Some("abc123"));
-        // Survives a separate lock cycle (simulates next turn).
-        assert_eq!(ws.session_id.lock().await.as_deref(), Some("abc123"));
+        let compat = ws.compatibility.lock().await;
+        assert_eq!(
+            *compat,
+            crate::hermes_protocol::RuntimeCompatibility::Unknown
+        );
     }
 
     #[test]
@@ -1707,6 +1851,28 @@ mod tests {
                             let resp = json!({"jsonrpc":"2.0","id":id,"result":{}});
                             let _ = ws.send(Message::Text(resp.to_string())).await;
                         }
+                        "session.resume" => {
+                            // Return a NEW live session_id derived from the
+                            // stored_session_id, keeping stored_session_id stable.
+                            // Format: "<stored>-resumed-<id>" so the reconnect
+                            // test can verify a fresh live ID was issued.
+                            let stored = req
+                                .get("params")
+                                .and_then(|p| p.get("stored_session_id"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("unknown-stored");
+                            let new_live = format!("{}-resumed-{}", stored, id);
+                            let resp = json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {
+                                    "session_id": new_live,
+                                    "stored_session_id": stored,
+                                    "message_count": 0,
+                                    "messages": []
+                                }
+                            });
+                            let _ = ws.send(Message::Text(resp.to_string())).await;
+                        }
                         "prompt.submit" => {
                             let ack =
                                 json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
@@ -1734,30 +1900,17 @@ mod tests {
         )
     }
 
-    fn mock_emitter() -> (EmitFn, Arc<tokio::sync::Mutex<Vec<ChatEvent>>>) {
-        let events: Arc<tokio::sync::Mutex<Vec<ChatEvent>>> =
-            Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let _events_clone = Arc::clone(&events);
-        let emit_fn: EmitFn = Arc::new(move |event: &ChatEvent| {
-            // ChatEvent is not Clone, so we capture a debug snapshot.
-            let snapshot = format!("{:?}", event);
-            let _events = _events_clone.clone();
-            // Can't move ChatEvent (not Clone), so record the type tag.
-            let tag = match event {
+    type MockEvents = Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>>;
+
+    /// Build an EmitFn that records (conversation_id, tag) into `events`.
+    fn mock_emitter_into(events: MockEvents) -> EmitFn {
+        Arc::new(move |routed: &RoutedChatEvent| {
+            let tag = match &routed.event {
                 ChatEvent::Token { .. } => "token",
                 ChatEvent::Reasoning { .. } => "reasoning",
                 ChatEvent::ToolStart { .. } => "tool_start",
                 ChatEvent::ToolComplete { .. } => "tool_complete",
-                ChatEvent::Done { session_id } => {
-                    if let Some(_sid) = session_id {
-                        let _ec = _events.clone();
-                        let _ = snapshot; // keep for potential future use
-                                          // Record done with session_id for session reuse tests.
-                                          // We use a side-channel: push the sid string.
-                        let _ = _ec;
-                    }
-                    "done"
-                }
+                ChatEvent::Done { .. } => "done",
                 ChatEvent::Error { .. } => "error",
                 ChatEvent::Status { .. } => "status",
                 ChatEvent::ApprovalRequest { .. } => "approval",
@@ -1773,10 +1926,17 @@ mod tests {
                 ChatEvent::Notification { .. } => "notification",
                 ChatEvent::NotificationClear { .. } => "notification_clear",
             };
-            let _ = tag;
-            // We can't store ChatEvent (no Clone), but tests check WsState
-            // session_id directly, which the reader task updates from Done.
-        });
+            events
+                .try_lock()
+                .map(|mut v| v.push((routed.conversation_id.clone(), tag)))
+                .ok();
+        })
+    }
+
+    /// Convenience: fresh events Arc + emitter.
+    fn mock_emitter() -> (EmitFn, MockEvents) {
+        let events: MockEvents = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let emit_fn = mock_emitter_into(Arc::clone(&events));
         (emit_fn, events)
     }
 
@@ -1863,38 +2023,34 @@ mod tests {
     async fn e2e_submit_prompt_streams_events_and_caches_session() {
         let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
+        let sessions = crate::session_registry::SessionRegistry::new();
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, Some(sessions.clone()))
             .await
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let sid = create_session_on_connection(&ws_state, "desktop")
+        let result = create_session_on_connection(&ws_state, "desktop")
             .await
-            .unwrap()
-            .session_id;
+            .unwrap();
+        let sid = result.session_id.clone();
+        let generation = ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        sessions
+            .set_live(
+                crate::session_registry::ConversationId::new("conv-test"),
+                sid.clone(),
+                Some(result.stored_session_id),
+                generation,
+            )
+            .await;
         submit_prompt_on_connection(&ws_state, &sid, "test prompt")
             .await
             .unwrap();
 
-        // Wait for message.complete to arrive and session_id to be cached.
-        for _ in 0..60 {
-            if ws_state
-                .session_id
-                .try_lock()
-                .map(|s| s.is_some())
-                .unwrap_or(false)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let cached = ws_state.session_id.lock().await.clone();
-        assert_eq!(
-            cached.as_deref(),
-            Some("chat-sess"),
-            "session_id must be cached after message.complete"
-        );
+        // Give the stream a moment to deliver events.
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let frames = received.lock().await;
         assert!(frames.iter().any(|v| {
@@ -2251,5 +2407,288 @@ mod tests {
         assert!(msg.contains("not retried"), "msg: {}", msg);
         // ConnectionLost display is different.
         assert_ne!(ou.to_string(), cl.to_string());
+    }
+
+    // ── Phase 1C.4: Real reconnect reconciliation integration test ───────────
+    //
+    // The audit demanded this: create 2 sessions, disconnect the socket,
+    // reconnect, verify 2 REAL session.resume calls happened, verify new live
+    // IDs in the registry, verify interleaved events route to the correct
+    // conversation_id.
+
+    /// A mock backend that accepts MULTIPLE connections on the same port, so a
+    /// reconnect test can drop the first socket and establish a second one.
+    /// Records all received frames across all connections for assertion.
+    async fn start_reconnect_mock_backend() -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received: Arc<tokio::sync::Mutex<Vec<Value>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = Arc::clone(&received);
+
+        tokio::spawn(async move {
+            // Accept multiple connections in a loop so reconnect works.
+            for _ in 0..5 {
+                let (stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let rx_clone = Arc::clone(&received_clone);
+
+                // gateway.ready
+                let ready = json!({
+                    "jsonrpc": "2.0", "method": "event",
+                    "params": {"type": "gateway.ready", "payload": {}}
+                });
+                let _ = ws.send(Message::Text(ready.to_string())).await;
+
+                // Handle requests on this connection until it closes.
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let Message::Text(text) = msg {
+                        let req: Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        rx_clone.lock().await.push(req.clone());
+                        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        let id = req.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+
+                        match method {
+                            "session.create" => {
+                                let source = req
+                                    .get("params")
+                                    .and_then(|p| p.get("source"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("desktop");
+                                // For compat_probe return a probe-sess; for
+                                // real conversations, return distinct IDs based
+                                // on source so two conversations differ.
+                                let (new_sid, stored) = if source == "compat_probe" {
+                                    ("probe-sess".to_string(), "probe-sess".to_string())
+                                } else {
+                                    // Use the source to make distinct durable IDs.
+                                    let s = format!("{}-stored", source);
+                                    (format!("{}-live", source), s)
+                                };
+                                let resp = json!({
+                                    "jsonrpc": "2.0", "id": id,
+                                    "result": {
+                                        "session_id": new_sid,
+                                        "stored_session_id": stored,
+                                        "message_count": 0,
+                                        "messages": [],
+                                        "info": { "desktop_contract": 4 }
+                                    }
+                                });
+                                let _ = ws.send(Message::Text(resp.to_string())).await;
+                            }
+                            "session.resume" => {
+                                let stored = req
+                                    .get("params")
+                                    .and_then(|p| p.get("stored_session_id"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("unknown");
+                                let new_live = format!("{}-resumed", stored);
+                                let resp = json!({
+                                    "jsonrpc": "2.0", "id": id,
+                                    "result": {
+                                        "session_id": new_live,
+                                        "stored_session_id": stored,
+                                        "message_count": 0,
+                                        "messages": []
+                                    }
+                                });
+                                let _ = ws.send(Message::Text(resp.to_string())).await;
+                            }
+                            "session.close" => {
+                                let resp = json!({"jsonrpc":"2.0","id":id,"result":{}});
+                                let _ = ws.send(Message::Text(resp.to_string())).await;
+                            }
+                            "prompt.submit" => {
+                                let sid = req
+                                    .get("params")
+                                    .and_then(|p| p.get("session_id"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("");
+                                let ack = json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
+                                let _ = ws.send(Message::Text(ack.to_string())).await;
+                                // Stream a token + complete, routed by live sid.
+                                for ev in [
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":sid,"payload":{"text":"Hi"}}}),
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":sid,"payload":{"text":"Hi","status":"complete"}}}),
+                                ] {
+                                    let _ = ws.send(Message::Text(ev.to_string())).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else if matches!(msg, Message::Close(_)) {
+                        break;
+                    }
+                }
+                // Connection closed; loop back to accept the next one.
+            }
+        });
+
+        (
+            format!("ws://127.0.0.1:{}/api/ws?token=test", port),
+            received,
+        )
+    }
+
+    /// Phase 1C.4 integration test: real reconnect reconciliation.
+    ///
+    /// 1. Connect, create 2 sessions (distinct durable IDs), register them.
+    /// 2. Drop the connection (shutdown the reader task / set Disconnected).
+    /// 3. Reconnect — ensure_ws_connection must run session.resume for BOTH
+    ///    suspended conversations.
+    /// 4. Verify 2 real session.resume RPCs were sent to the backend.
+    /// 5. Verify new live IDs are in the registry (Active state).
+    /// 6. Submit prompts on both — events must carry the correct
+    ///    conversation_id (interleaved routing).
+    #[tokio::test]
+    async fn reconnect_reconciles_two_conversations_via_real_resume() {
+        use crate::session_registry::{ConversationId, SessionState};
+
+        let (ws_url, received) = start_reconnect_mock_backend().await;
+        let ws_state = Arc::new(WsState::new());
+        let sessions = crate::session_registry::SessionRegistry::new();
+        let (emit_fn, emitted) = mock_emitter();
+
+        // 1. Connect + handshake.
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("first connect");
+        wait_connected(&ws_state, 5000).await;
+        let gen1 = ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        // Create two distinct conversations with distinct durable IDs.
+        let conv_a = ConversationId::new("conv-a");
+        let conv_b = ConversationId::new("conv-b");
+
+        // create_session returns session_id based on source; use distinct sources.
+        let ra = create_session_on_connection(&ws_state, "conva")
+            .await
+            .unwrap();
+        sessions
+            .set_live(
+                conv_a.clone(),
+                ra.session_id.clone(),
+                Some(ra.stored_session_id),
+                gen1,
+            )
+            .await;
+        let rb = create_session_on_connection(&ws_state, "convb")
+            .await
+            .unwrap();
+        sessions
+            .set_live(
+                conv_b.clone(),
+                rb.session_id.clone(),
+                Some(rb.stored_session_id),
+                gen1,
+            )
+            .await;
+
+        // 2. Simulate disconnect: set Disconnected + suspend the generation.
+        *ws_state.state.lock().await = ConnectionState::Disconnected;
+        // Send shutdown so the old reader task stops.
+        if let Some(tx) = ws_state.cmd_tx.lock().await.take() {
+            let _ = tx.send(WsCommand::Shutdown).await;
+        }
+        sessions.suspend_generation(gen1).await;
+
+        // Verify both are now Suspended.
+        assert_eq!(
+            sessions.get(&conv_a).await.unwrap().state,
+            SessionState::Suspended
+        );
+        assert_eq!(
+            sessions.get(&conv_b).await.unwrap().state,
+            SessionState::Suspended
+        );
+
+        // 3. Reconnect — reconciliation resumes both. Reuse the SAME events Arc
+        // so post-reconnect events are captured.
+        let emit_fn2 = mock_emitter_into(Arc::clone(&emitted));
+        ensure_ws_connection(&ws_url, emit_fn2, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("reconnect");
+        wait_connected(&ws_state, 5000).await;
+
+        // 4. Verify 2 real session.resume RPCs were sent.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let frames = received.lock().await;
+        let resume_calls: Vec<_> = frames
+            .iter()
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("session.resume"))
+            .collect();
+        assert_eq!(
+            resume_calls.len(),
+            2,
+            "expected exactly 2 session.resume calls, got {}: {:?}",
+            resume_calls.len(),
+            frames
+                .iter()
+                .map(|f| f.get("method").and_then(|m| m.as_str()))
+                .collect::<Vec<_>>()
+        );
+
+        // 5. Verify new live IDs in registry (Active, resumed).
+        let ba = sessions.get(&conv_a).await.expect("conv-a binding");
+        let bb = sessions.get(&conv_b).await.expect("conv-b binding");
+        assert_eq!(
+            ba.state,
+            SessionState::Active,
+            "conv-a must be Active after resume"
+        );
+        assert_eq!(
+            bb.state,
+            SessionState::Active,
+            "conv-b must be Active after resume"
+        );
+        // Live IDs changed (resumed suffix).
+        assert!(ba.live_session_id.as_deref().unwrap().contains("resumed"));
+        assert!(bb.live_session_id.as_deref().unwrap().contains("resumed"));
+
+        drop(frames);
+
+        // 6. Submit prompts on both — events route with correct conversation_id.
+        let live_a = sessions.get_live(&conv_a).await.unwrap();
+        let live_b = sessions.get_live(&conv_b).await.unwrap();
+        // Submit both (they stream interleaved events).
+        submit_prompt_on_connection(&ws_state, &live_a, "msg A")
+            .await
+            .expect("submit A");
+        submit_prompt_on_connection(&ws_state, &live_b, "msg B")
+            .await
+            .expect("submit B");
+
+        // Wait for events to be emitted.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let emitted_events = emitted.lock().await;
+        // Both conversations must have received events.
+        let a_events: Vec<_> = emitted_events
+            .iter()
+            .filter(|(c, _)| c.as_deref() == Some("conv-a"))
+            .collect();
+        let b_events: Vec<_> = emitted_events
+            .iter()
+            .filter(|(c, _)| c.as_deref() == Some("conv-b"))
+            .collect();
+        assert!(
+            !a_events.is_empty(),
+            "conv-a must have received routed events: {:?}",
+            *emitted_events
+        );
+        assert!(
+            !b_events.is_empty(),
+            "conv-b must have received routed events: {:?}",
+            *emitted_events
+        );
     }
 }

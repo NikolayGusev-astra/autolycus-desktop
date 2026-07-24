@@ -622,21 +622,27 @@ pub async fn send_via_ws_persistent_local(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Phase 1C.2: resolve the Hermes live session ID via the SessionRegistry.
-    // The product layer identifies conversations by conversation_id; the
-    // transport layer maps it to a live Hermes session ID. If no live ID
-    // exists yet, create a session and register the binding.
+    // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
+    // The registry is the AUTHORITATIVE source of session IDs — every created
+    // or resumed session MUST be registered so event routing and reconnect
+    // reconciliation work.
     //
-    // session_id in the request is kept as a backward-compatibility fallback
-    // for frontends that still pass the Hermes UUID directly.
-    let session_id = if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
-        sid.to_string()
-    } else if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
+    // Resolution priority:
+    //   1. conversation_id → registry.get_live (or create + register)
+    //   2. session_id (legacy) → synthetic ConversationId adapter, register if new
+    //   3. neither → create a new session, register under a synthetic conversation_id
+    let generation = ws_state
+        .generation
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    let session_id = if let Some(conv_str) =
+        request.conversation_id.as_deref().filter(|s| !s.is_empty())
+    {
         let conv = crate::session_registry::ConversationId::new(conv_str);
         match sessions.get_live(&conv).await {
             Some(live) => live,
             None => {
-                // No live ID for this conversation yet — create one.
+                // No live ID for this conversation yet — create one and register.
                 let result = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
                     .await
                     .map_err(|e| format!("{:?}", e))?;
@@ -645,21 +651,42 @@ pub async fn send_via_ws_persistent_local(
                         conv,
                         result.session_id.clone(),
                         Some(result.stored_session_id),
-                        ws_state
-                            .generation
-                            .load(std::sync::atomic::Ordering::Acquire),
+                        generation,
                     )
                     .await;
                 result.session_id
             }
         }
+    } else if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+        // Legacy adapter: frontend passed a raw Hermes session_id. Derive a
+        // synthetic ConversationId so the registry always has a binding. If
+        // this live ID is already registered (reverse lookup), reuse it;
+        // otherwise register the binding so events route correctly.
+        let synthetic_conv =
+            crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
+        if sessions.route_event(sid).await.is_none() {
+            sessions
+                .set_live(synthetic_conv, sid.to_string(), None, generation)
+                .await;
+        }
+        sid.to_string()
     } else {
-        // Legacy fallback: no conversation_id and no session_id. Create a
-        // new session. This path will go away once the frontend migrates to
-        // conversation_id (tracked separately).
+        // No conversation_id and no session_id: create a new session and
+        // register it under a synthetic conversation_id so it participates in
+        // reconnect reconciliation.
         let result = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
             .await
             .map_err(|e| format!("{:?}", e))?;
+        let synthetic_conv =
+            crate::session_registry::ConversationId::new(format!("auto:{}", result.session_id));
+        sessions
+            .set_live(
+                synthetic_conv,
+                result.session_id.clone(),
+                Some(result.stored_session_id),
+                generation,
+            )
+            .await;
         result.session_id
     };
 

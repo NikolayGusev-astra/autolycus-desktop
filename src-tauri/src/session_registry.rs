@@ -48,6 +48,12 @@ pub enum SessionState {
     Active,
     /// Disconnected or waiting for reconnect/resume. Durable ID retained.
     Suspended,
+    /// Reconnect in progress: a session.resume call is outstanding for this
+    /// binding's stored_session_id.
+    Resuming,
+    /// The last session.resume attempt failed. The durable ID is retained so
+    /// the user can retry manually; the binding is NOT usable for prompts.
+    ResumeFailed,
 }
 
 /// One conversation's binding to Hermes session IDs.
@@ -200,6 +206,55 @@ impl SessionRegistry {
         }
         for live in stale_lives {
             inner.by_live_session.remove(&live);
+        }
+    }
+
+    /// Suspend exactly the bindings belonging to `dead_generation` (== match).
+    /// This is what the reader task calls on confirmed disconnect: the dead
+    /// socket's bindings are Suspended, their live IDs cleared (stale), and
+    /// durable IDs retained for resume. Bindings from OTHER generations
+    /// (already resumed on a newer connection) are left untouched.
+    pub async fn suspend_generation(&self, dead_generation: u64) {
+        let mut inner = self.inner.lock().await;
+        let mut stale_lives: Vec<String> = Vec::new();
+        for b in inner.by_conversation.values_mut() {
+            if b.connection_generation == dead_generation && b.state == SessionState::Active {
+                b.state = SessionState::Suspended;
+                if let Some(live) = b.live_session_id.take() {
+                    stale_lives.push(live);
+                }
+            }
+        }
+        for live in stale_lives {
+            inner.by_live_session.remove(&live);
+        }
+    }
+
+    /// Return all bindings that are Suspended AND have a durable stored_session_id,
+    /// so the reconciliation loop can resume them. The returned bindings are
+    /// transitioned to Resuming atomically (single lock), preventing duplicate
+    /// resume attempts if two tasks race.
+    pub async fn take_suspended_for_resume(&self) -> Vec<(ConversationId, String)> {
+        let mut inner = self.inner.lock().await;
+        let mut out = Vec::new();
+        for b in inner.by_conversation.values_mut() {
+            if b.state == SessionState::Suspended {
+                if let Some(stored) = b.stored_session_id.clone() {
+                    if !stored.is_empty() {
+                        b.state = SessionState::Resuming;
+                        out.push((b.conversation_id.clone(), stored));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Mark a conversation's resume as failed (keeps durable ID for manual retry).
+    pub async fn mark_resume_failed(&self, conversation_id: &ConversationId) {
+        let mut inner = self.inner.lock().await;
+        if let Some(b) = inner.by_conversation.get_mut(conversation_id) {
+            b.state = SessionState::ResumeFailed;
         }
     }
 
