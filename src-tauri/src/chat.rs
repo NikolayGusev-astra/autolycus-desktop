@@ -127,6 +127,12 @@ pub enum ConnectionMode {
 pub struct SendMessageRequest {
     pub text: String,
     pub session_id: Option<String>,
+    /// Phase 1C.2: product/UI conversation ID. When present, the backend
+    /// resolves the Hermes live session ID through the SessionRegistry instead
+    /// of the global session_id cache. Falls back to session_id for backward
+    /// compatibility with frontends that haven't migrated yet.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
     pub history: Option<Vec<HistoryItem>>,
 }
 
@@ -604,6 +610,7 @@ async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, Stri
 pub async fn send_via_ws_persistent_local(
     gateway_state: &GatewayState,
     ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
     request: &SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
@@ -615,24 +622,45 @@ pub async fn send_via_ws_persistent_local(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Resolve session_id: prefer the frontend-supplied one, then the cached
-    // one in WsState. Create a new session only if both are absent.
+    // Phase 1C.2: resolve the Hermes live session ID via the SessionRegistry.
+    // The product layer identifies conversations by conversation_id; the
+    // transport layer maps it to a live Hermes session ID. If no live ID
+    // exists yet, create a session and register the binding.
+    //
+    // session_id in the request is kept as a backward-compatibility fallback
+    // for frontends that still pass the Hermes UUID directly.
     let session_id = if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
         sid.to_string()
-    } else {
-        let cached = ws_state.session_id.lock().await.clone();
-        match cached {
-            Some(sid) if !sid.is_empty() => sid,
-            _ => {
-                // Create a new "desktop" session (the default chat surface).
+    } else if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
+        let conv = crate::session_registry::ConversationId::new(conv_str);
+        match sessions.get_live(&conv).await {
+            Some(live) => live,
+            None => {
+                // No live ID for this conversation yet — create one.
                 let result = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
                     .await
                     .map_err(|e| format!("{:?}", e))?;
-                let sid = result.session_id;
-                *ws_state.session_id.lock().await = Some(sid.clone());
-                sid
+                sessions
+                    .set_live(
+                        conv,
+                        result.session_id.clone(),
+                        Some(result.stored_session_id),
+                        ws_state
+                            .generation
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    )
+                    .await;
+                result.session_id
             }
         }
+    } else {
+        // Legacy fallback: no conversation_id and no session_id. Create a
+        // new session. This path will go away once the frontend migrates to
+        // conversation_id (tracked separately).
+        let result = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
+            .await
+            .map_err(|e| format!("{:?}", e))?;
+        result.session_id
     };
 
     // Submit the prompt — events stream back via chat_event.
@@ -643,6 +671,9 @@ pub async fn send_via_ws_persistent_local(
     Ok(session_id)
 }
 
+/// Tauri command boundary: inherent parameter fan-out across the three
+/// connection modes. Collapse into a context struct in Phase 3 product API.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message(
     gateway_state: &GatewayState,
     ssh_state: &SshState,
@@ -654,6 +685,7 @@ pub async fn send_message(
     request: SendMessageRequest,
     app_handle: &AppHandle,
     ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
 ) -> Result<String, String> {
     // Note: model_config is no longer fetched here — the WS transport sends
     // only {session_id, text}; reasoning_effort/verbosity/etc. live in the
@@ -674,7 +706,8 @@ pub async fn send_message(
             // ADR-006: Local mode uses the PERSISTENT WS connection (one
             // socket for the app lifetime). Remote/SSH still use connect-per-
             // message (separate migration, out of scope for ADR-006).
-            send_via_ws_persistent_local(gateway_state, ws_state, &request, app_handle).await
+            send_via_ws_persistent_local(gateway_state, ws_state, sessions, &request, app_handle)
+                .await
         }
         ConnectionMode::Remote => {
             // ADR-005: Remote talks to a remote `hermes serve` over the same

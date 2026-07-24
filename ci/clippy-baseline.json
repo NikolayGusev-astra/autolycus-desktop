@@ -69,7 +69,6 @@
   "dead_code|src/validation.rs|variants `Gateway` and `Setup` are never constructed": 2,
   "clippy::ptr_arg|src/auth.rs|writing `&PathBuf` instead of `&Path` involves a new object where a slice will do": 4,
   "clippy::needless_borrow|src/auth.rs|this expression creates a reference which is immediately dereferenced by the compiler": 2,
-  "clippy::too_many_arguments|src/chat.rs|this function has too many arguments (10/7)": 2,
   "clippy::derivable_impls|src/config.rs|this `impl` can be derived": 4,
   "clippy::doc_lazy_continuation|src/config.rs|doc list item without indentation": 4,
   "clippy::too_many_arguments|src/config.rs|this function has too many arguments (11/7)": 2,

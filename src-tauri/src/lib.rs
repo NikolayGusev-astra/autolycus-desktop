@@ -28,6 +28,7 @@ mod profiles;
 mod provider_registry;
 mod registry;
 mod secrets;
+mod session_registry;
 mod sessions;
 mod skills;
 mod sources;
@@ -70,6 +71,10 @@ pub struct AppState {
     /// connect-per-message. Remote/SSH modes bypass this (they use their own
     /// transport path in chat.rs).
     pub ws: std::sync::Arc<ws_transport::WsState>,
+    /// Phase 1C.2: session registry mapping conversation IDs (product layer)
+    /// to Hermes live/durable session IDs. Replaces the single global
+    /// session_id that was on WsState.
+    pub sessions: std::sync::Arc<session_registry::SessionRegistry>,
 }
 
 impl AppState {
@@ -80,6 +85,7 @@ impl AppState {
             hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
+            sessions: session_registry::SessionRegistry::new(),
         }
     }
 
@@ -998,6 +1004,7 @@ async fn send_message_cmd(
         request,
         &app_handle,
         &state.ws,
+        &state.sessions,
     )
     .await
 }
