@@ -502,10 +502,34 @@ pub enum GatewayClientError {
     ConnectionLost,
     RpcTimeout,
     SessionCreate(String),
+    /// A non-idempotent RPC (prompt.submit, approval.respond, secret.respond,
+    /// sudo.respond, session.close) was interrupted by a disconnect. The server
+    /// may or may not have processed it — the outcome is genuinely unknown and
+    /// must NOT be auto-retried. Callers surface this distinctly so the UI can
+    /// ask the user to confirm, rather than silently double-submitting.
+    OutcomeUnknown {
+        method: String,
+    },
     /// Hermes backend is not version-compatible with this desktop build.
     /// Distinct from connection failures so callers can branch (prompt the
     /// user to upgrade Hermes or the desktop, not to reconnect).
     Incompatible(crate::hermes_protocol::RuntimeCompatibility),
+}
+
+/// RPC methods that are NOT safe to auto-retry: executing them twice has
+/// side effects (double prompt submission, double approval, etc.). On
+/// disconnect, pending calls to these methods resolve to `OutcomeUnknown`
+/// rather than `ConnectionLost`, so callers never silently retry.
+const NON_IDEMPOTENT_METHODS: &[&str] = &[
+    "prompt.submit",
+    "approval.respond",
+    "secret.respond",
+    "sudo.respond",
+    "session.close",
+];
+
+fn is_idempotent(method: &str) -> bool {
+    !NON_IDEMPOTENT_METHODS.contains(&method)
 }
 
 impl std::fmt::Display for GatewayClientError {
@@ -521,6 +545,11 @@ impl std::fmt::Display for GatewayClientError {
             GatewayClientError::ConnectionLost => write!(f, "connection lost"),
             GatewayClientError::RpcTimeout => write!(f, "RPC timeout"),
             GatewayClientError::SessionCreate(s) => write!(f, "session create failed: {}", s),
+            GatewayClientError::OutcomeUnknown { method } => write!(
+                f,
+                "outcome unknown: '{}' interrupted by disconnect (not retried)",
+                method
+            ),
             GatewayClientError::Incompatible(c) => match c {
                 crate::hermes_protocol::RuntimeCompatibility::HermesUpgradeRequired {
                     received,
@@ -869,6 +898,7 @@ pub async fn ensure_ws_connection(
     ws_url: &str,
     emit_fn: EmitFn,
     ws_state: &Arc<WsState>,
+    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
 ) -> Result<(), WsError> {
     // Fast path: already connected (no lock contention on connect_lock).
     {
@@ -941,6 +971,7 @@ pub async fn ensure_ws_connection(
         cmd_rx,
         emit_fn,
         Arc::clone(ws_state),
+        sessions.clone(),
         generation,
     ));
 
@@ -1091,12 +1122,15 @@ where
 /// The reader task: owns the WS socket, reads frames, dispatches RPC responses
 /// and emits events. Uses a pending map for RPC ID tracking.
 ///
-/// On socket close/error: marks Disconnected (with generation guard) and exits.
+/// On socket close/error: marks Disconnected (with generation guard), suspends
+/// the session registry (if provided), and completes pending RPCs with
+/// OutcomeUnknown (non-idempotent) or ConnectionLost (idempotent).
 async fn reader_task<S>(
     mut ws: S,
     mut cmd_rx: tokio::sync::mpsc::Receiver<WsCommand>,
     emit_fn: EmitFn,
     ws_state: Arc<WsState>,
+    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
     my_generation: u64,
 ) where
     S: futures::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
@@ -1180,12 +1214,22 @@ async fn reader_task<S>(
                                 }
                                 // Track session_id from session.info events
                                 // (use live session_id from params, not stored_session_id).
-                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(_)) =
+                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) =
                                     &routed_event.event
                                 {
                                     if let Some(live_sid) = &routed_event.session_id {
                                         if !live_sid.is_empty() {
                                             *ws_state.session_id.lock().await = Some(live_sid.clone());
+                                        }
+                                    }
+                                    // Phase 1C.2: update the registry's stored
+                                    // (durable) session ID for this conversation.
+                                    // stored_session_id never overwrites the live ID.
+                                    if let (Some(sessions), Some(live_sid)) = (&sessions, &routed_event.session_id) {
+                                        if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
+                                            if let Some(conv) = sessions.route_event(live_sid).await {
+                                                sessions.set_stored(&conv, p.stored_session_id.clone()).await;
+                                            }
                                         }
                                     }
                                 }
@@ -1261,13 +1305,27 @@ async fn reader_task<S>(
     if current_gen == my_generation {
         *ws_state.state.lock().await = ConnectionState::Disconnected;
         *ws_state.cmd_tx.lock().await = None;
+        // Suspend the session registry: durable IDs retained for resume, live
+        // IDs cleared so stale events don't route. This is the disconnect half
+        // of reconciliation (Phase 1C.3); the reconnect/resume half runs in
+        // ensure_ws_connection after the handshake.
+        if let Some(sessions) = &sessions {
+            sessions.mark_stale_for_generation(my_generation).await;
+        }
     }
 
-    // Complete all pending RPCs with ConnectionLost.
+    // Complete all pending RPCs. Non-idempotent methods get OutcomeUnknown
+    // (server may have processed them; caller must not auto-retry); idempotent
+    // methods get ConnectionLost (safe to retry on reconnect).
     for (_, pending_req) in pending.drain() {
-        let _ = pending_req
-            .reply
-            .send(Err(GatewayClientError::ConnectionLost));
+        let err = if is_idempotent(&pending_req.method) {
+            GatewayClientError::ConnectionLost
+        } else {
+            GatewayClientError::OutcomeUnknown {
+                method: pending_req.method.clone(),
+            }
+        };
+        let _ = pending_req.reply.send(Err(err));
     }
 
     tracing::info!(target: "steersman_desktop_lib::ws", generation = my_generation, "reader task exited");
@@ -1744,7 +1802,7 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .unwrap();
         wait_connected(&ws_state, 3000).await;
@@ -1758,7 +1816,7 @@ mod tests {
         let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .unwrap();
         wait_connected(&ws_state, 3000).await;
@@ -1780,7 +1838,7 @@ mod tests {
         let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .unwrap();
         wait_connected(&ws_state, 3000).await;
@@ -1806,7 +1864,7 @@ mod tests {
         let (ws_url, received) = start_mock_backend(4).await;
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .unwrap();
         wait_connected(&ws_state, 3000).await;
@@ -1854,14 +1912,14 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
 
         let (emit_fn, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
         // Second connect — fast path, must NOT error.
         let (emit_fn2, _) = mock_emitter();
-        ensure_ws_connection(&ws_url, emit_fn2, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn2, &ws_state, None)
             .await
             .unwrap();
 
@@ -1879,7 +1937,7 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .expect("contract 4 must be accepted");
         wait_connected(&ws_state, 3000).await;
@@ -1902,7 +1960,7 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .expect_err("contract 3 must be rejected");
         assert!(
@@ -1933,7 +1991,7 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .expect_err("contract 5 must be rejected");
         assert!(
@@ -1977,7 +2035,7 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .expect("handshake should pass");
         // Give the close RPC a moment to be sent/received.
@@ -2009,7 +2067,7 @@ mod tests {
         let ws_state = Arc::new(WsState::new());
         let (emit_fn, _) = mock_emitter();
 
-        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state)
+        let err = ensure_ws_connection(&ws_url, emit_fn, &ws_state, None)
             .await
             .expect_err("must fail");
         // Must be Incompatible, NOT Connect.
@@ -2057,5 +2115,141 @@ mod tests {
         assert!(!RC::Unknown.is_compatible());
         assert!(RC::evaluate(4).is_compatible());
         assert!(!RC::evaluate(3).is_compatible());
+    }
+
+    // ── Phase 1C.3: Reconnect reconciliation + OutcomeUnknown tests ──────────
+    //
+    // Mandatory tests 11-13 from the Phase 1C spec.
+
+    /// Test 11: Disconnect suspends bindings but does NOT delete durable IDs.
+    /// Uses the SessionRegistry directly (the reader task calls
+    /// mark_stale_for_generation on disconnect).
+    #[tokio::test]
+    async fn disconnect_suspends_but_retains_durable_ids() {
+        use crate::session_registry::{ConversationId, SessionRegistry, SessionState};
+
+        let sessions = SessionRegistry::new();
+        let conv_a = ConversationId::new("conv-a");
+        let conv_b = ConversationId::new("conv-b");
+        sessions
+            .set_live(conv_a.clone(), "live-a".into(), Some("durable-a".into()), 1)
+            .await;
+        sessions
+            .set_live(conv_b.clone(), "live-b".into(), Some("durable-b".into()), 1)
+            .await;
+
+        // Simulate disconnect: reader task marks stale for the NEW generation
+        // (2), so any binding from an older generation (1) becomes Suspended.
+        sessions.mark_stale_for_generation(2).await;
+
+        // Both bindings must be Suspended.
+        let ba = sessions.get(&conv_a).await.unwrap();
+        let bb = sessions.get(&conv_b).await.unwrap();
+        assert_eq!(ba.state, SessionState::Suspended);
+        assert_eq!(bb.state, SessionState::Suspended);
+        // Live IDs cleared (stale), but durable IDs retained for resume.
+        assert_eq!(ba.live_session_id, None);
+        assert_eq!(ba.stored_session_id.as_deref(), Some("durable-a"));
+        assert_eq!(bb.live_session_id, None);
+        assert_eq!(bb.stored_session_id.as_deref(), Some("durable-b"));
+        // Stale live IDs no longer route events.
+        assert_eq!(sessions.route_event("live-a").await, None);
+    }
+
+    /// Test 12: Reconnect restores multiple conversations by resuming durable
+    /// IDs. After mark_stale + set_live (resume), each conversation has a fresh
+    /// live ID and routes events again.
+    #[tokio::test]
+    async fn reconnect_restores_multiple_conversations() {
+        use crate::session_registry::{ConversationId, SessionRegistry, SessionState};
+
+        let sessions = SessionRegistry::new();
+        let conv_a = ConversationId::new("conv-a");
+        let conv_b = ConversationId::new("conv-b");
+        // Generation 1: both active.
+        sessions
+            .set_live(
+                conv_a.clone(),
+                "live-a1".into(),
+                Some("durable-a".into()),
+                1,
+            )
+            .await;
+        sessions
+            .set_live(
+                conv_b.clone(),
+                "live-b1".into(),
+                Some("durable-b".into()),
+                1,
+            )
+            .await;
+
+        // Disconnect (generation 1 dies).
+        sessions.mark_stale_for_generation(2).await;
+
+        // Reconnect (generation 2): resume each durable session → new live IDs.
+        sessions
+            .set_live(
+                conv_a.clone(),
+                "live-a2".into(),
+                Some("durable-a".into()),
+                2,
+            )
+            .await;
+        sessions
+            .set_live(
+                conv_b.clone(),
+                "live-b2".into(),
+                Some("durable-b".into()),
+                2,
+            )
+            .await;
+
+        // Both conversations restored, Active, routing via new live IDs.
+        let ba = sessions.get(&conv_a).await.unwrap();
+        let bb = sessions.get(&conv_b).await.unwrap();
+        assert_eq!(ba.state, SessionState::Active);
+        assert_eq!(bb.state, SessionState::Active);
+        assert_eq!(sessions.route_event("live-a2").await, Some(conv_a));
+        assert_eq!(sessions.route_event("live-b2").await, Some(conv_b));
+        // Old live IDs from generation 1 no longer route.
+        assert_eq!(sessions.route_event("live-a1").await, None);
+    }
+
+    /// Test 13: A non-idempotent pending RPC (prompt.submit) interrupted by
+    /// disconnect resolves to OutcomeUnknown, NOT ConnectionLost and NOT
+    /// auto-retried. An idempotent RPC (session.create) gets ConnectionLost.
+    #[test]
+    fn non_idempotent_classification() {
+        // prompt.submit is non-idempotent → would produce OutcomeUnknown.
+        assert!(!is_idempotent("prompt.submit"));
+        // approval/secret/sudo responds and session.close are non-idempotent.
+        assert!(!is_idempotent("approval.respond"));
+        assert!(!is_idempotent("secret.respond"));
+        assert!(!is_idempotent("sudo.respond"));
+        assert!(!is_idempotent("session.close"));
+        // session.create, session.resume, session.status are idempotent.
+        assert!(is_idempotent("session.create"));
+        assert!(is_idempotent("session.resume"));
+        assert!(is_idempotent("session.status"));
+    }
+
+    /// Test 13 (integration): the OutcomeUnknown error carries the method name
+    /// and displays distinctly from ConnectionLost.
+    #[test]
+    fn outcome_unknown_is_distinct_from_connection_lost() {
+        let ou = WsError::OutcomeUnknown {
+            method: "prompt.submit".into(),
+        };
+        let cl = WsError::ConnectionLost;
+        // Distinct variants.
+        assert!(matches!(ou, WsError::OutcomeUnknown { .. }));
+        assert!(!matches!(ou, WsError::ConnectionLost));
+        // Display explains the method and that it was not retried.
+        let msg = ou.to_string();
+        assert!(msg.contains("prompt.submit"), "msg: {}", msg);
+        assert!(msg.contains("not retried"), "msg: {}", msg);
+        // ConnectionLost display is different.
+        assert_ne!(ou.to_string(), cl.to_string());
     }
 }

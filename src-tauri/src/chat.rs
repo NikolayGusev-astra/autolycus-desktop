@@ -618,7 +618,7 @@ pub async fn send_via_ws_persistent_local(
 
     // Ensure the persistent connection is open (idempotent).
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
-    crate::ws_transport::ensure_ws_connection(&ws_url, emit_fn, ws_state)
+    crate::ws_transport::ensure_ws_connection(&ws_url, emit_fn, ws_state, Some(sessions.clone()))
         .await
         .map_err(|e| e.to_string())?;
 
