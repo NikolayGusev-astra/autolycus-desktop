@@ -79,11 +79,11 @@ where
     // RPC error (Err(BackendError)), so response_value is the bare `result`.
     let response_value = tokio::time::timeout(timeout, reply_rx)
         .await
-        .map_err(|_| interruption_error(method))?
+        .map_err(|_| interruption_error(method, InterruptionCause::Timeout))?
         // RecvError: the reply sender was dropped (reader task died / channel
         // closed). For non-safe methods this is OutcomeUnknown (server may have
         // processed the request before the channel died).
-        .map_err(|_| interruption_error(method))??; // RecvError, then inner error
+        .map_err(|_| interruption_error(method, InterruptionCause::ClosedChannel))??;
 
     // Parse the result directly into R — the error envelope was already handled
     // by the reader task (IncomingFrame::RpcError → BackendError).
@@ -521,6 +521,31 @@ where
 
 // ── Typed errors (ADR-004 §Последствия, P3.3) ──────────────────────────────
 
+/// Why an RPC's outcome became unknown. Used by OutcomeUnknown so error
+/// messages and logs accurately report the cause (not always "disconnect").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterruptionCause {
+    /// Socket disconnected (reader task exited).
+    Disconnect,
+    /// Caller timeout or reader deadline expired before a response arrived.
+    Timeout,
+    /// Failed to send the request frame (partial write possible).
+    SendFailure,
+    /// The reply channel was closed (reader task dropped the sender).
+    ClosedChannel,
+}
+
+impl std::fmt::Display for InterruptionCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InterruptionCause::Disconnect => f.write_str("disconnect"),
+            InterruptionCause::Timeout => f.write_str("timeout"),
+            InterruptionCause::SendFailure => f.write_str("send failure"),
+            InterruptionCause::ClosedChannel => f.write_str("closed reply channel"),
+        }
+    }
+}
+
 /// Error type for the persistent gateway client.
 #[derive(Debug, Clone)]
 pub enum GatewayClientError {
@@ -534,13 +559,14 @@ pub enum GatewayClientError {
     ConnectionLost,
     RpcTimeout,
     SessionCreate(String),
-    /// A non-idempotent RPC (prompt.submit, approval.respond, secret.respond,
-    /// sudo.respond, session.close) was interrupted by a disconnect. The server
-    /// may or may not have processed it — the outcome is genuinely unknown and
-    /// must NOT be auto-retried. Callers surface this distinctly so the UI can
-    /// ask the user to confirm, rather than silently double-submitting.
+    /// A non-safe RPC (prompt.submit, approval.respond, secret.respond,
+    /// sudo.respond, session.close, session.create) was interrupted before a
+    /// confirmation arrived. The server may or may not have processed it — the
+    /// outcome is genuinely unknown and must NOT be auto-retried. Carries the
+    /// cause so Display/log messages are accurate (not always "disconnect").
     OutcomeUnknown {
         method: String,
+        cause: InterruptionCause,
     },
     /// Hermes backend is not version-compatible with this desktop build.
     /// Distinct from connection failures so callers can branch (prompt the
@@ -576,12 +602,21 @@ fn is_safe_retry(method: &str) -> bool {
 /// (caller may retry); all others get OutcomeUnknown (server may have processed
 /// it — do not auto-retry). All interruption paths MUST use this so a
 /// prompt.submit timeout is never misreported as a plain RpcTimeout.
-fn interruption_error(method: &str) -> GatewayClientError {
+fn interruption_error(method: &str, cause: InterruptionCause) -> GatewayClientError {
     if is_safe_retry(method) {
-        GatewayClientError::RpcTimeout
+        // Safe methods: disconnect → ConnectionLost, timeout → RpcTimeout.
+        match cause {
+            InterruptionCause::Disconnect | InterruptionCause::ClosedChannel => {
+                GatewayClientError::ConnectionLost
+            }
+            InterruptionCause::Timeout | InterruptionCause::SendFailure => {
+                GatewayClientError::RpcTimeout
+            }
+        }
     } else {
         GatewayClientError::OutcomeUnknown {
             method: method.to_owned(),
+            cause,
         }
     }
 }
@@ -599,10 +634,10 @@ impl std::fmt::Display for GatewayClientError {
             GatewayClientError::ConnectionLost => write!(f, "connection lost"),
             GatewayClientError::RpcTimeout => write!(f, "RPC timeout"),
             GatewayClientError::SessionCreate(s) => write!(f, "session create failed: {}", s),
-            GatewayClientError::OutcomeUnknown { method } => write!(
+            GatewayClientError::OutcomeUnknown { method, cause } => write!(
                 f,
-                "outcome unknown: '{}' interrupted by disconnect (not retried)",
-                method
+                "outcome unknown: '{}' interrupted by {} (not retried)",
+                method, cause
             ),
             GatewayClientError::Incompatible(c) => match c {
                 crate::hermes_protocol::RuntimeCompatibility::HermesUpgradeRequired {
@@ -727,18 +762,16 @@ pub enum ConnectionState {
     Degraded,
 }
 
-/// Result of reconnect reconciliation: which conversations were restored and
-/// which failed. Used by ensure_ws_connection to choose Connected vs Degraded.
+/// Result of reconnect reconciliation: which conversations were restored,
+/// which failed permanently, and which were interrupted by a mid-resume
+/// disconnect (retryable on next reconnect). Used by ensure_ws_connection to
+/// choose Connected vs Degraded vs ConnectionLost (interrupted means the
+/// socket died during reconciliation — must NOT declare Connected).
 #[derive(Debug, Clone, Default)]
 pub struct ReconciliationReport {
     pub restored: Vec<crate::session_registry::ConversationId>,
     pub failed: Vec<crate::session_registry::ConversationId>,
-}
-
-impl ReconciliationReport {
-    pub fn all_succeeded(&self) -> bool {
-        self.failed.is_empty()
-    }
+    pub interrupted: Vec<crate::session_registry::ConversationId>,
 }
 
 /// Translate a typed RoutedGatewayEvent to a frontend ChatEvent.
@@ -1075,13 +1108,23 @@ pub async fn ensure_ws_connection(
     // ── Reconnect reconciliation (Phase 1C.4) ────────────────────────────────
     // Before declaring Connected, resume any conversations that were Suspended
     // by a prior disconnect and have a durable stored_session_id. Each resume
-    // obtains a fresh live ID for the new generation. Failures leave the
-    // binding in ResumeFailed (durable retained for manual retry); they do NOT
-    // block the connection from going Connected (other conversations proceed).
+    // obtains a fresh live ID for the new generation.
     let mut degraded = false;
+    let mut interrupted = false;
     if let Some(sessions) = &sessions {
         let report = reconcile_sessions(ws_state, sessions, generation).await;
-        if !report.all_succeeded() {
+        if !report.interrupted.is_empty() {
+            // A mid-resume disconnect means the socket died during reconciliation.
+            // The bindings returned to Suspended, but we must NOT declare this
+            // connection Connected — the reader task is gone.
+            interrupted = true;
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                interrupted = report.interrupted.len(),
+                generation,
+                "reconciliation interrupted by disconnect; not declaring Connected"
+            );
+        } else if !report.failed.is_empty() {
             degraded = true;
             tracing::warn!(
                 target: "steersman_desktop_lib::ws",
@@ -1091,6 +1134,20 @@ pub async fn ensure_ws_connection(
                 "reconciliation partial: some conversations failed to resume"
             );
         }
+    }
+
+    // GUARD: never set Connected if the socket died during reconciliation or
+    // the reader task exited. Verify the connection is still ours and alive.
+    if interrupted
+        || ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        || ws_state.cmd_tx.lock().await.is_none()
+        || *ws_state.state.lock().await == ConnectionState::Disconnected
+    {
+        *ws_state.state.lock().await = ConnectionState::Disconnected;
+        return Err(WsError::ConnectionLost);
     }
 
     // Connected only if all resumes succeeded; otherwise Degraded.
@@ -1119,7 +1176,7 @@ async fn reconcile_sessions(
     sessions: &Arc<crate::session_registry::SessionRegistry>,
     generation: u64,
 ) -> ReconciliationReport {
-    let to_resume = sessions.take_suspended_for_resume().await;
+    let to_resume = sessions.take_suspended_for_resume(generation).await;
     if to_resume.is_empty() {
         return ReconciliationReport::default();
     }
@@ -1177,7 +1234,10 @@ async fn reconcile_sessions(
                 // Genuine error (4007 not found, malformed) → ResumeFailed.
                 let is_interruption = matches!(
                     e,
-                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
+                    WsError::ConnectionLost
+                        | WsError::RpcTimeout
+                        | WsError::OutcomeUnknown { .. }
+                        | WsError::Protocol(_)
                 );
                 if is_interruption {
                     tracing::warn!(
@@ -1188,6 +1248,7 @@ async fn reconcile_sessions(
                         "session.resume interrupted; returning to Suspended for retry"
                     );
                     sessions.return_to_suspended(&conv).await;
+                    report.interrupted.push(conv);
                 } else {
                     tracing::warn!(
                         target: "steersman_desktop_lib::ws",
@@ -1361,9 +1422,10 @@ async fn reader_task<S>(
                         );
                         // Use interruption_error so non-idempotent methods get
                         // OutcomeUnknown, not a plain RpcTimeout.
-                        let _ = pending_req
-                            .reply
-                            .send(Err(interruption_error(&pending_req.method)));
+                        let _ = pending_req.reply.send(Err(interruption_error(
+                            &pending_req.method,
+                            InterruptionCause::Timeout,
+                        )));
                     }
                 }
             }
@@ -1511,7 +1573,7 @@ async fn reader_task<S>(
                             // sent — for non-idempotent methods the outcome is
                             // unknown (server may have processed it).
                             if let Some(p) = pending.remove(&id) {
-                                let err = interruption_error(&p.method);
+                                let err = interruption_error(&p.method, InterruptionCause::SendFailure);
                                 let _ = p.reply.send(Err(err));
                             }
                             break;
@@ -1545,15 +1607,9 @@ async fn reader_task<S>(
     }
 
     // Complete all pending RPCs. Safe-retry methods get ConnectionLost (caller
-    // may retry); all others get OutcomeUnknown (server may have processed it).
+    // may retry); all others get OutcomeUnknown with cause Disconnect.
     for (_, pending_req) in pending.drain() {
-        let err = if is_safe_retry(&pending_req.method) {
-            GatewayClientError::ConnectionLost
-        } else {
-            GatewayClientError::OutcomeUnknown {
-                method: pending_req.method.clone(),
-            }
-        };
+        let err = interruption_error(&pending_req.method, InterruptionCause::Disconnect);
         let _ = pending_req.reply.send(Err(err));
     }
 
@@ -2539,6 +2595,7 @@ mod tests {
     fn outcome_unknown_is_distinct_from_connection_lost() {
         let ou = WsError::OutcomeUnknown {
             method: "prompt.submit".into(),
+            cause: InterruptionCause::Timeout,
         };
         let cl = WsError::ConnectionLost;
         // Distinct variants.
@@ -2569,6 +2626,7 @@ mod tests {
         String,
         Arc<tokio::sync::Mutex<Vec<Value>>>,
         Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
     ) {
         use tokio::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2578,6 +2636,10 @@ mod tests {
         let received_clone = Arc::clone(&received);
         let disconnect_signal: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
         let disconnect_clone = Arc::clone(&disconnect_signal);
+        // When true, the mock closes the socket on receiving session.resume
+        // instead of responding — simulates a mid-resume disconnect.
+        let resume_fail_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resume_fail_clone = Arc::clone(&resume_fail_flag);
 
         tokio::spawn(async move {
             // Accept multiple connections in a loop so reconnect works.
@@ -2628,6 +2690,12 @@ mod tests {
                                             let _ = ws.send(Message::Text(resp.to_string())).await;
                                         }
                                         "session.resume" => {
+                                            // If the fail flag is set, close the socket instead of
+                                            // responding — simulates a mid-resume disconnect.
+                                            if resume_fail_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                                                let _ = ws.close(None).await;
+                                                break;
+                                            }
                                             let durable = req.get("params").and_then(|p| p.get("session_id")).and_then(|s| s.as_str());
                                             match durable {
                                                 Some(d) if !d.is_empty() => {
@@ -2673,6 +2741,7 @@ mod tests {
             format!("ws://127.0.0.1:{}/api/ws?token=test", port),
             received,
             disconnect_signal,
+            resume_fail_flag,
         )
     }
 
@@ -2690,7 +2759,8 @@ mod tests {
     async fn reconnect_reconciles_two_conversations_via_real_resume() {
         use crate::session_registry::{ConversationId, SessionState};
 
-        let (ws_url, received, disconnect_signal) = start_reconnect_mock_backend().await;
+        let (ws_url, received, disconnect_signal, _resume_fail) =
+            start_reconnect_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let sessions = crate::session_registry::SessionRegistry::new();
         let (emit_fn, emitted) = mock_emitter();
@@ -2872,7 +2942,8 @@ mod tests {
     async fn profile_aware_resume_sends_distinct_profiles() {
         use crate::session_registry::{ConversationId, ProfileId, SessionState};
 
-        let (ws_url, received, disconnect_signal) = start_reconnect_mock_backend().await;
+        let (ws_url, received, disconnect_signal, _resume_fail) =
+            start_reconnect_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let sessions = crate::session_registry::SessionRegistry::new();
         let (emit_fn, _) = mock_emitter();
@@ -2966,7 +3037,8 @@ mod tests {
         use crate::session_registry::{ConversationId, ProfileId, SessionState};
 
         // Use a mock that we can disconnect twice.
-        let (ws_url, _received, disconnect_signal) = start_reconnect_mock_backend().await;
+        let (ws_url, _received, disconnect_signal, _resume_fail) =
+            start_reconnect_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let sessions = crate::session_registry::SessionRegistry::new();
         let (emit_fn, _) = mock_emitter();
@@ -3011,14 +3083,16 @@ mod tests {
         // manually transition to Resuming (as take_suspended_for_resume does),
         // then call suspend_generation to simulate the reader cleanup firing on
         // the second socket death during reconciliation.
-        sessions.take_suspended_for_resume().await; // transitions to Resuming
+        sessions.take_suspended_for_resume(gen1).await; // transitions to Resuming
         assert_eq!(
             sessions
                 .get(&ConversationId::new("c1"))
                 .await
                 .unwrap()
                 .state,
-            SessionState::Resuming
+            SessionState::Resuming {
+                attempt_generation: gen1
+            }
         );
         // The second reader task dies; its cleanup must return Resuming→Suspended.
         // In the real flow this is suspend_generation(gen2); here gen1 bindings
@@ -3040,6 +3114,133 @@ mod tests {
                 .unwrap()
                 .state,
             SessionState::Suspended
+        );
+    }
+
+    /// Phase 1C.4 FINAL: real gen1 → gen2 disconnect-during-resume → gen3 recovery.
+    /// NO manual state manipulation. The mock closes the socket on gen2 when it
+    /// receives session.resume; the reader task cleanup must return bindings to
+    /// Suspended; gen3 reconnect must successfully resume both.
+    #[tokio::test]
+    async fn gen3_recovery_after_disconnect_during_resume() {
+        use crate::session_registry::{ConversationId, ProfileId, SessionState};
+
+        let (ws_url, received, disconnect_signal, resume_fail_flag) =
+            start_reconnect_mock_backend().await;
+        let ws_state = Arc::new(WsState::new());
+        let sessions = crate::session_registry::SessionRegistry::new();
+        let (emit_fn, _) = mock_emitter();
+
+        // Gen 1: connect + two sessions.
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("gen1 connect");
+        wait_connected(&ws_state, 5000).await;
+        let gen1 = ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        sessions
+            .set_live(
+                ConversationId::new("c1"),
+                "l1".into(),
+                Some("d1".into()),
+                ProfileId::empty(),
+                gen1,
+            )
+            .await;
+        sessions
+            .set_live(
+                ConversationId::new("c2"),
+                "l2".into(),
+                Some("d2".into()),
+                ProfileId::empty(),
+                gen1,
+            )
+            .await;
+
+        // Gen 1 disconnect.
+        disconnect_signal.notify_waiters();
+        for _ in 0..100 {
+            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Set the fail flag: gen2 will close the socket when it receives resume.
+        resume_fail_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Gen 2: connect — reconciliation starts session.resume, mock closes socket.
+        let (emit_fn2, _) = mock_emitter();
+        let gen2_result =
+            ensure_ws_connection(&ws_url, emit_fn2, &ws_state, Some(sessions.clone())).await;
+        // ensure_ws_connection must FAIL (ConnectionLost) — it cannot declare
+        // Connected after the socket died during reconciliation.
+        assert!(
+            gen2_result.is_err(),
+            "gen2 must fail when socket dies during resume, got: {:?}",
+            gen2_result
+        );
+        // Bindings must be back to Suspended (not stuck in Resuming/ResumeFailed).
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c1"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Suspended,
+            "c1 must be Suspended after gen2 disconnect during resume"
+        );
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c2"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Suspended
+        );
+
+        // Clear the fail flag: gen3 will respond normally.
+        resume_fail_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Gen 3: connect — reconciliation resumes both successfully.
+        let (emit_fn3, _) = mock_emitter();
+        ensure_ws_connection(&ws_url, emit_fn3, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("gen3 connect must succeed");
+        wait_connected(&ws_state, 5000).await;
+
+        // Both bindings must be Active with new live IDs.
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c1"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Active
+        );
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c2"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Active
+        );
+
+        // Verify resume calls: gen2 may send 1-2 (socket closes on first resume),
+        // gen3 sends 2 (both succeed). At minimum, gen3's 2 resumes must be present.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let resume_count = received
+            .lock()
+            .await
+            .iter()
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("session.resume"))
+            .count();
+        assert!(
+            resume_count >= 3,
+            "expected at least 3 resume calls (gen2 partial + gen3 both), got {}",
+            resume_count
         );
     }
 }
