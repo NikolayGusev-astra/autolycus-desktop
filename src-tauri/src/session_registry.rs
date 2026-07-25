@@ -249,11 +249,18 @@ impl SessionRegistry {
     /// socket's bindings are Suspended, their live IDs cleared (stale), and
     /// durable IDs retained for resume. Bindings from OTHER generations
     /// (already resumed on a newer connection) are left untouched.
+    ///
+    /// Also handles bindings stuck in Resuming (a resume RPC was in flight when
+    /// the socket died): they return to Suspended so the next reconnect retries
+    /// them. Without this, a disconnect during reconciliation would permanently
+    /// strand the binding in Resuming (never picked up again).
     pub async fn suspend_generation(&self, dead_generation: u64) {
         let mut inner = self.inner.lock().await;
         let mut stale_lives: Vec<String> = Vec::new();
         for b in inner.by_conversation.values_mut() {
-            if b.connection_generation == dead_generation && b.state == SessionState::Active {
+            if b.connection_generation == dead_generation
+                && (b.state == SessionState::Active || b.state == SessionState::Resuming)
+            {
                 b.state = SessionState::Suspended;
                 if let Some(live) = b.live_session_id.take() {
                     stale_lives.push(live);
@@ -297,6 +304,19 @@ impl SessionRegistry {
         let mut inner = self.inner.lock().await;
         if let Some(b) = inner.by_conversation.get_mut(conversation_id) {
             b.state = SessionState::ResumeFailed;
+        }
+    }
+
+    /// Return a binding from Resuming back to Suspended. Used when a resume RPC
+    /// was interrupted by a network error (ConnectionLost/RpcTimeout) rather
+    /// than a genuine backend rejection — the session may still be resumable on
+    /// the next reconnect, so it must NOT be permanently marked ResumeFailed.
+    pub async fn return_to_suspended(&self, conversation_id: &ConversationId) {
+        let mut inner = self.inner.lock().await;
+        if let Some(b) = inner.by_conversation.get_mut(conversation_id) {
+            if b.state == SessionState::Resuming {
+                b.state = SessionState::Suspended;
+            }
         }
     }
 

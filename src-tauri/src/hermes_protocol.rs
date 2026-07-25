@@ -190,6 +190,10 @@ pub struct SessionCreateParams {
     pub source: String,
     /// Terminal columns for formatting (backend may use for table rendering).
     pub cols: u16,
+    /// Optional profile scope. Hermes supports params.profile in session.create;
+    /// for non-launch profiles this selects the state.db, config, skills, memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Response result for `session.create`.
@@ -214,6 +218,10 @@ pub struct SessionCreateResult {
 #[serde(rename_all = "snake_case")]
 pub struct SessionCreateInfo {
     pub desktop_contract: u32,
+    /// The profile name the session was created under. Hermes returns this in
+    /// session.create.info.profile_name; for the launch profile it may be absent.
+    #[serde(default)]
+    pub profile_name: Option<String>,
 }
 
 /// Build a typed `session.create` request.
@@ -221,6 +229,7 @@ pub fn build_session_create_request(
     id: u64,
     source: &str,
     cols: u16,
+    profile: Option<&str>,
 ) -> JsonRpcRequest<SessionCreateParams> {
     JsonRpcRequest::new(
         id,
@@ -228,6 +237,7 @@ pub fn build_session_create_request(
         SessionCreateParams {
             source: source.to_string(),
             cols,
+            profile: profile.map(|s| s.to_string()),
         },
     )
 }
@@ -1275,7 +1285,7 @@ mod tests {
 
     #[test]
     fn session_create_request_serializes_correctly() {
-        let req = build_session_create_request(1, "desktop", 96);
+        let req = build_session_create_request(1, "desktop", 96, None);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["jsonrpc"], "2.0");
         assert_eq!(json["id"], 1);
@@ -1551,6 +1561,7 @@ mod tests {
             messages: vec![],
             info: SessionCreateInfo {
                 desktop_contract: 4,
+                profile_name: None,
             },
         };
         let response = JsonRpcResponse {

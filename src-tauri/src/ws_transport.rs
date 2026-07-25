@@ -80,7 +80,10 @@ where
     let response_value = tokio::time::timeout(timeout, reply_rx)
         .await
         .map_err(|_| interruption_error(method))?
-        .map_err(|_| GatewayClientError::ConnectionLost)??; // RecvError, then inner error
+        // RecvError: the reply sender was dropped (reader task died / channel
+        // closed). For non-safe methods this is OutcomeUnknown (server may have
+        // processed the request before the channel died).
+        .map_err(|_| interruption_error(method))??; // RecvError, then inner error
 
     // Parse the result directly into R — the error envelope was already handled
     // by the reader task (IncomingFrame::RpcError → BackendError).
@@ -127,9 +130,12 @@ pub async fn submit_prompt_on_connection(
 }
 
 /// Create a session on the persistent connection using the generic RPC dispatcher.
+/// `requested_profile` selects the Hermes profile scope (state.db, config, etc.);
+/// pass None for the launch/default profile.
 pub async fn create_session_on_connection(
     ws_state: &WsState,
     source: &str,
+    requested_profile: Option<&str>,
 ) -> Result<SessionCreateResult, WsError> {
     call_rpc(
         ws_state,
@@ -137,6 +143,7 @@ pub async fn create_session_on_connection(
         SessionCreateParams {
             source: source.to_owned(),
             cols: 96,
+            profile: requested_profile.map(|s| s.to_string()),
         },
         RPC_TIMEOUT,
     )
@@ -541,29 +548,36 @@ pub enum GatewayClientError {
     Incompatible(crate::hermes_protocol::RuntimeCompatibility),
 }
 
-/// RPC methods that are NOT safe to auto-retry: executing them twice has
-/// side effects (double prompt submission, double approval, etc.). On
-/// disconnect, pending calls to these methods resolve to `OutcomeUnknown`
-/// rather than `ConnectionLost`, so callers never silently retry.
-const NON_IDEMPOTENT_METHODS: &[&str] = &[
-    "prompt.submit",
-    "approval.respond",
-    "secret.respond",
-    "sudo.respond",
-    "session.close",
+/// Retry classification for RPC methods. Uses an EXPLICIT ALLOWLIST of safe-to-
+/// retry methods; everything else (including unknown future methods) defaults
+/// to OutcomeUnknown. This is safe-by-default: a forgotten or new method is
+/// never silently treated as retryable.
+///
+/// Safe methods: pure reads (no side effects) + session.resume (the pinned
+/// Hermes serializes competing resumes and reuses the live durable-key
+/// binding, so a retry does not create a duplicate session).
+const SAFE_RETRY_METHODS: &[&str] = &[
+    "session.status",
+    "session.history",
+    "session.list",
+    "session.active_list",
+    "session.resume",
 ];
 
-fn is_idempotent(method: &str) -> bool {
-    !NON_IDEMPOTENT_METHODS.contains(&method)
+/// True only for methods in the explicit safe-retry allowlist. Everything else
+/// (session.create, session.close, prompt.submit, approvals, unknown methods)
+/// is NOT safe to retry.
+fn is_safe_retry(method: &str) -> bool {
+    SAFE_RETRY_METHODS.contains(&method)
 }
 
 /// Unified classification for interrupted RPCs (timeout, disconnect, send
-/// failure, closed reply channel). Non-idempotent methods get OutcomeUnknown
-/// (server may have processed it — do not auto-retry); idempotent methods get
-/// RpcTimeout (safe to retry). All interruption paths MUST use this so a
+/// failure, closed reply channel). Safe-retry methods get a plain RpcTimeout
+/// (caller may retry); all others get OutcomeUnknown (server may have processed
+/// it — do not auto-retry). All interruption paths MUST use this so a
 /// prompt.submit timeout is never misreported as a plain RpcTimeout.
 fn interruption_error(method: &str) -> GatewayClientError {
-    if is_idempotent(method) {
+    if is_safe_retry(method) {
         GatewayClientError::RpcTimeout
     } else {
         GatewayClientError::OutcomeUnknown {
@@ -1157,15 +1171,34 @@ async fn reconcile_sessions(
                 report.restored.push(conv);
             }
             Err(e) => {
-                tracing::warn!(
-                    target: "steersman_desktop_lib::ws",
-                    conversation = %conv,
-                    stored_id = %durable.stored_session_id,
-                    error = %e,
-                    "session.resume failed; marking ResumeFailed"
+                // Distinguish interruption (network) from genuine backend error.
+                // Interruption → return to Suspended so the next reconnect retries.
+                // session.resume is safe to retry (pinned Hermes serializes it).
+                // Genuine error (4007 not found, malformed) → ResumeFailed.
+                let is_interruption = matches!(
+                    e,
+                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
                 );
-                sessions.mark_resume_failed(&conv).await;
-                report.failed.push(conv);
+                if is_interruption {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        error = %e,
+                        "session.resume interrupted; returning to Suspended for retry"
+                    );
+                    sessions.return_to_suspended(&conv).await;
+                } else {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        error = %e,
+                        "session.resume failed; marking ResumeFailed"
+                    );
+                    sessions.mark_resume_failed(&conv).await;
+                    report.failed.push(conv);
+                }
             }
         }
     }
@@ -1184,7 +1217,7 @@ async fn run_compatibility_handshake(
 ) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
     // Probe with source "compat_probe" so the backend marks it as a service
     // session (hidden from the feed, like briefing_smart).
-    let probe_result = create_session_on_connection(ws_state, "compat_probe")
+    let probe_result = create_session_on_connection(ws_state, "compat_probe", None)
         .await
         .map_err(|e| match e {
             // Surface backend errors from the probe distinctly.
@@ -1511,11 +1544,10 @@ async fn reader_task<S>(
         }
     }
 
-    // Complete all pending RPCs. Non-idempotent methods get OutcomeUnknown
-    // (server may have processed them; caller must not auto-retry); idempotent
-    // methods get ConnectionLost (safe to retry on reconnect).
+    // Complete all pending RPCs. Safe-retry methods get ConnectionLost (caller
+    // may retry); all others get OutcomeUnknown (server may have processed it).
     for (_, pending_req) in pending.drain() {
-        let err = if is_idempotent(&pending_req.method) {
+        let err = if is_safe_retry(&pending_req.method) {
             GatewayClientError::ConnectionLost
         } else {
             GatewayClientError::OutcomeUnknown {
@@ -1826,7 +1858,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_on_connection_errors_when_disconnected() {
         let ws = Arc::new(WsState::new());
-        let result = create_session_on_connection(&ws, "desktop").await;
+        let result = create_session_on_connection(&ws, "desktop", None).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), WsError::Protocol(_)));
     }
@@ -1892,6 +1924,11 @@ mod tests {
                                 .and_then(|p| p.get("source"))
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("desktop");
+                            // Echo back the requested profile_name (or None).
+                            let profile_name = req
+                                .get("params")
+                                .and_then(|p| p.get("profile"))
+                                .and_then(|s| s.as_str());
                             let new_sid = if source == "briefing_smart" {
                                 "brief-sess"
                             } else if source == "compat_probe" {
@@ -1900,6 +1937,10 @@ mod tests {
                                 "chat-sess"
                             };
                             // Contract version configurable per-test.
+                            let mut info = json!({ "desktop_contract": contract });
+                            if let Some(pn) = profile_name {
+                                info["profile_name"] = json!(pn);
+                            }
                             let resp = json!({
                                 "jsonrpc": "2.0", "id": id,
                                 "result": {
@@ -1907,7 +1948,7 @@ mod tests {
                                     "stored_session_id": new_sid,
                                     "message_count": 0,
                                     "messages": [],
-                                    "info": { "desktop_contract": contract }
+                                    "info": info
                                 }
                             });
                             let _ = ws.send(Message::Text(resp.to_string())).await;
@@ -2060,7 +2101,7 @@ mod tests {
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let result = create_session_on_connection(&ws_state, "desktop")
+        let result = create_session_on_connection(&ws_state, "desktop", None)
             .await
             .unwrap();
         assert_eq!(result.session_id, "chat-sess");
@@ -2082,7 +2123,7 @@ mod tests {
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let result = create_session_on_connection(&ws_state, "briefing_smart")
+        let result = create_session_on_connection(&ws_state, "briefing_smart", None)
             .await
             .unwrap();
         assert_eq!(result.session_id, "brief-sess");
@@ -2109,7 +2150,7 @@ mod tests {
             .unwrap();
         wait_connected(&ws_state, 3000).await;
 
-        let result = create_session_on_connection(&ws_state, "desktop")
+        let result = create_session_on_connection(&ws_state, "desktop", None)
             .await
             .unwrap();
         let sid = result.session_id.clone();
@@ -2468,22 +2509,28 @@ mod tests {
         assert_eq!(sessions.route_event("live-a1").await, None);
     }
 
-    /// Test 13: A non-idempotent pending RPC (prompt.submit) interrupted by
-    /// disconnect resolves to OutcomeUnknown, NOT ConnectionLost and NOT
-    /// auto-retried. An idempotent RPC (session.create) gets ConnectionLost.
+    /// Test 13: RPC retry classification uses an explicit SAFE allowlist.
+    /// Everything NOT in the allowlist (including session.create, approvals,
+    /// and unknown future methods) defaults to OutcomeUnknown (safe-by-default).
     #[test]
-    fn non_idempotent_classification() {
-        // prompt.submit is non-idempotent → would produce OutcomeUnknown.
-        assert!(!is_idempotent("prompt.submit"));
-        // approval/secret/sudo responds and session.close are non-idempotent.
-        assert!(!is_idempotent("approval.respond"));
-        assert!(!is_idempotent("secret.respond"));
-        assert!(!is_idempotent("sudo.respond"));
-        assert!(!is_idempotent("session.close"));
-        // session.create, session.resume, session.status are idempotent.
-        assert!(is_idempotent("session.create"));
-        assert!(is_idempotent("session.resume"));
-        assert!(is_idempotent("session.status"));
+    fn safe_retry_classification() {
+        // Safe-to-retry methods (pure reads + session.resume which the pinned
+        // Hermes serializes/dedupes).
+        assert!(is_safe_retry("session.status"));
+        assert!(is_safe_retry("session.history"));
+        assert!(is_safe_retry("session.list"));
+        assert!(is_safe_retry("session.active_list"));
+        assert!(is_safe_retry("session.resume"));
+        // NOT safe: prompt.submit, approvals, session.close, session.create.
+        // session.create is NOT safe: a lost ack + retry creates a second session.
+        assert!(!is_safe_retry("prompt.submit"));
+        assert!(!is_safe_retry("approval.respond"));
+        assert!(!is_safe_retry("secret.respond"));
+        assert!(!is_safe_retry("sudo.respond"));
+        assert!(!is_safe_retry("session.close"));
+        assert!(!is_safe_retry("session.create"));
+        // Unknown future method defaults to NOT safe (OutcomeUnknown).
+        assert!(!is_safe_retry("some.future.method"));
     }
 
     /// Test 13 (integration): the OutcomeUnknown error carries the method name
@@ -2662,7 +2709,7 @@ mod tests {
         let conv_b = ConversationId::new("conv-b");
 
         // create_session returns session_id based on source; use distinct sources.
-        let ra = create_session_on_connection(&ws_state, "conva")
+        let ra = create_session_on_connection(&ws_state, "conva", None)
             .await
             .unwrap();
         sessions
@@ -2674,7 +2721,7 @@ mod tests {
                 gen1,
             )
             .await;
-        let rb = create_session_on_connection(&ws_state, "convb")
+        let rb = create_session_on_connection(&ws_state, "convb", None)
             .await
             .unwrap();
         sessions
@@ -2777,24 +2824,222 @@ mod tests {
         // Wait for events to be emitted.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let emitted_events = emitted.lock().await;
-        // Both conversations must have received events.
-        let a_events: Vec<_> = emitted_events
+        // Assert EXACT routing: each conversation received a delta then a done,
+        // and events for conv-a and conv-b are distinguishable by conversation_id.
+        // This verifies the registry routes by live session_id → conversation.
+        let a_tags: Vec<&str> = emitted_events
             .iter()
             .filter(|(c, _)| c.as_deref() == Some("conv-a"))
+            .map(|(_, t)| *t)
             .collect();
-        let b_events: Vec<_> = emitted_events
+        let b_tags: Vec<&str> = emitted_events
             .iter()
             .filter(|(c, _)| c.as_deref() == Some("conv-b"))
+            .map(|(_, t)| *t)
             .collect();
         assert!(
-            !a_events.is_empty(),
-            "conv-a must have received routed events: {:?}",
-            *emitted_events
+            a_tags.contains(&"token"),
+            "conv-a must have a token event: {:?}",
+            a_tags
         );
         assert!(
-            !b_events.is_empty(),
-            "conv-b must have received routed events: {:?}",
+            a_tags.contains(&"done"),
+            "conv-a must have a done event: {:?}",
+            a_tags
+        );
+        assert!(
+            b_tags.contains(&"token"),
+            "conv-b must have a token event: {:?}",
+            b_tags
+        );
+        assert!(
+            b_tags.contains(&"done"),
+            "conv-b must have a done event: {:?}",
+            b_tags
+        );
+        // No event should have a None conversation_id (all are session-scoped).
+        assert!(
+            !emitted_events.iter().any(|(c, _)| c.is_none()),
+            "no event should have conversation_id=None: {:?}",
             *emitted_events
+        );
+    }
+
+    /// Phase 1C.4: profile-aware durable identity. Two conversations with the
+    /// SAME durable ID but DIFFERENT profiles must produce two distinct resume
+    /// calls with different profile params after reconnect.
+    #[tokio::test]
+    async fn profile_aware_resume_sends_distinct_profiles() {
+        use crate::session_registry::{ConversationId, ProfileId, SessionState};
+
+        let (ws_url, received, disconnect_signal) = start_reconnect_mock_backend().await;
+        let ws_state = Arc::new(WsState::new());
+        let sessions = crate::session_registry::SessionRegistry::new();
+        let (emit_fn, _) = mock_emitter();
+
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("connect");
+        wait_connected(&ws_state, 5000).await;
+        let gen1 = ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        // Create two bindings with the SAME stored_session_id but different profiles.
+        // In a real backend these resolve to different state.db rows.
+        let conv_a = ConversationId::new("conv-profile-a");
+        let conv_b = ConversationId::new("conv-profile-b");
+        sessions
+            .set_live(
+                conv_a.clone(),
+                "live-a".into(),
+                Some("same-durable".into()),
+                ProfileId::new("work"),
+                gen1,
+            )
+            .await;
+        sessions
+            .set_live(
+                conv_b.clone(),
+                "live-b".into(),
+                Some("same-durable".into()),
+                ProfileId::new("personal"),
+                gen1,
+            )
+            .await;
+
+        // Disconnect.
+        disconnect_signal.notify_waiters();
+        for _ in 0..100 {
+            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Reconnect — reconciliation resumes both with their respective profiles.
+        let (emit_fn2, _) = mock_emitter();
+        ensure_ws_connection(&ws_url, emit_fn2, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("reconnect");
+        wait_connected(&ws_state, 5000).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify both resume calls carry distinct profiles.
+        let frames = received.lock().await;
+        let resume_with_profile: Vec<Option<String>> = frames
+            .iter()
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("session.resume"))
+            .map(|v| {
+                v.get("params")
+                    .and_then(|p| p.get("profile"))
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        assert_eq!(resume_with_profile.len(), 2, "expected 2 resume calls");
+        assert!(
+            resume_with_profile.contains(&Some("work".into())),
+            "expected a resume with profile 'work': {:?}",
+            resume_with_profile
+        );
+        assert!(
+            resume_with_profile.contains(&Some("personal".into())),
+            "expected a resume with profile 'personal': {:?}",
+            resume_with_profile
+        );
+        // Both bindings restored.
+        assert_eq!(
+            sessions.get(&conv_a).await.unwrap().state,
+            SessionState::Active
+        );
+        assert_eq!(
+            sessions.get(&conv_b).await.unwrap().state,
+            SessionState::Active
+        );
+    }
+
+    /// Phase 1C.4: double-disconnect-during-resume safety. If the socket dies
+    /// while session.resume RPCs are in flight, bindings must return to Suspended
+    /// (retryable), NOT get stuck in Resuming or marked ResumeFailed.
+    #[tokio::test]
+    async fn double_disconnect_during_resume_returns_to_suspended() {
+        use crate::session_registry::{ConversationId, ProfileId, SessionState};
+
+        // Use a mock that we can disconnect twice.
+        let (ws_url, _received, disconnect_signal) = start_reconnect_mock_backend().await;
+        let ws_state = Arc::new(WsState::new());
+        let sessions = crate::session_registry::SessionRegistry::new();
+        let (emit_fn, _) = mock_emitter();
+
+        // Gen 1: connect + two sessions.
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("connect 1");
+        wait_connected(&ws_state, 5000).await;
+        let gen1 = ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        sessions
+            .set_live(
+                ConversationId::new("c1"),
+                "l1".into(),
+                Some("d1".into()),
+                ProfileId::empty(),
+                gen1,
+            )
+            .await;
+        sessions
+            .set_live(
+                ConversationId::new("c2"),
+                "l2".into(),
+                Some("d2".into()),
+                ProfileId::empty(),
+                gen1,
+            )
+            .await;
+
+        // First disconnect → Suspended.
+        disconnect_signal.notify_waiters();
+        for _ in 0..100 {
+            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Simulate resume being in-flight when the SECOND disconnect hits:
+        // manually transition to Resuming (as take_suspended_for_resume does),
+        // then call suspend_generation to simulate the reader cleanup firing on
+        // the second socket death during reconciliation.
+        sessions.take_suspended_for_resume().await; // transitions to Resuming
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c1"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Resuming
+        );
+        // The second reader task dies; its cleanup must return Resuming→Suspended.
+        // In the real flow this is suspend_generation(gen2); here gen1 bindings
+        // are Resuming so suspend_generation(gen1) tests the path.
+        sessions.suspend_generation(gen1).await;
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c1"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Suspended,
+            "Resuming binding must return to Suspended after disconnect during resume"
+        );
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c2"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::Suspended
         );
     }
 }

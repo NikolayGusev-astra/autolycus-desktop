@@ -133,7 +133,25 @@ pub struct SendMessageRequest {
     /// compatibility with frontends that haven't migrated yet.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Phase 1C.4: requested Hermes profile scope. Selects the backend's
+    /// state.db/config/skills for this session. None = launch/default profile.
+    #[serde(default)]
+    pub profile: Option<String>,
     pub history: Option<Vec<HistoryItem>>,
+}
+
+/// Resolve the effective profile for a binding: prefer the backend-reported
+/// profile_name from session.create.info, fall back to the requested profile.
+fn resolve_profile(
+    reported: &Option<String>,
+    requested: Option<&str>,
+) -> crate::session_registry::ProfileId {
+    reported
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| requested.map(|s| s.to_string()))
+        .map(crate::session_registry::ProfileId::new)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -635,68 +653,79 @@ pub async fn send_via_ws_persistent_local(
         .generation
         .load(std::sync::atomic::Ordering::Acquire);
 
-    let session_id = if let Some(conv_str) =
-        request.conversation_id.as_deref().filter(|s| !s.is_empty())
-    {
-        let conv = crate::session_registry::ConversationId::new(conv_str);
-        match sessions.get_live(&conv).await {
-            Some(live) => live,
-            None => {
-                // No live ID for this conversation yet — create one and register.
-                let result = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
+    let session_id =
+        if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
+            let conv = crate::session_registry::ConversationId::new(conv_str);
+            match sessions.get_live(&conv).await {
+                Some(live) => live,
+                None => {
+                    // No live ID for this conversation yet — create one and register.
+                    let result = crate::ws_transport::create_session_on_connection(
+                        ws_state,
+                        "desktop",
+                        request.profile.as_deref(),
+                    )
                     .await
                     .map_err(|e| format!("{:?}", e))?;
+                    // Prefer the backend-reported profile_name; fall back to requested.
+                    let profile =
+                        resolve_profile(&result.info.profile_name, request.profile.as_deref());
+                    sessions
+                        .set_live(
+                            conv,
+                            result.session_id.clone(),
+                            Some(result.stored_session_id),
+                            profile,
+                            generation,
+                        )
+                        .await;
+                    result.session_id
+                }
+            }
+        } else if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+            // Legacy adapter: frontend passed a raw Hermes session_id. Derive a
+            // synthetic ConversationId so the registry always has a binding. If
+            // this live ID is already registered (reverse lookup), reuse it;
+            // otherwise register the binding so events route correctly.
+            let synthetic_conv =
+                crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
+            if sessions.route_event(sid).await.is_none() {
                 sessions
                     .set_live(
-                        conv,
-                        result.session_id.clone(),
-                        Some(result.stored_session_id),
+                        synthetic_conv,
+                        sid.to_string(),
+                        None,
                         crate::session_registry::ProfileId::empty(),
                         generation,
                     )
                     .await;
-                result.session_id
             }
-        }
-    } else if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
-        // Legacy adapter: frontend passed a raw Hermes session_id. Derive a
-        // synthetic ConversationId so the registry always has a binding. If
-        // this live ID is already registered (reverse lookup), reuse it;
-        // otherwise register the binding so events route correctly.
-        let synthetic_conv =
-            crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
-        if sessions.route_event(sid).await.is_none() {
+            sid.to_string()
+        } else {
+            // No conversation_id and no session_id: create a new session and
+            // register it under a synthetic conversation_id so it participates in
+            // reconnect reconciliation.
+            let result = crate::ws_transport::create_session_on_connection(
+                ws_state,
+                "desktop",
+                request.profile.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("{:?}", e))?;
+            let profile = resolve_profile(&result.info.profile_name, request.profile.as_deref());
+            let synthetic_conv =
+                crate::session_registry::ConversationId::new(format!("auto:{}", result.session_id));
             sessions
                 .set_live(
                     synthetic_conv,
-                    sid.to_string(),
-                    None,
-                    crate::session_registry::ProfileId::empty(),
+                    result.session_id.clone(),
+                    Some(result.stored_session_id),
+                    profile,
                     generation,
                 )
                 .await;
-        }
-        sid.to_string()
-    } else {
-        // No conversation_id and no session_id: create a new session and
-        // register it under a synthetic conversation_id so it participates in
-        // reconnect reconciliation.
-        let result = crate::ws_transport::create_session_on_connection(ws_state, "desktop")
-            .await
-            .map_err(|e| format!("{:?}", e))?;
-        let synthetic_conv =
-            crate::session_registry::ConversationId::new(format!("auto:{}", result.session_id));
-        sessions
-            .set_live(
-                synthetic_conv,
-                result.session_id.clone(),
-                Some(result.stored_session_id),
-                crate::session_registry::ProfileId::empty(),
-                generation,
-            )
-            .await;
-        result.session_id
-    };
+            result.session_id
+        };
 
     // Submit the prompt — events stream back via chat_event.
     crate::ws_transport::submit_prompt_on_connection(ws_state, &session_id, &request.text)
