@@ -29,6 +29,36 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConversationId(pub String);
 
+/// Hermes profile identifier (multi-profile support). Sessions are scoped to a
+/// profile; durable identity is the (profile, stored_session_id) pair, not the
+/// stored ID alone — the same stored ID can exist under different profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ProfileId(pub String);
+
+impl ProfileId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn empty() -> Self {
+        Self(String::new())
+    }
+}
+
+impl fmt::Display for ProfileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Durable (cross-reconnect) reference to a Hermes session. The full identity
+/// for resume is the pair (profile, stored_session_id): two profiles can have
+/// the same stored session ID. Resume and persistence must key on both.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DurableSessionRef {
+    pub profile: ProfileId,
+    pub stored_session_id: String,
+}
+
 impl fmt::Display for ConversationId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -66,6 +96,9 @@ pub struct SessionBinding {
     pub conversation_id: ConversationId,
     pub live_session_id: Option<String>,
     pub stored_session_id: Option<String>,
+    /// Profile scope for this binding's durable ID. Resume must key on
+    /// (profile, stored_session_id), not stored_session_id alone.
+    pub profile: ProfileId,
     pub state: SessionState,
     /// The connection generation this binding's live ID belongs to. A
     /// generation mismatch means the live ID is stale and must be resumed
@@ -99,12 +132,13 @@ impl SessionRegistry {
 
     /// Register or update a conversation's binding. Atomically maintains both
     /// indexes: removes any old live-session reverse mapping, inserts the new
-    /// one. Used after `session.create` returns a fresh live ID.
+    /// one. Used after `session.create`/`session.resume` returns a fresh live ID.
     pub async fn set_live(
         &self,
         conversation_id: ConversationId,
         live_session_id: String,
         stored_session_id: Option<String>,
+        profile: ProfileId,
         connection_generation: u64,
     ) {
         let mut inner = self.inner.lock().await;
@@ -128,6 +162,7 @@ impl SessionRegistry {
                 conversation_id,
                 live_session_id: Some(live_session_id),
                 stored_session_id,
+                profile,
                 state: SessionState::Active,
                 connection_generation,
             },
@@ -233,8 +268,9 @@ impl SessionRegistry {
     /// Return all bindings that are Suspended AND have a durable stored_session_id,
     /// so the reconciliation loop can resume them. The returned bindings are
     /// transitioned to Resuming atomically (single lock), preventing duplicate
-    /// resume attempts if two tasks race.
-    pub async fn take_suspended_for_resume(&self) -> Vec<(ConversationId, String)> {
+    /// resume attempts if two tasks race. Returns the full DurableSessionRef
+    /// (profile + stored_session_id) so resume can key on the pair.
+    pub async fn take_suspended_for_resume(&self) -> Vec<(ConversationId, DurableSessionRef)> {
         let mut inner = self.inner.lock().await;
         let mut out = Vec::new();
         for b in inner.by_conversation.values_mut() {
@@ -242,7 +278,13 @@ impl SessionRegistry {
                 if let Some(stored) = b.stored_session_id.clone() {
                     if !stored.is_empty() {
                         b.state = SessionState::Resuming;
-                        out.push((b.conversation_id.clone(), stored));
+                        out.push((
+                            b.conversation_id.clone(),
+                            DurableSessionRef {
+                                profile: b.profile.clone(),
+                                stored_session_id: stored,
+                            },
+                        ));
                     }
                 }
             }
@@ -292,7 +334,8 @@ mod tests {
     async fn live_and_stored_ids_do_not_mix() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv.clone(), "live-aaa".into(), None, 1).await;
+        r.set_live(conv.clone(), "live-aaa".into(), None, ProfileId::empty(), 1)
+            .await;
         // Backend reports a stored_session_id via session.info — must NOT
         // replace the live ID used for prompt.submit.
         let updated = r.set_stored(&conv, "stored-bbb".into()).await;
@@ -317,8 +360,10 @@ mod tests {
         let r = reg();
         let conv_a = ConversationId::new("conv-a");
         let conv_b = ConversationId::new("conv-b");
-        r.set_live(conv_a.clone(), "live-a".into(), None, 1).await;
-        r.set_live(conv_b.clone(), "live-b".into(), None, 1).await;
+        r.set_live(conv_a.clone(), "live-a".into(), None, ProfileId::empty(), 1)
+            .await;
+        r.set_live(conv_b.clone(), "live-b".into(), None, ProfileId::empty(), 1)
+            .await;
 
         assert_eq!(r.route_event("live-a").await, Some(conv_a));
         assert_eq!(r.route_event("live-b").await, Some(conv_b));
@@ -332,11 +377,23 @@ mod tests {
     async fn reconnect_replaces_only_live_id() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv.clone(), "live-old".into(), Some("stored-1".into()), 1)
-            .await;
+        r.set_live(
+            conv.clone(),
+            "live-old".into(),
+            Some("stored-1".into()),
+            ProfileId::empty(),
+            1,
+        )
+        .await;
         // Reconnect: new live ID, same stored/durable ID.
-        r.set_live(conv.clone(), "live-new".into(), Some("stored-1".into()), 2)
-            .await;
+        r.set_live(
+            conv.clone(),
+            "live-new".into(),
+            Some("stored-1".into()),
+            ProfileId::empty(),
+            2,
+        )
+        .await;
 
         // Old live ID no longer routes.
         assert_eq!(r.route_event("live-old").await, None);
@@ -354,8 +411,14 @@ mod tests {
     async fn stale_generation_clears_live_routing() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv.clone(), "live-1".into(), Some("stored-1".into()), 1)
-            .await;
+        r.set_live(
+            conv.clone(),
+            "live-1".into(),
+            Some("stored-1".into()),
+            ProfileId::empty(),
+            1,
+        )
+        .await;
         // Simulate reconnect to generation 2, before reconciliation.
         r.mark_stale_for_generation(2).await;
 
@@ -380,7 +443,8 @@ mod tests {
     async fn unknown_live_event_not_assigned() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv, "live-known".into(), None, 1).await;
+        r.set_live(conv, "live-known".into(), None, ProfileId::empty(), 1)
+            .await;
         // An event for a session nobody owns.
         assert_eq!(r.route_event("live-orphan").await, None);
     }

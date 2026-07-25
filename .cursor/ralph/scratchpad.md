@@ -1,31 +1,33 @@
 ---
 iteration: 1
 max_iterations: 25
-completion_promise: "PHASE_1C_4_RECONCILIATION_VERIFIED"
+completion_promise: "PHASE_1C_4_FIXUP_VERIFIED"
 ---
 
-Implement Phase 1C.4: real reconnect reconciliation and event routing for the persistent Local gateway client. The audit found three P0 gaps and two P1 gaps that must be closed.
+Phase 1C.4 fixup: correct the session.resume wire contract and close the remaining gaps from the third audit. The completion promise is only true when ALL of the following are done AND verified by passing tests + green CI.
 
-Deliverables (all must be done AND verified by passing tests + green CI before emitting the completion promise):
+Deliverables:
 
-1. FIX DISCONNECT SUSPEND. The reader task's disconnect cleanup must suspend the bindings of the CURRENT generation (== my_generation), not just older ones. Add `suspend_generation(dead_generation: u64)` to SessionRegistry that matches connection_generation == dead_generation. Call it (or suspend_all) in reader_task cleanup. The existing mark_stale_for_generation stays for the cross-generation case. Write a NEW integration test that actually closes the mock socket and verifies the registry transitions the right binding to Suspended — not a unit test that manually calls the registry method with a fabricated generation.
+1. CORRECT session.resume wire contract. Hermes reads `params.session_id` (the durable ID), NOT `stored_session_id`. It returns 4006 "session_id required" if absent. Fix SessionResumeParams to send `session_id` (the durable ID), plus optional `profile` and `cols`. Fix SessionResumeResult to read the live ID from `session_id`, durable ID from `resumed` (or `session_key`), plus message_count/messages/info. The field names MUST match the real Hermes tui_gateway/server.py contract.
 
-2. REAL session.resume RPC. Add SessionResumeParams { stored_session_id } and SessionResumeResult { session_id, stored_session_id, ... } to hermes_protocol.rs. Add a typed wrapper `resume_session_on_connection(ws_state, stored_id) -> Result<SessionResumeResult, WsError>` in ws_transport.rs using call_rpc with method "session.resume".
+2. CORRECT mock backend. The mock must: accept `session.resume` with `params.session_id`, return `{"session_id": new_live, "resumed": durable, "session_key": durable, ...}`, and return error 4006 when `session_id` is missing. The current mock uses `stored_session_id` and must be fixed so it no longer encodes the wrong schema. All existing tests using the mock must still pass.
 
-3. RECONCILIATION BEFORE Connected. In ensure_ws_connection, AFTER the compatibility handshake passes and BEFORE setting ConnectionState::Connected: enumerate the registry's suspended bindings that have a stored_session_id, call session.resume for each, update the binding with the new live ID via set_live (same stored ID, new generation). Add SessionState::Resuming and ResumeFailed variants. If a resume fails, leave that binding in ResumeFailed (do NOT mark Active). Update the reconnect test to exercise this against the mock backend (two real session.resume calls returning new live IDs).
+3. DROP unknown session-scoped events. Currently the reader task creates a RoutedChatEvent with conversation_id=None for unknown sessions and emits it. For events that CARRY a session_id (session-scoped), an unknown live session must be logged and the event must NOT be emitted (early continue). Only truly global events (no session_id field) may be emitted with conversation_id=None.
 
-4. EVENT ROUTING via registry. Add a RoutedChatEvent { conversation_id, event } envelope. The reader task must call registry.route_event(live_session_id) for EVERY event (not just session.info), wrap the ChatEvent with the resolved conversation_id, and emit RoutedChatEvent. Unknown live sessions are logged and NOT emitted to a random conversation. Update make_tauri_emitter / the event channel name or payload to carry conversation_id. Frontend payload must include conversation_id for every event.
+4. REAL server-initiated disconnect test. The reconnect test must NOT manually set Disconnected/Shutdown/suspend_generation. Instead: the mock server closes the first WebSocket; the test waits for WsState to reach Disconnected on its own; verifies bindings became Suspended automatically; then reconnects and verifies real session.resume calls. This proves the reader task cleanup actually fires on real socket close.
 
-5. REGISTRY AUTHORITATIVE. Remove the global WsState.session_id field (or make it clearly deprecated/private with no production reads/writes). The persistent local path must register EVERY created session in the registry. The legacy request.session_id path must still work but via an adapter: create a synthetic ConversationId from the session_id and register it, so the registry always has a binding for any active session. Update or remove the old test that asserts the global session_id is cached.
+5. UNIFIED interruption classification. Add a single fn interruption_error(method) that returns OutcomeUnknown for non-idempotent, RpcTimeout/ConnectionLost for idempotent. Apply it to ALL paths: call_rpc caller timeout, reader task deadline (cleanup_tick), socket disconnect, send failure, closed reply channel. The 5s cleanup_tick currently always sends RpcTimeout — fix it.
 
-6. OutcomeUnknown coverage. Store idempotency in PendingRequest (or look it up from the method name) and classify OutcomeUnknown consistently for: disconnect, RPC timeout, send failure. call_rpc must return OutcomeUnknown for non-idempotent methods on timeout, not just RpcTimeout. Update tests accordingly.
+6. PROFILE-aware durable identity. Add DurableSessionRef { profile, stored_session_id } (ProfileId can be a newtype String). SessionBinding stores the profile alongside the durable ID. Reconciliation indexes by (profile, stored_session_id). session.resume sends the profile.
 
-Verification (do not emit the promise until ALL pass):
-- cargo test --manifest-path src-tauri/Cargo.toml --all-targets → all green, including a NEW reconnect integration test that: creates 2 sessions, disconnects the socket, reconnects, verifies 2 real session.resume calls happened, verifies new live IDs in registry, verifies interleaved events route to correct conversation_id.
-- npm run clippy:strict → clean (ws_transport.rs zero warnings).
-- npm run clippy:check → no new warnings beyond baseline.
-- npm run lint:check → no new violations beyond baseline.
-- cargo fmt --manifest-path src-tauri/Cargo.toml --check → clean.
-- CI run on the pushed commit concludes success.
+7. DEGRADED state for partial reconciliation. reconcile_sessions returns a ReconciliationReport { restored, failed }. ensure_ws_connection sets Connected only if all succeeded; if some failed, set a Degraded state (add ConnectionState::Degraded) so callers know not all conversations resumed. Do NOT silently go fully Connected when resumes failed.
 
-Do NOT claim completion based on partial work. If a deliverable is only unit-tested but not integration-tested against the mock backend, it is not done.
+Verification (do not emit promise until ALL pass):
+- cargo test --manifest-path src-tauri/Cargo.toml --all-targets → all green, including the corrected reconnect test with REAL server disconnect.
+- npm run clippy:strict → clean.
+- npm run clippy:check → no growth.
+- npm run lint:check → no growth.
+- cargo fmt --check → clean.
+- CI run on the pushed commit → success.
+
+Do NOT emit the promise based on partial work or unit-only tests. The session.resume wire format must match the real Hermes contract (session_id field, not stored_session_id), verified by the corrected mock returning 4006 on missing session_id.

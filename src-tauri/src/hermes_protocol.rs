@@ -235,32 +235,64 @@ pub fn build_session_create_request(
 // ── session.resume ──────────────────────────────────────────────────────────
 
 /// Request params for `session.resume` (reconnect reconciliation).
-/// Carries the durable stored_session_id so the backend can reattach to the
-/// existing session and return a fresh live session_id for the new connection.
+///
+/// IMPORTANT wire contract: Hermes reads `params.session_id` (the DURABLE
+/// stored ID), NOT `stored_session_id`. The backend returns `4006:
+/// session_id required` if the field is absent. This struct's field name is
+/// `session_id` to match the wire format; semantically it carries the durable
+/// stored session ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionResumeParams {
-    /// The durable stored session ID (survives reconnects).
-    pub stored_session_id: String,
+    /// The durable stored session ID. Named `session_id` to match the Hermes
+    /// wire format (tui_gateway/server.py reads `params.get("session_id")`).
+    pub session_id: String,
+    /// Optional profile scope. Sessions are profile-scoped on the backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Optional terminal columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
 }
 
 /// Response result for `session.resume`.
-/// The backend returns a new live `session_id` for this connection while the
-/// `stored_session_id` stays constant across reconnects.
+///
+/// Wire contract: the NEW live ID is in `session_id`; the durable ID that was
+/// resumed is in `resumed` (or `session_key`). There is NO `stored_session_id`
+/// field in the real Hermes response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionResumeResult {
     /// The NEW live session ID valid for the current connection.
     pub session_id: String,
-    /// The durable stored session ID (unchanged from the original create).
+    /// The durable stored session ID that was resumed.
     #[serde(default)]
-    pub stored_session_id: String,
+    pub resumed: String,
+    /// Alternative field name some Hermes versions use for the durable ID.
+    #[serde(default)]
+    pub session_key: Option<String>,
     /// Number of messages in the resumed session.
     #[serde(default)]
     pub message_count: usize,
     /// Recent message history (may be empty or truncated by the backend).
     #[serde(default)]
     pub messages: Vec<serde_json::Value>,
+    /// Session info (may be empty object).
+    #[serde(default)]
+    pub info: serde_json::Value,
+}
+
+impl SessionResumeResult {
+    /// The durable stored session ID, preferring `resumed` then `session_key`.
+    pub fn durable_id(&self) -> &str {
+        if !self.resumed.is_empty() {
+            &self.resumed
+        } else if let Some(key) = &self.session_key {
+            key
+        } else {
+            ""
+        }
+    }
 }
 
 // ── prompt.submit ────────────────────────────────────────────────────────────

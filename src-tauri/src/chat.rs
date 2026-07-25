@@ -651,6 +651,7 @@ pub async fn send_via_ws_persistent_local(
                         conv,
                         result.session_id.clone(),
                         Some(result.stored_session_id),
+                        crate::session_registry::ProfileId::empty(),
                         generation,
                     )
                     .await;
@@ -666,7 +667,13 @@ pub async fn send_via_ws_persistent_local(
             crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
         if sessions.route_event(sid).await.is_none() {
             sessions
-                .set_live(synthetic_conv, sid.to_string(), None, generation)
+                .set_live(
+                    synthetic_conv,
+                    sid.to_string(),
+                    None,
+                    crate::session_registry::ProfileId::empty(),
+                    generation,
+                )
                 .await;
         }
         sid.to_string()
@@ -684,6 +691,7 @@ pub async fn send_via_ws_persistent_local(
                 synthetic_conv,
                 result.session_id.clone(),
                 Some(result.stored_session_id),
+                crate::session_registry::ProfileId::empty(),
                 generation,
             )
             .await;
