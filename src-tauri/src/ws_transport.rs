@@ -2782,6 +2782,13 @@ mod tests {
                                             }
                                             let durable = req.get("params").and_then(|p| p.get("session_id")).and_then(|s| s.as_str());
                                             match durable {
+                                                // Deliberately violate the resume result schema for
+                                                // the integration test below. The connection remains
+                                                // healthy, isolating protocol failure from interruption.
+                                                Some("malformed-resume") => {
+                                                    let resp = json!({"jsonrpc":"2.0","id":id,"result":{}});
+                                                    let _ = ws.send(Message::Text(resp.to_string())).await;
+                                                }
                                                 Some(d) if !d.is_empty() => {
                                                     let new_live = format!("{}-resumed", d);
                                                     let resp = json!({"jsonrpc":"2.0","id":id,"result":{"session_id":new_live,"resumed":d,"session_key":d,"message_count":0,"messages":[],"info":{}}});
@@ -3603,7 +3610,9 @@ mod tests {
     async fn malformed_resume_response_marks_resumefailed_no_retry() {
         use crate::session_registry::{ConversationId, ProfileId, SessionState};
 
-        // Start a mock backend that returns malformed session.resume response.
+        // The reconnect mock returns `{}` for durable ID "malformed-resume",
+        // which cannot deserialize as SessionResumeResult while keeping the
+        // WebSocket connection healthy.
         let (ws_url, received, disconnect_signal, _resume_fail) =
             start_reconnect_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
@@ -3622,7 +3631,7 @@ mod tests {
             .set_live(
                 ConversationId::new("c1"),
                 "l1".into(),
-                Some("d1".into()),
+                Some("malformed-resume".into()),
                 ProfileId::empty(),
                 gen1,
             )
@@ -3637,44 +3646,68 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Modify the mock to return malformed resume response for the next connection.
-        // We'll use a custom mock instead of the reconnect one.
-        // Instead, let's test directly via reconcile_sessions with a mock that returns Protocol error.
-        // For this test, we'll just verify the error classification logic.
-
-        // Actually, the Protocol error comes from deserialization failure in call_rpc.
-        // The easiest way to test is to create a mock that returns invalid JSON for session.resume.
-        // But that's complex. Instead, let's test the classification logic directly.
-        let is_interruption = matches!(
-            WsError::Protocol("malformed response".into()),
-            WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
+        // Gen 2: a real session.resume receives the malformed result. The
+        // connection stays up, so reconciliation completes in Degraded state.
+        let (emit_fn2, _) = mock_emitter();
+        ensure_ws_connection(&ws_url, emit_fn2, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("malformed resume must degrade, not disconnect");
+        assert_eq!(
+            ws_state.runtime.lock().await.state,
+            ConnectionState::Degraded,
+            "a protocol error during resume must leave the healthy connection Degraded"
         );
-        assert!(
-            !is_interruption,
-            "Protocol error must NOT be treated as interruption"
-        );
-
-        // Verify that a genuine connection loss IS classified as interruption.
-        let is_interruption2 = matches!(
-            WsError::ConnectionLost,
-            WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
-        );
-        assert!(
-            is_interruption2,
-            "ConnectionLost must be treated as interruption"
+        assert_eq!(
+            sessions
+                .get(&ConversationId::new("c1"))
+                .await
+                .unwrap()
+                .state,
+            SessionState::ResumeFailed,
+            "malformed resume result must permanently fail this binding"
         );
 
-        // Verify OutcomeUnknown is interruption.
-        let is_interruption3 = matches!(
-            WsError::OutcomeUnknown {
-                method: "session.resume".into(),
-                cause: InterruptionCause::Timeout
-            },
-            WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
+        let resume_count_after_failure = received
+            .lock()
+            .await
+            .iter()
+            .filter(|frame| frame.get("method").and_then(|m| m.as_str()) == Some("session.resume"))
+            .count();
+        assert_eq!(
+            resume_count_after_failure, 1,
+            "expected one malformed resume attempt"
         );
+
+        // Gen 3: force a fresh WebSocket connection. ResumeFailed bindings are
+        // not eligible for reconciliation, so no second resume request is sent.
+        disconnect_signal.notify_waiters();
+        for _ in 0..100 {
+            if ws_state.runtime.lock().await.state == ConnectionState::Disconnected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            ws_state.runtime.lock().await.state,
+            ConnectionState::Disconnected
+        );
+
+        let (emit_fn3, _) = mock_emitter();
+        ensure_ws_connection(&ws_url, emit_fn3, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("reconnect after permanent resume failure");
+        wait_connected(&ws_state, 5000).await;
+
+        let resume_count_after_reconnect = received
+            .lock()
+            .await
+            .iter()
+            .filter(|frame| frame.get("method").and_then(|m| m.as_str()) == Some("session.resume"))
+            .count();
         assert!(
-            is_interruption3,
-            "OutcomeUnknown must be treated as interruption"
+            resume_count_after_reconnect == 1,
+            "ResumeFailed must not be retried on reconnect; frames: {:?}",
+            received.lock().await
         );
     }
 }
