@@ -3506,10 +3506,10 @@ mod tests {
     /// The test verifies the exact sequence of conversation_ids matches.
     #[tokio::test]
     async fn interleaved_routing_exact_sequence() {
-        use crate::session_registry::{ConversationId, ProfileId, SessionState};
+        use crate::session_registry::{ConversationId, ProfileId};
 
         // Start a mock backend that accumulates two prompt.submits and emits interleaved events.
-        let (ws_url, received, emit_order) = start_interleaved_mock_backend().await;
+        let (ws_url, received, _emit_order) = start_interleaved_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let sessions = crate::session_registry::SessionRegistry::new();
         let (emit_fn, events) = mock_emitter();
@@ -3704,8 +3704,9 @@ mod tests {
             .iter()
             .filter(|frame| frame.get("method").and_then(|m| m.as_str()) == Some("session.resume"))
             .count();
-        assert!(
-            resume_count_after_reconnect == 1,
+        assert_eq!(
+            resume_count_after_reconnect,
+            1,
             "ResumeFailed must not be retried on reconnect; frames: {:?}",
             received.lock().await
         );
