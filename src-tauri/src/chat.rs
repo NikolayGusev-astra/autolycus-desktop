@@ -649,9 +649,7 @@ pub async fn send_via_ws_persistent_local(
     //   1. conversation_id → registry.get_live (or create + register)
     //   2. session_id (legacy) → synthetic ConversationId adapter, register if new
     //   3. neither → create a new session, register under a synthetic conversation_id
-    let generation = ws_state
-        .generation
-        .load(std::sync::atomic::Ordering::Acquire);
+    let generation = ws_state.runtime.lock().await.generation;
 
     let session_id =
         if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {

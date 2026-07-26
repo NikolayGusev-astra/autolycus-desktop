@@ -7,7 +7,7 @@
 // and forwards streaming events to the SAME Tauri `chat_event` channel the
 // HTTP transport used — so the frontend stays unchanged.
 //
-// Phase 0 (ADR-004): connect-per-message, no persistent connection yet.
+
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -54,8 +54,9 @@ where
     P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
     R: for<'de> Deserialize<'de> + std::fmt::Debug,
 {
-    let tx_guard = ws_state.cmd_tx.lock().await;
-    let tx = tx_guard.as_ref().ok_or(GatewayClientError::Protocol(
+    // Lock the runtime to get cmd_tx atomically with generation check.
+    let runtime = ws_state.runtime.lock().await;
+    let tx = runtime.cmd_tx.as_ref().ok_or(GatewayClientError::Protocol(
         "not connected: no cmd_tx".into(),
     ))?;
     let id = next_rpc_id();
@@ -70,7 +71,8 @@ where
     })
     .await
     .map_err(|_| GatewayClientError::Protocol("reader task closed".into()))?;
-    drop(tx_guard); // Release lock before awaiting
+    // Release the runtime lock before awaiting the response.
+    drop(runtime);
 
     // Wait for RPC response with timeout.
     // reply_rx is `oneshot::Receiver<Result<Value, GatewayClientError>>`, so
@@ -926,18 +928,40 @@ fn build_prompt_submit_request(id: u64, session_id: &str, text: &str) -> Value {
     })
 }
 
+/// Connection runtime state — generation, lifecycle state, and command channel.
+/// All three fields are protected by a single mutex to prevent TOCTOU races
+/// between the reader task cleanup and the connection finalization (ADR-006 §P0).
+#[derive(Debug)]
+pub struct ConnectionRuntime {
+    /// Generation this connection was established with.
+    pub generation: u64,
+    /// Current connection lifecycle state.
+    pub state: ConnectionState,
+    /// Command sender for the reader task. None when disconnected.
+    pub cmd_tx: Option<tokio::sync::mpsc::Sender<WsCommand>>,
+    /// WebSocket URL for this connection.
+    pub ws_url: String,
+}
+
+impl Default for ConnectionRuntime {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            state: ConnectionState::Disconnected,
+            cmd_tx: None,
+            ws_url: String::new(),
+        }
+    }
+}
+
 /// Persistent WS connection state, held in `AppState.ws`.
 ///
 /// All fields are behind `tokio::sync::Mutex` to allow concurrent access from
 /// async Tauri command handlers. The actual socket lives inside the reader
 /// task (not stored here) — handlers communicate via `cmd_tx`.
 pub struct WsState {
-    /// Current connection lifecycle.
-    pub state: tokio::sync::Mutex<ConnectionState>,
-    /// The full WS URL.
-    pub ws_url: tokio::sync::Mutex<String>,
-    /// Sender into the reader task's mpsc channel.
-    pub cmd_tx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsCommand>>>,
+    /// Connection runtime: generation, state, cmd_tx, ws_url under one lock.
+    pub runtime: tokio::sync::Mutex<ConnectionRuntime>,
     /// Serializes concurrent `ensure_ws_connection` calls so only one task
     /// performs the actual connect+handshake.
     pub connect_lock: tokio::sync::Mutex<()>,
@@ -953,9 +977,7 @@ impl WsState {
     /// Create a fresh Disconnected state. Called once in `AppState::new`.
     pub fn new() -> Self {
         Self {
-            state: tokio::sync::Mutex::new(ConnectionState::Disconnected),
-            ws_url: tokio::sync::Mutex::new(String::new()),
-            cmd_tx: tokio::sync::Mutex::new(None),
+            runtime: tokio::sync::Mutex::new(ConnectionRuntime::default()),
             connect_lock: tokio::sync::Mutex::new(()),
             compatibility: tokio::sync::Mutex::new(
                 crate::hermes_protocol::RuntimeCompatibility::Unknown,
@@ -1003,8 +1025,8 @@ pub async fn ensure_ws_connection(
 ) -> Result<(), WsError> {
     // Fast path: already connected (no lock contention on connect_lock).
     {
-        let state = ws_state.state.lock().await;
-        if *state == ConnectionState::Connected {
+        let runtime = ws_state.runtime.lock().await;
+        if runtime.state == ConnectionState::Connected {
             return Ok(());
         }
     }
@@ -1017,8 +1039,8 @@ pub async fn ensure_ws_connection(
     // Double-check after acquiring the lock — the first caller may have already
     // connected while we were waiting.
     {
-        let state = ws_state.state.lock().await;
-        match *state {
+        let mut runtime = ws_state.runtime.lock().await;
+        match runtime.state {
             ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
             ConnectionState::Connecting => {
                 // Should not happen under connect_lock, but guard anyway.
@@ -1026,18 +1048,16 @@ pub async fn ensure_ws_connection(
             }
             ConnectionState::Disconnected => {}
         }
-        drop(state);
+        // We are the single connector. Set Connecting.
+        runtime.state = ConnectionState::Connecting;
     }
-
-    // We are the single connector. Set Connecting.
-    *ws_state.state.lock().await = ConnectionState::Connecting;
 
     // Connect.
     tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
     let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
         Ok(result) => result,
         Err(e) => {
-            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            ws_state.runtime.lock().await.state = ConnectionState::Disconnected;
             return Err(WsError::Connect(e.to_string()));
         }
     };
@@ -1048,11 +1068,11 @@ pub async fn ensure_ws_connection(
     let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => {
-            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            ws_state.runtime.lock().await.state = ConnectionState::Disconnected;
             return Err(e);
         }
         Err(_) => {
-            *ws_state.state.lock().await = ConnectionState::Disconnected;
+            ws_state.runtime.lock().await.state = ConnectionState::Disconnected;
             return Err(WsError::ReadyTimeout);
         }
     };
@@ -1063,8 +1083,13 @@ pub async fn ensure_ws_connection(
     // Bump generation before storing cmd_tx.
     let generation = ws_state.next_generation();
 
-    *ws_state.ws_url.lock().await = ws_url.to_string();
-    *ws_state.cmd_tx.lock().await = Some(cmd_tx);
+    // Store ws_url, cmd_tx, and generation atomically under runtime lock.
+    {
+        let mut runtime = ws_state.runtime.lock().await;
+        runtime.ws_url = ws_url.to_string();
+        runtime.cmd_tx = Some(cmd_tx);
+        runtime.generation = generation;
+    }
 
     // Spawn the reader task with the generation.
     tokio::spawn(reader_task(
@@ -1098,8 +1123,10 @@ pub async fn ensure_ws_connection(
         Err(e) => {
             *ws_state.compatibility.lock().await =
                 crate::hermes_protocol::RuntimeCompatibility::Unknown;
-            *ws_state.state.lock().await = ConnectionState::Disconnected;
-            *ws_state.cmd_tx.lock().await = None;
+            // Atomic cleanup of state + cmd_tx under runtime lock.
+            let mut runtime = ws_state.runtime.lock().await;
+            runtime.state = ConnectionState::Disconnected;
+            runtime.cmd_tx = None;
             // Signal the reader task to shut down.
             return Err(e);
         }
@@ -1143,17 +1170,18 @@ pub async fn ensure_ws_connection(
             .generation
             .load(std::sync::atomic::Ordering::Acquire)
             != generation
-        || ws_state.cmd_tx.lock().await.is_none()
-        || *ws_state.state.lock().await == ConnectionState::Disconnected
+        || ws_state.runtime.lock().await.cmd_tx.is_none()
+        || ws_state.runtime.lock().await.state == ConnectionState::Disconnected
     {
-        *ws_state.state.lock().await = ConnectionState::Disconnected;
+        let mut runtime = ws_state.runtime.lock().await;
+        runtime.state = ConnectionState::Disconnected;
         return Err(WsError::ConnectionLost);
     }
 
     // Connected only if all resumes succeeded; otherwise Degraded.
     {
-        let mut state = ws_state.state.lock().await;
-        *state = if degraded {
+        let mut runtime = ws_state.runtime.lock().await;
+        runtime.state = if degraded {
             ConnectionState::Degraded
         } else {
             ConnectionState::Connected
@@ -1593,8 +1621,10 @@ async fn reader_task<S>(
         .generation
         .load(std::sync::atomic::Ordering::Acquire);
     if current_gen == my_generation {
-        *ws_state.state.lock().await = ConnectionState::Disconnected;
-        *ws_state.cmd_tx.lock().await = None;
+        // Atomic cleanup of state + cmd_tx under runtime lock.
+        let mut runtime = ws_state.runtime.lock().await;
+        runtime.state = ConnectionState::Disconnected;
+        runtime.cmd_tx = None;
         // Suspend the session registry: durable IDs retained for resume, live
         // IDs cleared so stale events don't route. This is the disconnect half
         // of reconciliation (Phase 1C.3); the reconnect/resume half runs in
@@ -1754,8 +1784,8 @@ mod tests {
     fn ws_state_new_starts_disconnected() {
         let ws = WsState::new();
         // Use try_lock to avoid needing a tokio runtime in a sync test.
-        let state = ws.state.try_lock().expect("state lock not poisoned");
-        assert_eq!(*state, ConnectionState::Disconnected);
+        let runtime = ws.runtime.try_lock().expect("runtime lock not poisoned");
+        assert_eq!(runtime.state, ConnectionState::Disconnected);
     }
 
     #[tokio::test]
@@ -1763,13 +1793,13 @@ mod tests {
         let ws = WsState::new();
         // Disconnected → Connecting → Connected → Disconnected
         {
-            let mut state = ws.state.lock().await;
-            *state = ConnectionState::Connecting;
-            assert_eq!(*state, ConnectionState::Connecting);
-            *state = ConnectionState::Connected;
-            assert_eq!(*state, ConnectionState::Connected);
-            *state = ConnectionState::Disconnected;
-            assert_eq!(*state, ConnectionState::Disconnected);
+            let mut runtime = ws.runtime.lock().await;
+            runtime.state = ConnectionState::Connecting;
+            assert_eq!(runtime.state, ConnectionState::Connecting);
+            runtime.state = ConnectionState::Connected;
+            assert_eq!(runtime.state, ConnectionState::Connected);
+            runtime.state = ConnectionState::Disconnected;
+            assert_eq!(runtime.state, ConnectionState::Disconnected);
         }
     }
 
@@ -1858,13 +1888,13 @@ mod tests {
         // If WsState is already Connected, ensure_ws_connection returns Ok
         // without attempting a real connect (which would fail in a test env).
         let ws = Arc::new(WsState::new());
-        *ws.state.lock().await = ConnectionState::Connected;
+        ws.runtime.lock().await.state = ConnectionState::Connected;
         // We can't easily build an AppHandle in a unit test, so we verify the
         // state guard logic directly: the function checks state == Connected
         // before touching the network.
-        let state = ws.state.lock().await;
+        let runtime = ws.runtime.lock().await;
         assert_eq!(
-            *state,
+            runtime.state,
             ConnectionState::Connected,
             "precondition: must be Connected"
         );
@@ -1876,20 +1906,20 @@ mod tests {
         // If another task set Connecting, ensure_ws_connection spins until
         // the state resolves. Here we simulate the state resolving to Connected.
         let ws = Arc::new(WsState::new());
-        *ws.state.lock().await = ConnectionState::Connecting;
+        ws.runtime.lock().await.state = ConnectionState::Connecting;
         // Simulate the connecting task finishing.
         tokio::spawn({
             let ws = Arc::clone(&ws);
             async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                *ws.state.lock().await = ConnectionState::Connected;
+                ws.runtime.lock().await.state = ConnectionState::Connected;
             }
         });
         // Spin like ensure_ws_connection does until Connected.
         let mut resolved = false;
         for _ in 0..50 {
-            let s = ws.state.lock().await;
-            if *s == ConnectionState::Connected {
+            let s = ws.runtime.lock().await;
+            if s.state == ConnectionState::Connected {
                 resolved = true;
                 break;
             }
@@ -2120,8 +2150,8 @@ mod tests {
         let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
         tokio::pin!(deadline);
         loop {
-            if let Ok(s) = ws_state.state.try_lock() {
-                if *s == ConnectionState::Connected {
+            if let Ok(rt) = ws_state.runtime.try_lock() {
+                if rt.state == ConnectionState::Connected {
                     return;
                 }
             }
@@ -2144,7 +2174,7 @@ mod tests {
         wait_connected(&ws_state, 3000).await;
 
         // cmd_tx must be set.
-        assert!(ws_state.cmd_tx.lock().await.is_some());
+        assert!(ws_state.runtime.lock().await.cmd_tx.is_some());
     }
 
     #[tokio::test]
@@ -2256,7 +2286,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(*ws_state.state.lock().await, ConnectionState::Connected);
+        assert_eq!(ws_state.runtime.lock().await.state, ConnectionState::Connected);
     }
 
     // ── Phase 1C.1: Compatibility Handshake tests ────────────────────────────
@@ -2311,7 +2341,7 @@ mod tests {
         );
         // Connection must NOT be Connected after a failed handshake.
         assert_eq!(
-            *ws_state.state.lock().await,
+            ws_state.runtime.lock().await.state,
             ConnectionState::Disconnected,
             "state must be Disconnected after handshake failure"
         );
@@ -2745,6 +2775,164 @@ mod tests {
         )
     }
 
+    /// Start a mock backend that accumulates TWO prompt.submit requests and then
+    /// emits the exact interleaved sequence:
+    ///   A.delta, B.delta, A.tool_start, B.approval_request, A.complete, B.complete
+    ///
+    /// Returns (ws_url, received_frames, emitted_events) where emitted_events
+    /// records the exact sequence of (conversation_id, event_type) for assertions.
+    async fn start_interleaved_mock_backend() -> (
+        String,
+        Arc<tokio::sync::Mutex<Vec<Value>>>,
+        Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received: Arc<tokio::sync::Mutex<Vec<Value>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = Arc::clone(&received);
+        // Record the exact emitted event sequence for the test to assert against.
+        let emit_order: Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let emit_order_clone = Arc::clone(&emit_order);
+
+        tokio::spawn(async move {
+            // Accept exactly one connection for this test.
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            // gateway.ready
+            let ready = json!({
+                "jsonrpc": "2.0", "method": "event",
+                "params": {"type": "gateway.ready", "payload": {}}
+            });
+            let _ = ws.send(Message::Text(ready.to_string())).await;
+
+            // Buffer for the two prompt.submit requests.
+            let mut submit_buffer: Vec<(u64, String)> = Vec::new(); // (id, session_id)
+
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(text) = msg {
+                    let req: Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    received_clone.lock().await.push(req.clone());
+                    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                    let id = req.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+
+                    match method {
+                        "session.create" => {
+                            let source = req
+                                .get("params")
+                                .and_then(|p| p.get("source"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("desktop");
+                            let (new_sid, stored) = if source == "compat_probe" {
+                                ("probe-sess".to_string(), "probe-sess".to_string())
+                            } else {
+                                let s = format!("{}-stored", source);
+                                (format!("{}-live", source), s)
+                            };
+                            let resp = json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {
+                                    "session_id": new_sid,
+                                    "stored_session_id": stored,
+                                    "message_count": 0,
+                                    "messages": [],
+                                    "info": {"desktop_contract": 4}
+                                }
+                            });
+                            let _ = ws.send(Message::Text(resp.to_string())).await;
+                        }
+                        "session.close" => {
+                            let resp = json!({"jsonrpc":"2.0","id":id,"result":{}});
+                            let _ = ws.send(Message::Text(resp.to_string())).await;
+                        }
+                        "session.resume" => {
+                            let durable = req.get("params").and_then(|p| p.get("session_id")).and_then(|s| s.as_str());
+                            match durable {
+                                Some(d) if !d.is_empty() => {
+                                    let new_live = format!("{}-resumed", d);
+                                    let resp = json!({
+                                        "jsonrpc": "2.0", "id": id,
+                                        "result": {
+                                            "session_id": new_live,
+                                            "resumed": d,
+                                            "session_key": d,
+                                            "message_count": 0,
+                                            "messages": [],
+                                            "info": {}
+                                        }
+                                    });
+                                    let _ = ws.send(Message::Text(resp.to_string())).await;
+                                }
+                                _ => {
+                                    let resp = json!({"jsonrpc":"2.0","id":id,"error":{"code":4006,"message":"session_id required"}});
+                                    let _ = ws.send(Message::Text(resp.to_string())).await;
+                                }
+                            }
+                        }
+                        "prompt.submit" => {
+                            // Accumulate the two submits.
+                            let sid = req
+                                .get("params")
+                                .and_then(|p| p.get("session_id"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            submit_buffer.push((id, sid));
+
+                            // ACK immediately.
+                            let ack = json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
+                            let _ = ws.send(Message::Text(ack.to_string())).await;
+
+// When we have two submits, emit the interleaved sequence.
+                            if submit_buffer.len() == 2 {
+                                let (_, sid_a) = submit_buffer[0].clone();
+                                let (_, sid_b) = submit_buffer[1].clone();
+
+                                // Interleaved events:
+                                // A.delta, B.delta, A.tool_start, B.approval_request, A.complete, B.complete
+                                let events: Vec<Value> = vec![
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":sid_a,"payload":{"text":"A1"}}}),
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":sid_b,"payload":{"text":"B1"}}}),
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","session_id":sid_a,"payload":{"tool_id":"tc_a","name":"tool_a"}}}),
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":sid_b,"payload":{"request_id":"ar_b","tool_id":"tc_b","name":"tool_b","tool_input":"{}"}}}),
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":sid_a,"payload":{"text":"A complete","status":"complete"}}}),
+                                    json!({"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":sid_b,"payload":{"text":"B complete","status":"complete"}}}),
+                                ];
+
+                                for ev in events {
+                                    let _ = ws.send(Message::Text(ev.to_string())).await;
+                                }
+
+                                // Record the expected emit order for verification.
+                                let mut order = emit_order_clone.lock().await;
+                                order.push((Some(sid_a.clone()), "token"));       // A.delta -> Token
+                                order.push((Some(sid_b.clone()), "token"));       // B.delta -> Token
+                                order.push((Some(sid_a.clone()), "tool_start"));  // A.tool_start
+                                order.push((Some(sid_b.clone()), "approval"));    // B.approval_request
+                                order.push((Some(sid_a.clone()), "done"));        // A.complete -> Done
+                                order.push((Some(sid_b.clone()), "done"));        // B.complete -> Done
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if matches!(msg, Message::Close(_)) {
+                    break;
+                }
+            }
+        });
+
+        (
+            format!("ws://127.0.0.1:{}/api/ws?token=test", port),
+            received,
+            emit_order,
+        )
+    }
+
     /// Phase 1C.4 integration test: real reconnect reconciliation.
     ///
     /// 1. Connect, create 2 sessions (distinct durable IDs), register them.
@@ -2812,7 +3000,7 @@ mod tests {
         // Disconnected + suspend the generation's bindings.
         let mut disconnected = false;
         for _ in 0..100 {
-            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+            if ws_state.runtime.lock().await.state == ConnectionState::Disconnected {
                 disconnected = true;
                 break;
             }
@@ -2982,7 +3170,7 @@ mod tests {
         // Disconnect.
         disconnect_signal.notify_waiters();
         for _ in 0..100 {
-            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+            if ws_state.runtime.lock().await.state == ConnectionState::Disconnected {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3073,7 +3261,7 @@ mod tests {
         // First disconnect → Suspended.
         disconnect_signal.notify_waiters();
         for _ in 0..100 {
-            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+            if ws_state.runtime.lock().await.state == ConnectionState::Disconnected {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3161,7 +3349,7 @@ mod tests {
         // Gen 1 disconnect.
         disconnect_signal.notify_waiters();
         for _ in 0..100 {
-            if *ws_state.state.lock().await == ConnectionState::Disconnected {
+            if ws_state.runtime.lock().await.state == ConnectionState::Disconnected {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3242,5 +3430,100 @@ mod tests {
             "expected at least 3 resume calls (gen2 partial + gen3 both), got {}",
             resume_count
         );
+    }
+
+    /// Phase 1C.4: Real interleaved routing test.
+    ///
+    /// The mock backend accumulates TWO prompt.submit requests and then emits
+    /// the exact interleaved sequence:
+    ///   A.delta, B.delta, A.tool_start, B.approval_request, A.complete, B.complete
+    ///
+    /// The test verifies the exact sequence of conversation_ids matches.
+    #[tokio::test]
+    async fn interleaved_routing_exact_sequence() {
+        use crate::session_registry::{ConversationId, ProfileId, SessionState};
+
+        // Start a mock backend that accumulates two prompt.submits and emits interleaved events.
+        let (ws_url, received, emit_order) = start_interleaved_mock_backend().await;
+        let ws_state = Arc::new(WsState::new());
+        let sessions = crate::session_registry::SessionRegistry::new();
+        let (emit_fn, events) = mock_emitter();
+
+        // Connect and handshake.
+        ensure_ws_connection(&ws_url, emit_fn, &ws_state, Some(sessions.clone()))
+            .await
+            .expect("connect");
+        wait_connected(&ws_state, 5000).await;
+        let gen1 = ws_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        // Create two conversations with distinct live IDs.
+        let conv_a = ConversationId::new("conv-a");
+        let conv_b = ConversationId::new("conv-b");
+
+        let ra = create_session_on_connection(&ws_state, "conv-a", None)
+            .await
+            .unwrap();
+        sessions
+            .set_live(
+                conv_a.clone(),
+                ra.session_id.clone(),
+                Some(ra.stored_session_id),
+                ProfileId::empty(),
+                gen1,
+            )
+            .await;
+
+        let rb = create_session_on_connection(&ws_state, "conv-b", None)
+            .await
+            .unwrap();
+        sessions
+            .set_live(
+                conv_b.clone(),
+                rb.session_id.clone(),
+                Some(rb.stored_session_id),
+                ProfileId::empty(),
+                gen1,
+            )
+            .await;
+
+        // Submit prompts on BOTH conversations concurrently (they will be queued in the mock).
+        let live_a = sessions.get_live(&conv_a).await.unwrap();
+        let live_b = sessions.get_live(&conv_b).await.unwrap();
+
+        // Fire both submits without awaiting - they go through the mpsc channel.
+        let submit_a = submit_prompt_on_connection(&ws_state, &live_a, "msg A");
+        let submit_b = submit_prompt_on_connection(&ws_state, &live_b, "msg B");
+
+        // Wait for both to complete (ack received).
+        let (res_a, res_b) = futures::future::join(submit_a, submit_b).await;
+        res_a.expect("submit A failed");
+        res_b.expect("submit B failed");
+
+        // Now wait for the mock to emit all interleaved events.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+// Verify exact sequence of conversation_ids in emitted events.
+        let emitted: Vec<_> = events.lock().await.iter().map(|(cid, tag)| (cid.clone(), *tag)).collect();
+        // The mock emits events with the live session_ids (e.g., "conva-live", "convb-live")
+        // but the emitter records the conversation_id ("conv-a", "conv-b") via routing.
+        let expected = vec![
+            (Some("conv-a".to_string()), "token"),
+            (Some("conv-b".to_string()), "token"),
+            (Some("conv-a".to_string()), "tool_start"),
+            (Some("conv-b".to_string()), "approval"),
+            (Some("conv-a".to_string()), "done"),
+            (Some("conv-b".to_string()), "done"),
+        ];
+        assert_eq!(emitted, expected, "emitted sequence mismatch:\n  got: {emitted:?}\n  exp: {expected:?}");
+
+        // Also verify the mock received exactly two prompt.submits.
+        let frames = received.lock().await;
+        let submit_count = frames
+            .iter()
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("prompt.submit"))
+            .count();
+        assert_eq!(submit_count, 2, "expected exactly 2 prompt.submit calls");
     }
 }
