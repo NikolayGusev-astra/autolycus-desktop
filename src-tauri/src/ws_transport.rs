@@ -8,7 +8,6 @@
 // HTTP transport used — so the frontend stays unchanged.
 //
 
-
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1177,23 +1176,38 @@ pub async fn ensure_ws_connection(
     // GUARD: never set Connected if the socket died during reconciliation or
     // the reader task exited. Verify the connection is still ours and alive.
     // All checks and the final state update are done atomically under runtime lock.
-    {
+    // If interrupted, also send Shutdown to the old reader to stop it cleanly.
+    let shutdown_tx = {
         let mut runtime = ws_state.runtime.lock().await;
-        if interrupted
+        let fail = interrupted
             || runtime.generation != generation
             || runtime.cmd_tx.is_none()
-            || runtime.state == ConnectionState::Disconnected
-        {
+            || runtime.state == ConnectionState::Disconnected;
+        if fail {
             runtime.state = ConnectionState::Disconnected;
-            return Err(WsError::ConnectionLost);
-        }
-
-        // Connected only if all resumes succeeded; otherwise Degraded.
-        runtime.state = if degraded {
-            ConnectionState::Degraded
+            runtime.cmd_tx.take()
         } else {
-            ConnectionState::Connected
-        };
+            // Connected only if all resumes succeeded; otherwise Degraded.
+            runtime.state = if degraded {
+                ConnectionState::Degraded
+            } else {
+                ConnectionState::Connected
+            };
+            None
+        }
+    };
+
+    // If should_fail was true, return error (also send shutdown if we had a sender).
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(WsCommand::Shutdown).await;
+        return Err(WsError::ConnectionLost);
+    } else if interrupted
+        || ws_state.runtime.lock().await.state == ConnectionState::Disconnected
+        || ws_state.runtime.lock().await.cmd_tx.is_none()
+        || ws_state.runtime.lock().await.generation != generation
+    {
+        // No sender to shut down, but we still must fail.
+        return Err(WsError::ConnectionLost);
     }
     tracing::info!(target: "steersman_desktop_lib::ws", generation, degraded, "persistent connection established");
 
@@ -1286,9 +1300,7 @@ async fn reconcile_sessions(
                 // NOT retried — they indicate a persistently incompatible backend.
                 let is_interruption = matches!(
                     e,
-                    WsError::ConnectionLost
-                        | WsError::RpcTimeout
-                        | WsError::OutcomeUnknown { .. }
+                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
                 );
                 if is_interruption {
                     tracing::warn!(
@@ -1643,14 +1655,20 @@ async fn reader_task<S>(
     }
 
     // Generation-guarded cleanup: only clear state if we are still the current generation.
-    let current_gen = ws_state
-        .generation
-        .load(std::sync::atomic::Ordering::Acquire);
-    if current_gen == my_generation {
-        // Atomic cleanup of state + cmd_tx under runtime lock.
+    // ALL checks and modifications must happen under the SAME runtime lock to prevent TOCTOU.
+    let should_suspend = {
         let mut runtime = ws_state.runtime.lock().await;
-        runtime.state = ConnectionState::Disconnected;
-        runtime.cmd_tx = None;
+
+        if runtime.generation != my_generation {
+            false
+        } else {
+            runtime.state = ConnectionState::Disconnected;
+            runtime.cmd_tx = None;
+            true
+        }
+    };
+
+    if should_suspend {
         // Suspend the session registry: durable IDs retained for resume, live
         // IDs cleared so stale events don't route. This is the disconnect half
         // of reconciliation (Phase 1C.3); the reconnect/resume half runs in
@@ -1965,7 +1983,10 @@ mod tests {
         assert!(result.is_err(), "should error when not connected");
         let err = result.unwrap_err();
         // Can be Protocol (old) or ConnectionLost (new) when not connected.
-        assert!(matches!(err, WsError::Protocol(_) | WsError::ConnectionLost));
+        assert!(matches!(
+            err,
+            WsError::Protocol(_) | WsError::ConnectionLost
+        ));
     }
 
     #[tokio::test]
@@ -1973,7 +1994,10 @@ mod tests {
         let ws = Arc::new(WsState::new());
         let result = create_session_on_connection(&ws, "desktop", None).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), WsError::Protocol(_) | WsError::ConnectionLost));
+        assert!(matches!(
+            result.unwrap_err(),
+            WsError::Protocol(_) | WsError::ConnectionLost
+        ));
     }
 
     // ── E2E tests with mock WS backend ─────────────────────────────────────
@@ -2313,7 +2337,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ws_state.runtime.lock().await.state, ConnectionState::Connected);
+        assert_eq!(
+            ws_state.runtime.lock().await.state,
+            ConnectionState::Connected
+        );
     }
 
     // ── Phase 1C.1: Compatibility Handshake tests ────────────────────────────
@@ -2878,7 +2905,10 @@ mod tests {
                             let _ = ws.send(Message::Text(resp.to_string())).await;
                         }
                         "session.resume" => {
-                            let durable = req.get("params").and_then(|p| p.get("session_id")).and_then(|s| s.as_str());
+                            let durable = req
+                                .get("params")
+                                .and_then(|p| p.get("session_id"))
+                                .and_then(|s| s.as_str());
                             match durable {
                                 Some(d) if !d.is_empty() => {
                                     let new_live = format!("{}-resumed", d);
@@ -2912,10 +2942,11 @@ mod tests {
                             submit_buffer.push((id, sid));
 
                             // ACK immediately.
-                            let ack = json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
+                            let ack =
+                                json!({"jsonrpc":"2.0","id":id,"result":{"status":"streaming"}});
                             let _ = ws.send(Message::Text(ack.to_string())).await;
 
-// When we have two submits, emit the interleaved sequence.
+                            // When we have two submits, emit the interleaved sequence.
                             if submit_buffer.len() == 2 {
                                 let (_, sid_a) = submit_buffer[0].clone();
                                 let (_, sid_b) = submit_buffer[1].clone();
@@ -2937,12 +2968,12 @@ mod tests {
 
                                 // Record the expected emit order for verification.
                                 let mut order = emit_order_clone.lock().await;
-                                order.push((Some(sid_a.clone()), "token"));       // A.delta -> Token
-                                order.push((Some(sid_b.clone()), "token"));       // B.delta -> Token
-                                order.push((Some(sid_a.clone()), "tool_start"));  // A.tool_start
-                                order.push((Some(sid_b.clone()), "approval"));    // B.approval_request
-                                order.push((Some(sid_a.clone()), "done"));        // A.complete -> Done
-                                order.push((Some(sid_b.clone()), "done"));        // B.complete -> Done
+                                order.push((Some(sid_a.clone()), "token")); // A.delta -> Token
+                                order.push((Some(sid_b.clone()), "token")); // B.delta -> Token
+                                order.push((Some(sid_a.clone()), "tool_start")); // A.tool_start
+                                order.push((Some(sid_b.clone()), "approval")); // B.approval_request
+                                order.push((Some(sid_a.clone()), "done")); // A.complete -> Done
+                                order.push((Some(sid_b.clone()), "done")); // B.complete -> Done
                             }
                         }
                         _ => {}
@@ -3531,8 +3562,13 @@ mod tests {
         // Now wait for the mock to emit all interleaved events.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-// Verify exact sequence of conversation_ids in emitted events.
-        let emitted: Vec<_> = events.lock().await.iter().map(|(cid, tag)| (cid.clone(), *tag)).collect();
+        // Verify exact sequence of conversation_ids in emitted events.
+        let emitted: Vec<_> = events
+            .lock()
+            .await
+            .iter()
+            .map(|(cid, tag)| (cid.clone(), *tag))
+            .collect();
         // The mock emits events with the live session_ids (e.g., "conva-live", "convb-live")
         // but the emitter records the conversation_id ("conv-a", "conv-b") via routing.
         let expected = vec![
@@ -3543,7 +3579,10 @@ mod tests {
             (Some("conv-a".to_string()), "done"),
             (Some("conv-b".to_string()), "done"),
         ];
-        assert_eq!(emitted, expected, "emitted sequence mismatch:\n  got: {emitted:?}\n  exp: {expected:?}");
+        assert_eq!(
+            emitted, expected,
+            "emitted sequence mismatch:\n  got: {emitted:?}\n  exp: {expected:?}"
+        );
 
         // Also verify the mock received exactly two prompt.submits.
         let frames = received.lock().await;
@@ -3602,7 +3641,7 @@ mod tests {
         // We'll use a custom mock instead of the reconnect one.
         // Instead, let's test directly via reconcile_sessions with a mock that returns Protocol error.
         // For this test, we'll just verify the error classification logic.
-        
+
         // Actually, the Protocol error comes from deserialization failure in call_rpc.
         // The easiest way to test is to create a mock that returns invalid JSON for session.resume.
         // But that's complex. Instead, let's test the classification logic directly.
@@ -3610,20 +3649,32 @@ mod tests {
             WsError::Protocol("malformed response".into()),
             WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
         );
-        assert!(!is_interruption, "Protocol error must NOT be treated as interruption");
+        assert!(
+            !is_interruption,
+            "Protocol error must NOT be treated as interruption"
+        );
 
         // Verify that a genuine connection loss IS classified as interruption.
         let is_interruption2 = matches!(
             WsError::ConnectionLost,
             WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
         );
-        assert!(is_interruption2, "ConnectionLost must be treated as interruption");
+        assert!(
+            is_interruption2,
+            "ConnectionLost must be treated as interruption"
+        );
 
         // Verify OutcomeUnknown is interruption.
         let is_interruption3 = matches!(
-            WsError::OutcomeUnknown { method: "session.resume".into(), cause: InterruptionCause::Timeout },
+            WsError::OutcomeUnknown {
+                method: "session.resume".into(),
+                cause: InterruptionCause::Timeout
+            },
             WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
         );
-        assert!(is_interruption3, "OutcomeUnknown must be treated as interruption");
+        assert!(
+            is_interruption3,
+            "OutcomeUnknown must be treated as interruption"
+        );
     }
 }
