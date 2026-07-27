@@ -38,11 +38,24 @@ pub struct ProfileId(pub String);
 /// Runtime identity: Local Hermes, Remote Hermes, or SSH-tunneled Hermes.
 /// Bindings are scoped to a specific runtime so Local/Remote/SSH sessions
 /// don't mix in the registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub type RemoteInstanceId = String;
+pub type SshTunnelId = String;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeKey {
     Local,
-    Remote,
-    Ssh,
+    Remote(RemoteInstanceId),
+    Ssh(SshTunnelId),
+}
+
+impl fmt::Debug for RuntimeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => f.write_str("Local"),
+            Self::Remote(_) => f.write_str("Remote(<redacted>)"),
+            Self::Ssh(_) => f.write_str("Ssh(<redacted>)"),
+        }
+    }
 }
 
 impl ProfileId {
@@ -160,18 +173,20 @@ impl SessionRegistry {
         // live ID out of the immutable borrow before mutating the reverse map.
         let old_live_to_remove = inner
             .by_conversation
-            .get(&(runtime_key, conversation_id.clone()))
+            .get(&(runtime_key.clone(), conversation_id.clone()))
             .and_then(|old| old.live_session_id.clone())
             .filter(|old_live| old_live != &live_session_id);
         if let Some(old_live) = old_live_to_remove {
-            inner.by_live_session.remove(&(runtime_key, old_live));
+            inner
+                .by_live_session
+                .remove(&(runtime_key.clone(), old_live));
         }
         inner.by_live_session.insert(
-            (runtime_key, live_session_id.clone()),
+            (runtime_key.clone(), live_session_id.clone()),
             conversation_id.clone(),
         );
         inner.by_conversation.insert(
-            (runtime_key, conversation_id.clone()),
+            (runtime_key.clone(), conversation_id.clone()),
             SessionBinding {
                 conversation_id,
                 live_session_id: Some(live_session_id),
@@ -253,7 +268,7 @@ impl SessionRegistry {
     pub async fn suspend_all(&self, runtime_key: RuntimeKey) {
         let mut inner = self.inner.lock().await;
         for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
-            if *binding_runtime_key == runtime_key {
+            if binding_runtime_key == &runtime_key {
                 b.state = SessionState::Suspended;
             }
         }
@@ -262,7 +277,7 @@ impl SessionRegistry {
         let to_remove: Vec<(RuntimeKey, String)> = inner
             .by_live_session
             .iter()
-            .filter(|((binding_runtime_key, _), _)| *binding_runtime_key == runtime_key)
+            .filter(|((binding_runtime_key, _), _)| binding_runtime_key == &runtime_key)
             .map(|(live, _)| live.clone())
             .collect();
         for live in to_remove {
@@ -283,10 +298,10 @@ impl SessionRegistry {
         // Collect the stale live IDs first to avoid borrowing inner twice.
         let mut stale_lives: Vec<(RuntimeKey, String)> = Vec::new();
         for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
-            if *binding_runtime_key == runtime_key && b.connection_generation < current_generation {
+            if binding_runtime_key == &runtime_key && b.connection_generation < current_generation {
                 b.state = SessionState::Suspended;
                 if let Some(live) = b.live_session_id.take() {
-                    stale_lives.push((runtime_key, live));
+                    stale_lives.push((runtime_key.clone(), live));
                 }
             }
         }
@@ -305,7 +320,7 @@ impl SessionRegistry {
         let mut inner = self.inner.lock().await;
         let mut stale_lives: Vec<(RuntimeKey, String)> = Vec::new();
         for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
-            if *binding_runtime_key != runtime_key {
+            if binding_runtime_key != &runtime_key {
                 continue;
             }
             let should_suspend = match &b.state {
@@ -318,7 +333,7 @@ impl SessionRegistry {
             if should_suspend {
                 b.state = SessionState::Suspended;
                 if let Some(live) = b.live_session_id.take() {
-                    stale_lives.push((runtime_key, live));
+                    stale_lives.push((runtime_key.clone(), live));
                 }
             }
         }
@@ -341,7 +356,7 @@ impl SessionRegistry {
         let mut inner = self.inner.lock().await;
         let mut out = Vec::new();
         for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
-            if *binding_runtime_key == runtime_key && b.state == SessionState::Suspended {
+            if binding_runtime_key == &runtime_key && b.state == SessionState::Suspended {
                 if let Some(stored) = b.stored_session_id.clone() {
                     if !stored.is_empty() {
                         b.state = SessionState::Resuming { attempt_generation };
@@ -409,10 +424,12 @@ impl SessionRegistry {
         let mut inner = self.inner.lock().await;
         if let Some(b) = inner
             .by_conversation
-            .remove(&(runtime_key, conversation_id.clone()))
+            .remove(&(runtime_key.clone(), conversation_id.clone()))
         {
             if let Some(live) = &b.live_session_id {
-                inner.by_live_session.remove(&(runtime_key, live.clone()));
+                inner
+                    .by_live_session
+                    .remove(&(runtime_key.clone(), live.clone()));
             }
             Some(b)
         } else {
@@ -427,6 +444,15 @@ mod tests {
 
     fn reg() -> Arc<SessionRegistry> {
         SessionRegistry::new()
+    }
+
+    #[test]
+    fn runtime_key_debug_redacts_instance_ids() {
+        let remote = format!("{:?}", RuntimeKey::Remote("remote-secret".into()));
+        let ssh = format!("{:?}", RuntimeKey::Ssh("ssh-secret".into()));
+
+        assert_eq!(remote, "Remote(<redacted>)");
+        assert_eq!(ssh, "Ssh(<redacted>)");
     }
 
     /// Test 6: Live and durable IDs do not mix. set_stored does not overwrite
@@ -596,7 +622,8 @@ mod tests {
     async fn runtimes_isolate_identical_conversation_and_live_ids() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        for runtime_key in [RuntimeKey::Local, RuntimeKey::Remote] {
+        let remote = RuntimeKey::Remote("test-instance".into());
+        for runtime_key in [RuntimeKey::Local, remote.clone()] {
             r.set_live(
                 conv.clone(),
                 "live-1".into(),
@@ -614,14 +641,14 @@ mod tests {
             Some(conv.clone())
         );
         assert_eq!(
-            r.route_event("live-1", RuntimeKey::Remote).await,
+            r.route_event("live-1", remote.clone()).await,
             Some(conv.clone())
         );
 
         r.suspend_generation(1, RuntimeKey::Local).await;
         assert_eq!(r.route_event("live-1", RuntimeKey::Local).await, None);
         assert_eq!(
-            r.route_event("live-1", RuntimeKey::Remote).await,
+            r.route_event("live-1", remote.clone()).await,
             Some(conv.clone())
         );
         assert_eq!(
@@ -630,9 +657,6 @@ mod tests {
                 .len(),
             1
         );
-        assert!(r
-            .take_suspended_for_resume(2, RuntimeKey::Remote)
-            .await
-            .is_empty());
+        assert!(r.take_suspended_for_resume(2, remote).await.is_empty());
     }
 }

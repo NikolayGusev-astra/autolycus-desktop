@@ -583,11 +583,7 @@ async fn send_via_ws_persistent(
         return Err("Remote session token is empty. Set it in Settings → Connection.".to_string());
     }
     let base = remote_url.trim_end_matches('/').trim_end_matches("/api/ws");
-    let ws_url = format!(
-        "{}/api/ws?token={}",
-        crate::ws_transport::to_ws_url(base),
-        token
-    );
+    let ws_url = crate::ws_transport::build_ws_url(base, token).map_err(|e| e.to_string())?;
 
     // Ensure the persistent connection is open (idempotent).
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
@@ -614,7 +610,10 @@ async fn send_via_ws_persistent(
     let session_id =
         if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
             let conv = crate::session_registry::ConversationId::new(conv_str);
-            match sessions.get_live(&conv, remote_ws_state.runtime_key).await {
+            match sessions
+                .get_live(&conv, remote_ws_state.runtime_key.clone())
+                .await
+            {
                 Some(live) => live,
                 None => {
                     // No live ID for this conversation yet — create one and register.
@@ -636,7 +635,7 @@ async fn send_via_ws_persistent(
                             Some(result.stored_session_id),
                             profile,
                             generation,
-                            remote_ws_state.runtime_key,
+                            remote_ws_state.runtime_key.clone(),
                         )
                         .await;
                     result.session_id
@@ -650,7 +649,7 @@ async fn send_via_ws_persistent(
             let synthetic_conv =
                 crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
             if sessions
-                .route_event(sid, remote_ws_state.runtime_key)
+                .route_event(sid, remote_ws_state.runtime_key.clone())
                 .await
                 .is_none()
             {
@@ -661,7 +660,7 @@ async fn send_via_ws_persistent(
                         None,
                         crate::session_registry::ProfileId::empty(),
                         generation,
-                        remote_ws_state.runtime_key,
+                        remote_ws_state.runtime_key.clone(),
                     )
                     .await;
             }
@@ -688,7 +687,7 @@ async fn send_via_ws_persistent(
                     Some(result.stored_session_id),
                     profile,
                     generation,
-                    remote_ws_state.runtime_key,
+                    remote_ws_state.runtime_key.clone(),
                 )
                 .await;
             result.session_id
@@ -725,9 +724,8 @@ async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, Stri
              and HERMES_DASHBOARD_SESSION_TOKEN env is unset."
                 .to_string()
         })?;
-    // The session token is base64url (secrets.token_urlsafe in upstream),
-    // whose alphabet [A-Za-z0-9_-] needs no percent-encoding in a query string.
-    Ok(format!("ws://127.0.0.1:{}/api/ws?token={}", port, token))
+    crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
+        .map_err(|e| e.to_string())
 }
 
 /// ADR-006: Send a chat message over the PERSISTENT local WS connection.

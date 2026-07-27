@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 
 use crate::chat::{parse_ws_message, ChatEvent};
 use crate::hermes_protocol::{
@@ -42,6 +43,50 @@ pub fn to_ws_url(url: &str) -> String {
         // Already ws:// / wss:// or some other scheme — pass through unchanged.
         url.to_string()
     }
+}
+
+/// Authentication material used when connecting to a Hermes gateway.
+#[derive(Clone, Debug)]
+pub struct GatewayAuth {
+    pub api_key: String,
+}
+
+impl GatewayAuth {
+    pub fn redacted(&self) -> String {
+        "***".to_string()
+    }
+}
+
+/// Build a gateway WebSocket URL without interpolating auth into the URL text.
+pub fn build_ws_url(base: &str, token: &str) -> Result<String, WsError> {
+    let mut url = Url::parse(&to_ws_url(base))
+        .map_err(|error| WsError::Protocol(format!("invalid WebSocket URL: {}", error)))?;
+
+    let path = url.path().trim_end_matches('/');
+    if !path.ends_with("/api/ws") {
+        url.set_path(&format!("{}/api/ws", path));
+    }
+    url.set_query(None);
+    url.query_pairs_mut().append_pair("token", token);
+
+    Ok(url.into())
+}
+
+/// Return a diagnostic-safe WebSocket URL with its token query parameter removed.
+pub fn redacted_ws_url(ws_url: &str) -> String {
+    let Ok(mut url) = Url::parse(ws_url) else {
+        return "<invalid WebSocket URL>".to_string();
+    };
+    let retained_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "token")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !retained_pairs.is_empty() {
+        url.query_pairs_mut().extend_pairs(retained_pairs);
+    }
+    url.into()
 }
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -268,7 +313,8 @@ async fn send_message_via_ws_impl(
     source: &str,
     buffered: bool,
 ) -> Result<(String, String), WsError> {
-    tracing::info!(target: "steersman_desktop_lib::ws", ws_url, source, buffered, "connecting");
+    let redacted_url = redacted_ws_url(ws_url);
+    tracing::info!(target: "steersman_desktop_lib::ws", ws_url = %redacted_url, source, buffered, "connecting");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| WsError::Connect(e.to_string()))?;
@@ -978,7 +1024,7 @@ pub struct ConnectionRuntime {
     pub state: ConnectionState,
     /// Command sender for the reader task. None when disconnected.
     pub cmd_tx: Option<tokio::sync::mpsc::Sender<WsCommand>>,
-    /// WebSocket URL for this connection.
+    /// Diagnostic-safe WebSocket URL for this connection.
     pub ws_url: String,
 }
 
@@ -1027,9 +1073,10 @@ impl GatewayClient {
         ws_url: impl Into<String>,
     ) -> Self {
         let ws_url = ws_url.into();
+        let redacted_url = redacted_ws_url(&ws_url);
         Self {
             runtime: Arc::new(tokio::sync::Mutex::new(ConnectionRuntime {
-                ws_url: ws_url.clone(),
+                ws_url: redacted_url,
                 ..ConnectionRuntime::default()
             })),
             generation: AtomicU64::new(1),
@@ -1038,7 +1085,7 @@ impl GatewayClient {
                 crate::hermes_protocol::RuntimeCompatibility::Unknown,
             ),
             runtime_key,
-            endpoint: Box::new(StaticRuntimeEndpoint(ws_url)),
+            endpoint: Box::new(StaticRuntimeEndpoint(redacted_ws_url(&ws_url))),
         }
     }
 }
@@ -1100,7 +1147,7 @@ impl StateLike for GatewayClient {
         &self.compatibility
     }
     fn runtime_key(&self) -> crate::session_registry::RuntimeKey {
-        self.runtime_key
+        self.runtime_key.clone()
     }
 }
 
@@ -1194,12 +1241,30 @@ pub async fn ensure_ws_connection<State>(
 where
     State: StateLike,
 {
-    // Fast path: already connected (no lock contention on connect_lock).
-    {
-        let runtime = ws_state.runtime().lock().await;
-        if runtime.state == ConnectionState::Connected {
+    // Fast path: keep a live connection only when it belongs to the requested
+    // endpoint. `ConnectionRuntime::ws_url` is always redacted, so the token
+    // cannot make an otherwise identical endpoint look different.
+    let redacted_url = redacted_ws_url(ws_url);
+    let shutdown_tx = {
+        let mut runtime = ws_state.runtime().lock().await;
+        if runtime.state != ConnectionState::Connected {
+            None
+        } else if runtime.ws_url == redacted_url {
             return Ok(());
+        } else {
+            runtime.state = ConnectionState::Disconnected;
+            // Invalidate the old reader before its asynchronous cleanup runs.
+            // Otherwise it could reset the replacement connection while it is
+            // still handshaking.
+            runtime.generation = ws_state.generation().fetch_add(1, Ordering::Release) + 1;
+            runtime.cmd_tx.take()
         }
+    };
+
+    // Stop the old reader before serializing the new connection attempt. Its
+    // generation-guarded cleanup cannot clear a newer connection's state.
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(WsCommand::Shutdown).await;
     }
 
     // Serialize concurrent connect attempts. The first caller does the actual
@@ -1224,7 +1289,7 @@ where
     }
 
     // Connect.
-    tracing::info!(target: "steersman_desktop_lib::ws", ws_url, "opening persistent connection");
+    tracing::info!(target: "steersman_desktop_lib::ws", ws_url = %redacted_url, "opening persistent connection");
     let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
         Ok(result) => result,
         Err(e) => {
@@ -1254,10 +1319,10 @@ where
     // Bump generation before storing cmd_tx.
     let generation = ws_state.generation().fetch_add(1, Ordering::Release) + 1;
 
-    // Store ws_url, cmd_tx, and generation atomically under runtime lock.
+    // Store the redacted URL, cmd_tx, and generation atomically under runtime lock.
     {
         let mut runtime = ws_state.runtime().lock().await;
-        runtime.ws_url = ws_url.to_string();
+        runtime.ws_url = redacted_url;
         runtime.cmd_tx = Some(cmd_tx);
         runtime.generation = generation;
     }
@@ -1392,7 +1457,7 @@ where
 {
     let runtime_key = ws_state.runtime_key();
     let to_resume = sessions
-        .take_suspended_for_resume(generation, runtime_key)
+        .take_suspended_for_resume(generation, runtime_key.clone())
         .await;
     if to_resume.is_empty() {
         return ReconciliationReport::default();
@@ -1415,7 +1480,9 @@ where
                 stored_id = %durable.stored_session_id,
                 "reconciliation stopped due to prior connection loss; returning to Suspended"
             );
-            sessions.return_to_suspended(&conv, runtime_key).await;
+            sessions
+                .return_to_suspended(&conv, runtime_key.clone())
+                .await;
             report.interrupted.push(conv);
             continue;
         }
@@ -1428,7 +1495,9 @@ where
                         stored_id = %durable.stored_session_id,
                         "resume returned empty live session_id"
                     );
-                    sessions.mark_resume_failed(&conv, runtime_key).await;
+                    sessions
+                        .mark_resume_failed(&conv, runtime_key.clone())
+                        .await;
                     report.failed.push(conv);
                     continue;
                 }
@@ -1448,7 +1517,7 @@ where
                         Some(new_stored),
                         durable.profile.clone(),
                         generation,
-                        runtime_key,
+                        runtime_key.clone(),
                     )
                     .await;
                 tracing::info!(
@@ -1478,7 +1547,9 @@ where
                         error = %e,
                         "session.resume interrupted; returning to Suspended for retry"
                     );
-                    sessions.return_to_suspended(&conv, runtime_key).await;
+                    sessions
+                        .return_to_suspended(&conv, runtime_key.clone())
+                        .await;
                     report.interrupted.push(conv);
                     // Mark that the connection is lost so subsequent resumes
                     // in this reconciliation are also marked interrupted.
@@ -1491,7 +1562,9 @@ where
                         error = %e,
                         "session.resume failed; marking ResumeFailed"
                     );
-                    sessions.mark_resume_failed(&conv, runtime_key).await;
+                    sessions
+                        .mark_resume_failed(&conv, runtime_key.clone())
+                        .await;
                     report.failed.push(conv);
                 }
             }
@@ -1713,7 +1786,7 @@ async fn reader_task<S, State>(
                                             routed_event.session_id.as_deref(),
                                         ) {
                                             (Some(sessions), Some(live_sid)) if !live_sid.is_empty() => {
-                                                match sessions.route_event(live_sid, runtime_key).await {
+                                                match sessions.route_event(live_sid, runtime_key.clone()).await {
                                                     Some(conv) => Some(conv.0),
                                                     None => {
                                                         // Unknown session-scoped event: log and DROP.
@@ -1743,9 +1816,9 @@ async fn reader_task<S, State>(
                                                 (&sessions, &routed_event.session_id)
                                         {
                                             if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
-                                                if let Some(conv) = sessions.route_event(live_sid, runtime_key).await {
+                                                if let Some(conv) = sessions.route_event(live_sid, runtime_key.clone()).await {
                                                     sessions
-                                                        .set_stored(&conv, runtime_key, p.stored_session_id.clone())
+                                                        .set_stored(&conv, runtime_key.clone(), p.stored_session_id.clone())
                                                         .await;
                                                 }
                                             }
@@ -1914,6 +1987,26 @@ where
 mod tests {
     use super::*;
     use crate::session_registry::RuntimeKey;
+
+    #[test]
+    fn redacted_ws_url_removes_token() {
+        let token = "token with spaces&symbols";
+        let ws_url = build_ws_url("https://gateway.example.test", token).unwrap();
+        let redacted = redacted_ws_url(&ws_url);
+
+        assert!(!redacted.contains(token));
+        assert!(!redacted.contains("token="));
+        assert_eq!(redacted, "wss://gateway.example.test/api/ws");
+    }
+
+    #[test]
+    fn gateway_auth_redacts_api_key() {
+        let auth = GatewayAuth {
+            api_key: "secret".to_string(),
+        };
+
+        assert_eq!(auth.redacted(), "***");
+    }
 
     // RED: these tests assert that the WS transport returns typed WsError
     // variants, not bare Strings. Currently send_message_via_ws returns
@@ -2333,6 +2426,113 @@ mod tests {
         )
     }
 
+    /// A compatible backend that keeps three WebSocket connections alive at
+    /// once. The isolation test uses it to exercise multiple runtime clients
+    /// against the same endpoint.
+    async fn start_multi_runtime_mock_backend() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let ready = json!({
+                        "jsonrpc": "2.0", "method": "event",
+                        "params": {"type": "gateway.ready", "payload": {}}
+                    });
+                    let _ = ws.send(Message::Text(ready.to_string())).await;
+
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let Ok(request) = serde_json::from_str::<Value>(&text) else {
+                            continue;
+                        };
+                        let id = request.get("id").and_then(Value::as_u64).unwrap_or(0);
+                        match request.get("method").and_then(Value::as_str) {
+                            Some("session.create") => {
+                                let response = json!({
+                                    "jsonrpc": "2.0", "id": id,
+                                    "result": {
+                                        "session_id": "probe-sess",
+                                        "stored_session_id": "probe-sess",
+                                        "message_count": 0,
+                                        "messages": [],
+                                        "info": {"desktop_contract": 4}
+                                    }
+                                });
+                                let _ = ws.send(Message::Text(response.to_string())).await;
+                            }
+                            Some("session.close") => {
+                                let response = json!({"jsonrpc": "2.0", "id": id, "result": {}});
+                                let _ = ws.send(Message::Text(response.to_string())).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+        });
+
+        format!("ws://127.0.0.1:{}/api/ws?token=test", port)
+    }
+
+    /// Start one minimal compatible backend and report when its client reader
+    /// releases the socket. Used to prove endpoint rotation shuts down the old
+    /// reader before establishing the replacement connection.
+    async fn start_rotation_mock_backend() -> (String, oneshot::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (reader_exited_tx, reader_exited_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let ready = json!({
+                "jsonrpc": "2.0", "method": "event",
+                "params": {"type": "gateway.ready", "payload": {}}
+            });
+            let _ = ws.send(Message::Text(ready.to_string())).await;
+
+            while let Some(Ok(msg)) = ws.next().await {
+                let Message::Text(text) = msg else {
+                    continue;
+                };
+                let Ok(request) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let id = request.get("id").and_then(Value::as_u64).unwrap_or(0);
+                match request.get("method").and_then(Value::as_str) {
+                    Some("session.create") => {
+                        let response = json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "session_id": "probe-sess",
+                                "stored_session_id": "probe-sess",
+                                "message_count": 0,
+                                "messages": [],
+                                "info": {"desktop_contract": 4}
+                            }
+                        });
+                        let _ = ws.send(Message::Text(response.to_string())).await;
+                    }
+                    Some("session.close") => {
+                        let response = json!({"jsonrpc": "2.0", "id": id, "result": {}});
+                        let _ = ws.send(Message::Text(response.to_string())).await;
+                    }
+                    _ => {}
+                }
+            }
+
+            let _ = reader_exited_tx.send(());
+        });
+
+        (
+            format!("ws://127.0.0.1:{}/api/ws?token=test", port),
+            reader_exited_rx,
+        )
+    }
+
     type MockEvents = Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>>;
 
     /// Build an EmitFn that records (conversation_id, tag) into `events`.
@@ -2373,17 +2573,43 @@ mod tests {
         (emit_fn, events)
     }
 
-    async fn wait_connected(ws_state: &WsState, timeout_ms: u64) {
+    fn make_gateway_for_runtime(key: RuntimeKey, ws_url: impl Into<String>) -> Arc<GatewayClient> {
+        let ws_url = ws_url.into();
+        let runtime_key = match key {
+            RuntimeKey::Local => RuntimeKey::Local,
+            RuntimeKey::Remote(_) => RuntimeKey::Remote("test-instance".into()),
+            RuntimeKey::Ssh(_) => RuntimeKey::Ssh("test-tunnel".into()),
+        };
+        Arc::new(GatewayClient::new(runtime_key, ws_url))
+    }
+
+    async fn wait_connected<State: StateLike>(ws_state: &State, timeout_ms: u64) {
         let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
         tokio::pin!(deadline);
         loop {
-            if let Ok(rt) = ws_state.runtime.try_lock() {
+            if let Ok(rt) = ws_state.runtime().try_lock() {
                 if rt.state == ConnectionState::Connected {
                     return;
                 }
             }
             if deadline.is_elapsed() {
                 panic!("not Connected within {}ms", timeout_ms);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_disconnected<State: StateLike>(ws_state: &State, timeout_ms: u64) {
+        let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+        tokio::pin!(deadline);
+        loop {
+            if let Ok(rt) = ws_state.runtime().try_lock() {
+                if rt.state == ConnectionState::Disconnected {
+                    return;
+                }
+            }
+            if deadline.is_elapsed() {
+                panic!("not Disconnected within {}ms", timeout_ms);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -2518,6 +2744,197 @@ mod tests {
             ws_state.runtime.lock().await.state,
             ConnectionState::Connected
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_connection_rotates_when_gateway_endpoint_changes() {
+        let (url_a, reader_a_exited) = start_rotation_mock_backend().await;
+        let (url_b, _reader_b_exited) = start_rotation_mock_backend().await;
+        let gateway = Arc::new(GatewayClient::new(
+            crate::session_registry::RuntimeKey::Remote("rotation-test".into()),
+            String::new(),
+        ));
+
+        let (emit_a, _) = mock_emitter();
+        ensure_ws_connection(&url_a, emit_a, &gateway, None)
+            .await
+            .expect("connect URL-A");
+        let first_generation = gateway.generation.load(Ordering::Acquire);
+
+        let (emit_b, _) = mock_emitter();
+        ensure_ws_connection(&url_b, emit_b, &gateway, None)
+            .await
+            .expect("connect URL-B");
+
+        let runtime = gateway.runtime.lock().await;
+        assert_eq!(runtime.state, ConnectionState::Connected);
+        assert_eq!(runtime.ws_url, redacted_ws_url(&url_b));
+        assert!(
+            gateway.generation.load(Ordering::Acquire) > first_generation,
+            "URL-B must establish a new connection generation"
+        );
+        drop(runtime);
+
+        tokio::time::timeout(Duration::from_secs(1), reader_a_exited)
+            .await
+            .expect("old reader did not exit")
+            .expect("old backend did not observe the reader exit");
+    }
+
+    #[tokio::test]
+    async fn gateway_handshake_supports_each_runtime_key() {
+        for key in [
+            RuntimeKey::Local,
+            RuntimeKey::Remote("test-instance".into()),
+            RuntimeKey::Ssh("test-tunnel".into()),
+        ] {
+            let (ws_url, _) = start_mock_backend(4).await;
+            let gateway = make_gateway_for_runtime(key.clone(), &ws_url);
+            let (emit_fn, _) = mock_emitter();
+
+            ensure_ws_connection(&ws_url, emit_fn, &gateway, None)
+                .await
+                .expect("handshake must connect");
+            wait_connected(&gateway, 3000).await;
+
+            assert_eq!(
+                gateway.runtime.lock().await.state,
+                ConnectionState::Connected
+            );
+            assert_eq!(gateway.runtime_key(), key);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_reconnects_for_each_runtime_key() {
+        for key in [
+            RuntimeKey::Local,
+            RuntimeKey::Remote("test-instance".into()),
+            RuntimeKey::Ssh("test-tunnel".into()),
+        ] {
+            let (ws_url, _, disconnect_signal, _) = start_reconnect_mock_backend().await;
+            let gateway = make_gateway_for_runtime(key.clone(), &ws_url);
+            let (emit_fn, _) = mock_emitter();
+
+            ensure_ws_connection(&ws_url, emit_fn, &gateway, None)
+                .await
+                .expect("initial connection must succeed");
+            wait_connected(&gateway, 3000).await;
+
+            disconnect_signal.notify_waiters();
+            wait_disconnected(&gateway, 3000).await;
+
+            let (reconnect_emit_fn, _) = mock_emitter();
+            ensure_ws_connection(&ws_url, reconnect_emit_fn, &gateway, None)
+                .await
+                .expect("reconnection must succeed");
+            wait_connected(&gateway, 3000).await;
+            assert_eq!(gateway.runtime_key(), key);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_clients_isolate_sessions_by_runtime_key() {
+        use crate::session_registry::{ConversationId, ProfileId, SessionState};
+
+        let ws_url = start_multi_runtime_mock_backend().await;
+        let sessions = crate::session_registry::SessionRegistry::new();
+        let local = make_gateway_for_runtime(RuntimeKey::Local, &ws_url);
+        let remote = make_gateway_for_runtime(RuntimeKey::Remote("ignored".into()), &ws_url);
+        let ssh = make_gateway_for_runtime(RuntimeKey::Ssh("ignored".into()), &ws_url);
+
+        for gateway in [&local, &remote, &ssh] {
+            let (emit_fn, _) = mock_emitter();
+            ensure_ws_connection(&ws_url, emit_fn, gateway, Some(sessions.clone()))
+                .await
+                .expect("all runtime clients must connect");
+            wait_connected(gateway, 3000).await;
+        }
+
+        let conversation = ConversationId::new("shared-conversation");
+        for gateway in [&local, &remote, &ssh] {
+            let key = gateway.runtime_key();
+            let generation = gateway.generation.load(Ordering::Acquire);
+            sessions
+                .set_live(
+                    conversation.clone(),
+                    "shared-live-session".into(),
+                    Some("shared-stored-session".into()),
+                    ProfileId::empty(),
+                    generation,
+                    key,
+                )
+                .await;
+        }
+
+        assert_eq!(
+            sessions
+                .route_event(
+                    "shared-live-session",
+                    RuntimeKey::Remote("test-instance".into())
+                )
+                .await,
+            Some(conversation.clone())
+        );
+        assert_eq!(
+            sessions
+                .route_event("shared-live-session", RuntimeKey::Ssh("test-tunnel".into()))
+                .await,
+            Some(conversation.clone())
+        );
+
+        let shutdown_tx = local
+            .runtime
+            .lock()
+            .await
+            .cmd_tx
+            .clone()
+            .expect("Local client must have a reader task");
+        shutdown_tx.send(WsCommand::Shutdown).await.unwrap();
+        wait_disconnected(&local, 3000).await;
+
+        assert_eq!(
+            sessions
+                .get(&conversation, RuntimeKey::Local)
+                .await
+                .unwrap()
+                .state,
+            SessionState::Suspended
+        );
+        for key in [
+            RuntimeKey::Remote("test-instance".into()),
+            RuntimeKey::Ssh("test-tunnel".into()),
+        ] {
+            assert_eq!(
+                sessions.get(&conversation, key).await.unwrap().state,
+                SessionState::Active
+            );
+        }
+        assert_eq!(
+            remote.runtime.lock().await.state,
+            ConnectionState::Connected
+        );
+        assert_eq!(ssh.runtime.lock().await.state, ConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn gateway_preserves_remote_runtime_key_through_connection_lifecycle() {
+        let (ws_url, _) = start_mock_backend(4).await;
+        let remote_key = RuntimeKey::Remote("test-instance".into());
+        let gateway = make_gateway_for_runtime(remote_key.clone(), &ws_url);
+        assert_eq!(gateway.runtime_key(), remote_key);
+
+        let (emit_fn, _) = mock_emitter();
+        ensure_ws_connection(&ws_url, emit_fn, &gateway, None)
+            .await
+            .expect("Remote client must connect");
+        wait_connected(&gateway, 3000).await;
+
+        assert_eq!(
+            gateway.runtime.lock().await.state,
+            ConnectionState::Connected
+        );
+        assert_eq!(gateway.runtime_key(), remote_key);
     }
 
     // ── Phase 1C.1: Compatibility Handshake tests ────────────────────────────

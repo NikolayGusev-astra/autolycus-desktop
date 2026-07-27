@@ -55,7 +55,10 @@ pub use profiles::ProfileInfo;
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
-pub use ws_transport::{ensure_ws_connection, submit_prompt_on_connection, to_ws_url, WsState};
+pub use ws_transport::{
+    build_ws_url, ensure_ws_connection, redacted_ws_url, submit_prompt_on_connection, to_ws_url,
+    GatewayAuth, WsState,
+};
 
 // ── App State ─────────────────────────────────────────────────────────────
 
@@ -90,11 +93,11 @@ impl AppState {
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
             remote_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
-                session_registry::RuntimeKey::Remote,
+                session_registry::RuntimeKey::Remote("default-remote".into()),
                 String::new(),
             )),
             ssh_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
-                session_registry::RuntimeKey::Ssh,
+                session_registry::RuntimeKey::Ssh("default-ssh".into()),
                 String::new(),
             )),
             sessions: session_registry::SessionRegistry::new(),
@@ -1166,7 +1169,8 @@ async fn generate_smart_briefing_cmd(
     let token = gateway::get_gateway_session_token(&state.gateway, None)
         .await
         .ok_or("No session token for briefing")?;
-    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
+    let ws_url = crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
+        .map_err(|e| e.to_string())?;
 
     // Send via WS — streaming tokens arrive as chat_event (frontend ChatView
     // picks them up if visible). The buffered variant also accumulates the
@@ -1402,8 +1406,12 @@ async fn generate_meeting_briefing_cmd(
         .await
         .ok_or("No session token for meeting briefing")?;
     eprintln!("[meeting_briefing] Got session token");
-    let ws_url = format!("ws://127.0.0.1:{}/api/ws?token={}", port, token);
-    eprintln!("[meeting_briefing] WS URL: {}", ws_url);
+    let ws_url = crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
+        .map_err(|e| e.to_string())?;
+    eprintln!(
+        "[meeting_briefing] WS URL: {}",
+        crate::ws_transport::redacted_ws_url(&ws_url)
+    );
 
     let (real_session_id, briefing_text) = crate::ws_transport::send_message_via_ws_buffered(
         &ws_url,
