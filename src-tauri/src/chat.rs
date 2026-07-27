@@ -552,6 +552,7 @@ pub fn parse_ws_message(raw: &str) -> Option<ChatEvent> {
 /// `http://` → `ws://`, `https://` → `wss://`. Already-ws URLs pass through
 /// unchanged. Used by the Remote and SSH branches to talk to a remote
 /// `hermes serve` over the same /api/ws transport as Local.
+#[allow(dead_code)]
 pub fn to_ws_url(url: &str) -> String {
     let url = url.trim();
     if let Some(rest) = url.strip_prefix("https://") {
