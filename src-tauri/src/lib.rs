@@ -55,6 +55,12 @@ pub use profiles::ProfileInfo;
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
+pub use ws_transport::{
+    create_session_on_connection_remote, create_session_on_connection_ssh,
+    ensure_remote_ws_connection, ensure_ssh_ws_connection, ensure_ws_connection,
+    submit_prompt_on_connection, submit_prompt_on_connection_remote,
+    submit_prompt_on_connection_ssh, to_ws_url, RemoteWsState, SshWsState, WsState,
+};
 
 // ── App State ─────────────────────────────────────────────────────────────
 
@@ -68,9 +74,12 @@ pub struct AppState {
     pub auth: auth::AuthState,
     /// ADR-006: persistent WS connection to the local Hermes backend. One
     /// long-lived socket + reader task for the entire app lifetime, replacing
-    /// connect-per-message. Remote/SSH modes bypass this (they use their own
-    /// transport path in chat.rs).
+    /// connect-per-message. Remote/SSH modes use their own persistent states.
     pub ws: std::sync::Arc<ws_transport::WsState>,
+    /// Persistent WS connection to a remote `hermes serve` backend.
+    pub remote_ws: std::sync::Arc<ws_transport::RemoteWsState>,
+    /// Persistent WS connection to a remote backend via SSH tunnel.
+    pub ssh_ws: std::sync::Arc<ws_transport::SshWsState>,
     /// Phase 1C.2: session registry mapping conversation IDs (product layer)
     /// to Hermes live/durable session IDs. Replaces the single global
     /// session_id that was on WsState.
@@ -85,6 +94,8 @@ impl AppState {
             hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
+            remote_ws: std::sync::Arc::new(ws_transport::RemoteWsState::new()),
+            ssh_ws: std::sync::Arc::new(ws_transport::SshWsState::new()),
             sessions: session_registry::SessionRegistry::new(),
         }
     }
@@ -1004,6 +1015,8 @@ async fn send_message_cmd(
         request,
         &app_handle,
         &state.ws,
+        &state.remote_ws,
+        &state.ssh_ws,
         &state.sessions,
     )
     .await

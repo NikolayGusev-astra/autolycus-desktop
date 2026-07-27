@@ -27,7 +27,22 @@ use crate::hermes_protocol::{
     RoutedGatewayEvent, SessionCreateParams, SessionCreateResult,
 };
 
-/// Generic RPC timeout duration.
+/// Convert an HTTP(S) URL to a WebSocket URL (ADR-005).
+///
+/// `http://` → `ws://`, `https://` → `wss://`. Already-ws URLs pass through
+/// unchanged. Used by the Remote and SSH branches to talk to a remote
+/// `hermes serve` over the same /api/ws transport as Local.
+pub fn to_ws_url(url: &str) -> String {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{}", rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{}", rest)
+    } else {
+        // Already ws:// / wss:// or some other scheme — pass through unchanged.
+        url.to_string()
+    }
+}
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// JSON-RPC request id type.
@@ -107,6 +122,95 @@ where
 /// Waits for the RPC acknowledgement from Hermes before returning.
 ///
 /// Refuses to send if the compatibility handshake has not completed or failed
+/// Submit a prompt on a remote persistent connection.
+pub async fn submit_prompt_on_connection_remote(
+    remote_state: &Arc<RemoteWsState>,
+    session_id: &str,
+    text: &str,
+) -> Result<PromptSubmitResult, WsError> {
+    {
+        let compat = remote_state.compatibility.lock().await;
+        match &*compat {
+            crate::hermes_protocol::RuntimeCompatibility::Compatible { .. } => {}
+            crate::hermes_protocol::RuntimeCompatibility::Unknown => {
+                return Err(WsError::Protocol(
+                    "prompt.submit before compatibility handshake".into(),
+                ));
+            }
+            other => {
+                return Err(WsError::Incompatible(other.clone()));
+            }
+        }
+    }
+    call_rpc_remote(
+        remote_state,
+        "prompt.submit",
+        PromptSubmitParams {
+            session_id: session_id.to_owned(),
+            text: text.to_owned(),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Submit a prompt on an SSH persistent connection.
+pub async fn submit_prompt_on_connection_ssh(
+    ssh_state: &Arc<SshWsState>,
+    session_id: &str,
+    text: &str,
+) -> Result<PromptSubmitResult, WsError> {
+    {
+        let compat = ssh_state.compatibility.lock().await;
+        match &*compat {
+            crate::hermes_protocol::RuntimeCompatibility::Compatible { .. } => {}
+            crate::hermes_protocol::RuntimeCompatibility::Unknown => {
+                return Err(WsError::Protocol(
+                    "prompt.submit before compatibility handshake".into(),
+                ));
+            }
+            other => {
+                return Err(WsError::Incompatible(other.clone()));
+            }
+        }
+    }
+    call_rpc_ssh(
+        ssh_state,
+        "prompt.submit",
+        PromptSubmitParams {
+            session_id: session_id.to_owned(),
+            text: text.to_owned(),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Create a session on the persistent connection using the generic RPC dispatcher.
+/// `requested_profile` selects the Hermes profile scope (state.db, config, etc.);
+/// pass None for the launch/default profile.
+pub async fn create_session_on_connection(
+    ws_state: &WsState,
+    source: &str,
+    requested_profile: Option<&str>,
+) -> Result<SessionCreateResult, WsError> {
+    call_rpc(
+        ws_state,
+        "session.create",
+        SessionCreateParams {
+            source: source.to_owned(),
+            cols: 96,
+            profile: requested_profile.map(|s| s.to_string()),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Submit a prompt on the persistent connection using the generic RPC dispatcher.
+/// Waits for the RPC acknowledgement from Hermes before returning.
+///
+/// Refuses to send if the compatibility handshake has not completed or failed
 /// (Phase 1C.1): `prompt.submit` must not proceed against an unknown or
 /// incompatible backend.
 pub async fn submit_prompt_on_connection(
@@ -135,27 +239,6 @@ pub async fn submit_prompt_on_connection(
         PromptSubmitParams {
             session_id: session_id.to_owned(),
             text: text.to_owned(),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
-/// Create a session on the persistent connection using the generic RPC dispatcher.
-/// `requested_profile` selects the Hermes profile scope (state.db, config, etc.);
-/// pass None for the launch/default profile.
-pub async fn create_session_on_connection(
-    ws_state: &WsState,
-    source: &str,
-    requested_profile: Option<&str>,
-) -> Result<SessionCreateResult, WsError> {
-    call_rpc(
-        ws_state,
-        "session.create",
-        SessionCreateParams {
-            source: source.to_owned(),
-            cols: 96,
-            profile: requested_profile.map(|s| s.to_string()),
         },
         RPC_TIMEOUT,
     )
@@ -964,6 +1047,64 @@ impl Default for ConnectionRuntime {
     }
 }
 
+/// Trait for state types that can be used with the reader task.
+/// All state types (WsState, RemoteWsState, SshWsState) have the same
+/// runtime, generation, and connect_lock fields.
+trait StateLike: Send + Sync + 'static {
+    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime>;
+    fn generation(&self) -> &std::sync::atomic::AtomicU64;
+    fn connect_lock(&self) -> &tokio::sync::Mutex<()>;
+}
+
+// Blanket implementation for Arc<T> where T: StateLike
+impl<T: StateLike + ?Sized> StateLike for Arc<T> {
+    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
+        (**self).runtime()
+    }
+    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
+        (**self).generation()
+    }
+    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
+        (**self).connect_lock()
+    }
+}
+
+impl StateLike for WsState {
+    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
+        &self.runtime
+    }
+    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.generation
+    }
+    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.connect_lock
+    }
+}
+
+impl StateLike for RemoteWsState {
+    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
+        &self.runtime
+    }
+    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.generation
+    }
+    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.connect_lock
+    }
+}
+
+impl StateLike for SshWsState {
+    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
+        &self.runtime
+    }
+    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.generation
+    }
+    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.connect_lock
+    }
+}
+
 /// Persistent WS connection state, held in `AppState.ws`.
 ///
 /// All fields are behind `tokio::sync::Mutex` to allow concurrent access from
@@ -1005,6 +1146,91 @@ impl WsState {
 }
 
 impl Default for WsState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Persistent WS connection state for Remote mode.
+///
+/// Same structure as `WsState` but for a remote backend URL.
+/// Used by Remote mode to maintain a single persistent WS connection
+/// to a remote `hermes serve` instance.
+pub struct RemoteWsState {
+    /// Connection runtime: generation, state, cmd_tx, ws_url under one lock.
+    pub runtime: tokio::sync::Mutex<ConnectionRuntime>,
+    /// Serializes concurrent connect attempts.
+    pub connect_lock: tokio::sync::Mutex<()>,
+    /// Runtime compatibility result (reset on each connect).
+    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
+    /// Monotonically increasing generation counter.
+    pub generation: std::sync::atomic::AtomicU64,
+}
+
+impl RemoteWsState {
+    /// Create a fresh Disconnected state.
+    pub fn new() -> Self {
+        Self {
+            runtime: tokio::sync::Mutex::new(ConnectionRuntime::default()),
+            connect_lock: tokio::sync::Mutex::new(()),
+            compatibility: tokio::sync::Mutex::new(
+                crate::hermes_protocol::RuntimeCompatibility::Unknown,
+            ),
+            generation: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// Bump generation and return the new value.
+    pub fn next_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1
+    }
+}
+
+impl Default for RemoteWsState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Persistent WS connection state for SSH mode.
+///
+/// Same structure as `WsState` but for a remote backend accessed
+/// via an SSH tunnel. The tunnel itself is managed by `ssh.rs`.
+pub struct SshWsState {
+    /// Connection runtime: generation, state, cmd_tx, ws_url under one lock.
+    pub runtime: tokio::sync::Mutex<ConnectionRuntime>,
+    /// Serializes concurrent connect attempts.
+    pub connect_lock: tokio::sync::Mutex<()>,
+    /// Runtime compatibility result (reset on each connect).
+    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
+    /// Monotonically increasing generation counter.
+    pub generation: std::sync::atomic::AtomicU64,
+}
+
+impl SshWsState {
+    /// Create a fresh Disconnected state.
+    pub fn new() -> Self {
+        Self {
+            runtime: tokio::sync::Mutex::new(ConnectionRuntime::default()),
+            connect_lock: tokio::sync::Mutex::new(()),
+            compatibility: tokio::sync::Mutex::new(
+                crate::hermes_protocol::RuntimeCompatibility::Unknown,
+            ),
+            generation: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// Bump generation and return the new value.
+    pub fn next_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1
+    }
+}
+
+impl Default for SshWsState {
     fn default() -> Self {
         Self::new()
     }
@@ -1447,11 +1673,11 @@ where
 /// On socket close/error: marks Disconnected (with generation guard), suspends
 /// the session registry (if provided), and completes pending RPCs with
 /// OutcomeUnknown (non-idempotent) or ConnectionLost (idempotent).
-async fn reader_task<S>(
+async fn reader_task<S, State>(
     mut ws: S,
     mut cmd_rx: tokio::sync::mpsc::Receiver<WsCommand>,
     emit_fn: EmitFn,
-    ws_state: Arc<WsState>,
+    state: Arc<State>,
     sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
     my_generation: u64,
 ) where
@@ -1460,6 +1686,7 @@ async fn reader_task<S>(
         + Unpin
         + Send
         + 'static,
+    State: Send + Sync + 'static + StateLike,
 {
     // Pending RPC map: resolves responses by ID.
     let mut pending: HashMap<RpcId, PendingRequest> = HashMap::new();
@@ -1657,7 +1884,7 @@ async fn reader_task<S>(
     // Generation-guarded cleanup: only clear state if we are still the current generation.
     // ALL checks and modifications must happen under the SAME runtime lock to prevent TOCTOU.
     let should_suspend = {
-        let mut runtime = ws_state.runtime.lock().await;
+        let mut runtime = state.runtime().lock().await;
 
         if runtime.generation != my_generation {
             false
@@ -1733,6 +1960,342 @@ where
     Arc::new(move |event: &RoutedChatEvent| {
         let _ = app_handle.emit("chat_event", event);
     })
+}
+
+/// Generic RPC dispatcher for remote connections.
+pub async fn call_rpc_remote<P, R>(
+    remote_state: &Arc<RemoteWsState>,
+    method: &'static str,
+    params: P,
+    timeout: Duration,
+) -> Result<R, GatewayClientError>
+where
+    P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    R: for<'de> Deserialize<'de> + std::fmt::Debug,
+{
+    let tx = {
+        let runtime = remote_state.runtime.lock().await;
+        if runtime.state != ConnectionState::Connected && runtime.state != ConnectionState::Degraded
+        {
+            return Err(GatewayClientError::ConnectionLost);
+        }
+        runtime
+            .cmd_tx
+            .clone()
+            .ok_or(GatewayClientError::ConnectionLost)?
+    };
+
+    let id = next_rpc_id();
+    let params_value = serde_json::to_value(&params)
+        .map_err(|e| GatewayClientError::Protocol(format!("serialize params: {}", e)))?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(WsCommand::Rpc {
+        id,
+        method: method.to_string(),
+        params: params_value,
+        reply: reply_tx,
+    })
+    .await
+    .map_err(|_| GatewayClientError::ConnectionLost)?;
+
+    let response_value = tokio::time::timeout(timeout, reply_rx)
+        .await
+        .map_err(|_| interruption_error(method, InterruptionCause::Timeout))?
+        .map_err(|_| interruption_error(method, InterruptionCause::ClosedChannel))??;
+
+    serde_json::from_value::<R>(response_value)
+        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))
+}
+
+/// Generic RPC dispatcher for SSH connections.
+pub async fn call_rpc_ssh<P, R>(
+    ssh_state: &Arc<SshWsState>,
+    method: &'static str,
+    params: P,
+    timeout: Duration,
+) -> Result<R, GatewayClientError>
+where
+    P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    R: for<'de> Deserialize<'de> + std::fmt::Debug,
+{
+    let tx = {
+        let runtime = ssh_state.runtime.lock().await;
+        if runtime.state != ConnectionState::Connected && runtime.state != ConnectionState::Degraded
+        {
+            return Err(GatewayClientError::ConnectionLost);
+        }
+        runtime
+            .cmd_tx
+            .clone()
+            .ok_or(GatewayClientError::ConnectionLost)?
+    };
+
+    let id = next_rpc_id();
+    let params_value = serde_json::to_value(&params)
+        .map_err(|e| GatewayClientError::Protocol(format!("serialize params: {}", e)))?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(WsCommand::Rpc {
+        id,
+        method: method.to_string(),
+        params: params_value,
+        reply: reply_tx,
+    })
+    .await
+    .map_err(|_| GatewayClientError::ConnectionLost)?;
+
+    let response_value = tokio::time::timeout(timeout, reply_rx)
+        .await
+        .map_err(|_| interruption_error(method, InterruptionCause::Timeout))?
+        .map_err(|_| interruption_error(method, InterruptionCause::ClosedChannel))??;
+
+    serde_json::from_value::<R>(response_value)
+        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))
+}
+
+/// Reconcile sessions for remote connections.
+async fn reconcile_sessions_remote(
+    remote_state: &Arc<RemoteWsState>,
+    sessions: &Arc<crate::session_registry::SessionRegistry>,
+    generation: u64,
+) -> ReconciliationReport {
+    let to_resume = sessions.take_suspended_for_resume(generation).await;
+    if to_resume.is_empty() {
+        return ReconciliationReport::default();
+    }
+    tracing::info!(
+        target: "steersman_desktop_lib::ws",
+        count = to_resume.len(),
+        generation,
+        "reconciling suspended sessions on remote"
+    );
+    let mut report = ReconciliationReport::default();
+    let mut connection_lost = false;
+    for (conv, durable) in to_resume {
+        if connection_lost {
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                conversation = %conv,
+                stored_id = %durable.stored_session_id,
+                "reconciliation stopped due to prior connection loss; returning to Suspended"
+            );
+            sessions.return_to_suspended(&conv).await;
+            report.interrupted.push(conv);
+            continue;
+        }
+        match resume_session_on_connection_remote(remote_state, &durable).await {
+            Ok(result) => {
+                if result.session_id.is_empty() {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        "resume returned empty live session_id"
+                    );
+                    sessions.mark_resume_failed(&conv).await;
+                    report.failed.push(conv);
+                    continue;
+                }
+                let new_stored = {
+                    let d = result.durable_id();
+                    if d.is_empty() {
+                        durable.stored_session_id.clone()
+                    } else {
+                        d.to_string()
+                    }
+                };
+                sessions
+                    .set_live(
+                        conv.clone(),
+                        result.session_id,
+                        Some(new_stored),
+                        durable.profile.clone(),
+                        generation,
+                    )
+                    .await;
+                tracing::info!(
+                    target: "steersman_desktop_lib::ws",
+                    conversation = %conv,
+                    generation,
+                    "session resumed on remote"
+                );
+                report.restored.push(conv);
+            }
+            Err(e) => {
+                let is_interruption = matches!(
+                    e,
+                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
+                );
+                if is_interruption {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        error = %e,
+                        "session.resume interrupted; returning to Suspended for retry"
+                    );
+                    sessions.return_to_suspended(&conv).await;
+                    report.interrupted.push(conv);
+                    connection_lost = true;
+                } else {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        error = %e,
+                        "session.resume failed; marking ResumeFailed"
+                    );
+                    sessions.mark_resume_failed(&conv).await;
+                    report.failed.push(conv);
+                }
+            }
+        }
+    }
+    report
+}
+
+/// Reconcile sessions for SSH connections.
+async fn reconcile_sessions_ssh(
+    ssh_state: &Arc<SshWsState>,
+    sessions: &Arc<crate::session_registry::SessionRegistry>,
+    generation: u64,
+) -> ReconciliationReport {
+    let to_resume = sessions.take_suspended_for_resume(generation).await;
+    if to_resume.is_empty() {
+        return ReconciliationReport::default();
+    }
+    tracing::info!(
+        target: "steersman_desktop_lib::ws",
+        count = to_resume.len(),
+        generation,
+        "reconciling suspended sessions on SSH"
+    );
+    let mut report = ReconciliationReport::default();
+    let mut connection_lost = false;
+    for (conv, durable) in to_resume {
+        if connection_lost {
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                conversation = %conv,
+                stored_id = %durable.stored_session_id,
+                "reconciliation stopped due to prior connection loss; returning to Suspended"
+            );
+            sessions.return_to_suspended(&conv).await;
+            report.interrupted.push(conv);
+            continue;
+        }
+        match resume_session_on_connection_ssh(ssh_state, &durable).await {
+            Ok(result) => {
+                if result.session_id.is_empty() {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        "resume returned empty live session_id"
+                    );
+                    sessions.mark_resume_failed(&conv).await;
+                    report.failed.push(conv);
+                    continue;
+                }
+                let new_stored = {
+                    let d = result.durable_id();
+                    if d.is_empty() {
+                        durable.stored_session_id.clone()
+                    } else {
+                        d.to_string()
+                    }
+                };
+                sessions
+                    .set_live(
+                        conv.clone(),
+                        result.session_id,
+                        Some(new_stored),
+                        durable.profile.clone(),
+                        generation,
+                    )
+                    .await;
+                tracing::info!(
+                    target: "steersman_desktop_lib::ws",
+                    conversation = %conv,
+                    generation,
+                    "session resumed on SSH"
+                );
+                report.restored.push(conv);
+            }
+            Err(e) => {
+                let is_interruption = matches!(
+                    e,
+                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
+                );
+                if is_interruption {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        error = %e,
+                        "session.resume interrupted; returning to Suspended for retry"
+                    );
+                    sessions.return_to_suspended(&conv).await;
+                    report.interrupted.push(conv);
+                    connection_lost = true;
+                } else {
+                    tracing::warn!(
+                        target: "steersman_desktop_lib::ws",
+                        conversation = %conv,
+                        stored_id = %durable.stored_session_id,
+                        error = %e,
+                        "session.resume failed; marking ResumeFailed"
+                    );
+                    sessions.mark_resume_failed(&conv).await;
+                    report.failed.push(conv);
+                }
+            }
+        }
+    }
+    report
+}
+
+/// Resume a session on a remote connection.
+pub async fn resume_session_on_connection_remote(
+    remote_state: &Arc<RemoteWsState>,
+    durable: &crate::session_registry::DurableSessionRef,
+) -> Result<crate::hermes_protocol::SessionResumeResult, WsError> {
+    call_rpc_remote(
+        remote_state,
+        "session.resume",
+        crate::hermes_protocol::SessionResumeParams {
+            session_id: durable.stored_session_id.clone(),
+            profile: if durable.profile.0.is_empty() {
+                None
+            } else {
+                Some(durable.profile.0.clone())
+            },
+            cols: Some(96),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Resume a session on an SSH connection.
+pub async fn resume_session_on_connection_ssh(
+    ssh_state: &Arc<SshWsState>,
+    durable: &crate::session_registry::DurableSessionRef,
+) -> Result<crate::hermes_protocol::SessionResumeResult, WsError> {
+    call_rpc_ssh(
+        ssh_state,
+        "session.resume",
+        crate::hermes_protocol::SessionResumeParams {
+            session_id: durable.stored_session_id.clone(),
+            profile: if durable.profile.0.is_empty() {
+                None
+            } else {
+                Some(durable.profile.0.clone())
+            },
+            cols: Some(96),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -3708,4 +4271,442 @@ mod tests {
             received.lock().await
         );
     }
+}
+
+/// Compatibility handshake for remote connections.
+async fn run_compatibility_handshake_remote(
+    remote_state: &Arc<RemoteWsState>,
+) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
+    let probe_result = create_session_on_connection_remote(remote_state, "compat_probe", None)
+        .await
+        .map_err(|e| match e {
+            WsError::BackendError(msg) => {
+                WsError::Protocol(format!("compatibility probe failed: {}", msg))
+            }
+            other => other,
+        })?;
+
+    let received = probe_result.info.desktop_contract;
+    let compat = crate::hermes_protocol::RuntimeCompatibility::evaluate(received);
+
+    if let Err(e) = close_session_best_effort_remote(remote_state, &probe_result.session_id).await {
+        tracing::warn!(
+            target: "steersman_desktop_lib::ws",
+            error = %e,
+            session_id = %probe_result.session_id,
+            "probe session close failed (non-fatal)"
+        );
+    }
+
+    if !compat.is_compatible() {
+        return Err(WsError::Incompatible(compat));
+    }
+    Ok(compat)
+}
+
+/// Compatibility handshake for SSH connections.
+async fn run_compatibility_handshake_ssh(
+    ssh_state: &Arc<SshWsState>,
+) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
+    let probe_result = create_session_on_connection_ssh(ssh_state, "compat_probe", None)
+        .await
+        .map_err(|e| match e {
+            WsError::BackendError(msg) => {
+                WsError::Protocol(format!("compatibility probe failed: {}", msg))
+            }
+            other => other,
+        })?;
+
+    let received = probe_result.info.desktop_contract;
+    let compat = crate::hermes_protocol::RuntimeCompatibility::evaluate(received);
+
+    if let Err(e) = close_session_best_effort_ssh(ssh_state, &probe_result.session_id).await {
+        tracing::warn!(
+            target: "steersman_desktop_lib::ws",
+            error = %e,
+            session_id = %probe_result.session_id,
+            "probe session close failed (non-fatal)"
+        );
+    }
+
+    if !compat.is_compatible() {
+        return Err(WsError::Incompatible(compat));
+    }
+    Ok(compat)
+}
+
+/// Create a session on a remote connection.
+pub async fn create_session_on_connection_remote(
+    remote_state: &Arc<RemoteWsState>,
+    source: &str,
+    requested_profile: Option<&str>,
+) -> Result<SessionCreateResult, WsError> {
+    call_rpc_remote(
+        remote_state,
+        "session.create",
+        SessionCreateParams {
+            source: source.to_owned(),
+            cols: 96,
+            profile: requested_profile.map(|s| s.to_string()),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Create a session on an SSH connection.
+pub async fn create_session_on_connection_ssh(
+    ssh_state: &Arc<SshWsState>,
+    source: &str,
+    requested_profile: Option<&str>,
+) -> Result<SessionCreateResult, WsError> {
+    call_rpc_ssh(
+        ssh_state,
+        "session.create",
+        SessionCreateParams {
+            source: source.to_owned(),
+            cols: 96,
+            profile: requested_profile.map(|s| s.to_string()),
+        },
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// Close a session on a remote connection (best effort).
+async fn close_session_best_effort_remote(
+    remote_state: &Arc<RemoteWsState>,
+    session_id: &str,
+) -> Result<(), WsError> {
+    let params = serde_json::json!({ "session_id": session_id });
+    match call_rpc_remote::<serde_json::Value, serde_json::Value>(
+        remote_state,
+        "session.close",
+        params,
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(WsError::BackendError(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Close a session on an SSH connection (best effort).
+async fn close_session_best_effort_ssh(
+    ssh_state: &Arc<SshWsState>,
+    session_id: &str,
+) -> Result<(), WsError> {
+    let params = serde_json::json!({ "session_id": session_id });
+    match call_rpc_ssh::<serde_json::Value, serde_json::Value>(
+        ssh_state,
+        "session.close",
+        params,
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(WsError::BackendError(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+pub async fn ensure_remote_ws_connection(
+    ws_url: &str,
+    emit_fn: EmitFn,
+    remote_state: &Arc<RemoteWsState>,
+    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
+) -> Result<(), WsError> {
+    // Fast path: already connected (no lock contention on connect_lock).
+    {
+        let runtime = remote_state.runtime.lock().await;
+        if runtime.state == ConnectionState::Connected {
+            return Ok(());
+        }
+    }
+
+    // Serialize concurrent connect attempts.
+    let _connect_guard = remote_state.connect_lock.lock().await;
+
+    // Double-check after acquiring the lock.
+    {
+        let mut runtime = remote_state.runtime.lock().await;
+        match runtime.state {
+            ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
+            ConnectionState::Connecting => {
+                return Err(WsError::Protocol("concurrent connect race".into()));
+            }
+            ConnectionState::Disconnected => {}
+        }
+        runtime.state = ConnectionState::Connecting;
+    }
+
+    // Connect to the remote backend.
+    tracing::info!(target: "steersman_desktop_lib::ws", remote_url = %ws_url, "opening persistent remote connection");
+    let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
+        Ok(result) => result,
+        Err(e) => {
+            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            return Err(WsError::Connect(e.to_string()));
+        }
+    };
+
+    // Strict gateway.ready barrier.
+    let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
+            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            return Err(e);
+        }
+        Err(_) => {
+            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            return Err(WsError::ReadyTimeout);
+        }
+    };
+
+    // Create the mpsc channel for command handlers -> reader task.
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+
+    // Bump generation before storing cmd_tx.
+    let generation = remote_state.next_generation();
+
+    remote_state.runtime.lock().await.ws_url = ws_url.to_string();
+    remote_state.runtime.lock().await.cmd_tx = Some(cmd_tx);
+
+    // Spawn the reader task with the generation.
+    tokio::spawn(reader_task(
+        ws,
+        cmd_rx,
+        emit_fn,
+        Arc::clone(&remote_state),
+        sessions.clone(),
+        generation,
+    ));
+
+    // Compatibility handshake (Phase 1C.1).
+    {
+        *remote_state.compatibility.lock().await =
+            crate::hermes_protocol::RuntimeCompatibility::Checking;
+    }
+    match run_compatibility_handshake_remote(remote_state).await {
+        Ok(c) => {
+            tracing::info!(
+                target: "steersman_desktop_lib::ws",
+                compatibility = ?c,
+                generation,
+                "compatibility handshake passed"
+            );
+            *remote_state.compatibility.lock().await = c;
+        }
+        Err(e) => {
+            *remote_state.compatibility.lock().await =
+                crate::hermes_protocol::RuntimeCompatibility::Unknown;
+            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            remote_state.runtime.lock().await.cmd_tx = None;
+            return Err(e);
+        }
+    }
+
+    // Reconnect reconciliation (Phase 1C.4).
+    let mut degraded = false;
+    let mut interrupted = false;
+    if let Some(sessions) = &sessions {
+        let report = reconcile_sessions_remote(remote_state, sessions, generation).await;
+        if !report.interrupted.is_empty() {
+            interrupted = true;
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                interrupted = report.interrupted.len(),
+                generation,
+                "reconciliation interrupted by disconnect; not declaring Connected"
+            );
+        } else if !report.failed.is_empty() {
+            degraded = true;
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                restored = report.restored.len(),
+                failed = report.failed.len(),
+                generation,
+                "reconciliation partial: some conversations failed to resume"
+            );
+        }
+    }
+
+    // GUARD: never set Connected if the socket died during reconciliation or
+    // the reader task exited. Verify the connection is still ours and alive.
+    if interrupted
+        || remote_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        || remote_state.runtime.lock().await.cmd_tx.is_none()
+        || remote_state.runtime.lock().await.state == ConnectionState::Disconnected
+    {
+        remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
+        return Err(WsError::ConnectionLost);
+    }
+
+    // Connected only if all resumes succeeded; otherwise Degraded.
+    {
+        let mut runtime = remote_state.runtime.lock().await;
+        runtime.state = if degraded {
+            ConnectionState::Degraded
+        } else {
+            ConnectionState::Connected
+        };
+    }
+    tracing::info!(target: "steersman_desktop_lib::ws", generation, degraded, "persistent remote connection established");
+
+    Ok(())
+}
+
+/// Ensure the persistent WS connection is open for an SSH backend.
+pub async fn ensure_ssh_ws_connection(
+    ws_url: &str,
+    emit_fn: EmitFn,
+    ssh_state: &Arc<SshWsState>,
+    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
+) -> Result<(), WsError> {
+    // Fast path: already connected (no lock contention on connect_lock).
+    {
+        let runtime = ssh_state.runtime.lock().await;
+        if runtime.state == ConnectionState::Connected {
+            return Ok(());
+        }
+    }
+
+    // Serialize concurrent connect attempts.
+    let _connect_guard = ssh_state.connect_lock.lock().await;
+
+    // Double-check after acquiring the lock.
+    {
+        let mut runtime = ssh_state.runtime.lock().await;
+        match runtime.state {
+            ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
+            ConnectionState::Connecting => {
+                return Err(WsError::Protocol("concurrent connect race".into()));
+            }
+            ConnectionState::Disconnected => {}
+        }
+        runtime.state = ConnectionState::Connecting;
+    }
+
+    // Connect to the SSH tunnel endpoint.
+    tracing::info!(target: "steersman_desktop_lib::ws", remote_url = %ws_url, "opening persistent SSH connection");
+    let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
+        Ok(result) => result,
+        Err(e) => {
+            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            return Err(WsError::Connect(e.to_string()));
+        }
+    };
+
+    // Strict gateway.ready barrier.
+    let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
+            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            return Err(e);
+        }
+        Err(_) => {
+            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            return Err(WsError::ReadyTimeout);
+        }
+    };
+
+    // Create the mpsc channel for command handlers -> reader task.
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+
+    // Bump generation before storing cmd_tx.
+    let generation = ssh_state.next_generation();
+
+    ssh_state.runtime.lock().await.ws_url = ws_url.to_string();
+    ssh_state.runtime.lock().await.cmd_tx = Some(cmd_tx);
+
+    // Spawn the reader task with the generation.
+    tokio::spawn(reader_task(
+        ws,
+        cmd_rx,
+        emit_fn,
+        Arc::clone(&ssh_state),
+        sessions.clone(),
+        generation,
+    ));
+
+    // Compatibility handshake.
+    {
+        *ssh_state.compatibility.lock().await =
+            crate::hermes_protocol::RuntimeCompatibility::Checking;
+    }
+    match run_compatibility_handshake_ssh(ssh_state).await {
+        Ok(c) => {
+            tracing::info!(
+                target: "steersman_desktop_lib::ws",
+                compatibility = ?c,
+                generation,
+                "compatibility handshake passed"
+            );
+            *ssh_state.compatibility.lock().await = c;
+        }
+        Err(e) => {
+            *ssh_state.compatibility.lock().await =
+                crate::hermes_protocol::RuntimeCompatibility::Unknown;
+            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            ssh_state.runtime.lock().await.cmd_tx = None;
+            return Err(e);
+        }
+    }
+
+    // Reconnect reconciliation (Phase 1C.4).
+    let mut degraded = false;
+    let mut interrupted = false;
+    if let Some(sessions) = &sessions {
+        let report = reconcile_sessions_ssh(ssh_state, sessions, generation).await;
+        if !report.interrupted.is_empty() {
+            interrupted = true;
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                interrupted = report.interrupted.len(),
+                generation,
+                "reconciliation interrupted by disconnect; not declaring Connected"
+            );
+        } else if !report.failed.is_empty() {
+            degraded = true;
+            tracing::warn!(
+                target: "steersman_desktop_lib::ws",
+                restored = report.restored.len(),
+                failed = report.failed.len(),
+                generation,
+                "reconciliation partial: some conversations failed to resume"
+            );
+        }
+    }
+
+    // GUARD: never set Connected if the socket died during reconciliation or
+    // the reader task exited. Verify the connection is still ours and alive.
+    if interrupted
+        || ssh_state
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        || ssh_state.runtime.lock().await.cmd_tx.is_none()
+        || ssh_state.runtime.lock().await.state == ConnectionState::Disconnected
+    {
+        ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
+        return Err(WsError::ConnectionLost);
+    }
+
+    // Connected only if all resumes succeeded; otherwise Degraded.
+    {
+        let mut runtime = ssh_state.runtime.lock().await;
+        runtime.state = if degraded {
+            ConnectionState::Degraded
+        } else {
+            ConnectionState::Connected
+        };
+    }
+    tracing::info!(target: "steersman_desktop_lib::ws", generation, degraded, "persistent SSH connection established");
+
+    Ok(())
 }

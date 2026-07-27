@@ -564,7 +564,7 @@ pub fn to_ws_url(url: &str) -> String {
     }
 }
 
-/// Remote/SSH WebSocket transport (ADR-005, P3.2).
+/// Remote-mode WebSocket transport (ADR-005, P3.2).
 ///
 /// Same `send_message_via_ws` as Local, but the URL/token come from the
 /// remote backend (or SSH tunnel). `base_url` is an http(s) URL and is
@@ -589,6 +589,247 @@ async fn send_via_ws_remote(
     )
     .await
     .map_err(|e| e.to_string())
+}
+
+/// ADR-006: Send a chat message over the PERSISTENT remote WS connection.
+///
+/// Ensures the connection is open (connecting once, lazily), resolves the
+/// session_id (creating a session if the frontend didn't pass one), and
+/// submits the prompt via the reader task's mpsc channel. Streaming events
+/// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
+async fn send_via_ws_persistent_remote(
+    remote_ws_state: &std::sync::Arc<crate::ws_transport::RemoteWsState>,
+    sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
+    remote_url: &str,
+    token: &str,
+    request: &SendMessageRequest,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    if token.is_empty() {
+        return Err("Remote session token is empty. Set it in Settings → Connection.".to_string());
+    }
+    let base = remote_url.trim_end_matches('/').trim_end_matches("/api/ws");
+    let ws_url = format!(
+        "{}/api/ws?token={}",
+        crate::ws_transport::to_ws_url(base),
+        token
+    );
+
+    // Ensure the persistent connection is open (idempotent).
+    let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
+    crate::ws_transport::ensure_remote_ws_connection(&ws_url, emit_fn, remote_ws_state, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
+    // The registry is the AUTHORITATIVE source of session IDs — every created
+    // or resumed session MUST be registered so event routing and reconnect
+    // reconciliation work.
+    //
+    // Resolution priority:
+    //   1. conversation_id → registry.get_live (or create + register)
+    //   2. session_id (legacy) → synthetic ConversationId adapter, register if new
+    //   3. neither → create a new session, register under a synthetic conversation_id
+    let generation = remote_ws_state.runtime.lock().await.generation;
+
+    let session_id =
+        if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
+            let conv = crate::session_registry::ConversationId::new(conv_str);
+            match sessions.get_live(&conv).await {
+                Some(live) => live,
+                None => {
+                    // No live ID for this conversation yet — create one and register.
+                    let result = crate::ws_transport::create_session_on_connection_remote(
+                        remote_ws_state,
+                        "desktop",
+                        request.profile.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| format!("{:?}", e))?;
+                    let profile = crate::chat::resolve_profile(
+                        &result.info.profile_name,
+                        request.profile.as_deref(),
+                    );
+                    sessions
+                        .set_live(
+                            conv,
+                            result.session_id.clone(),
+                            Some(result.stored_session_id),
+                            profile,
+                            generation,
+                        )
+                        .await;
+                    result.session_id
+                }
+            }
+        } else if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+            // Legacy adapter: frontend passed a raw Hermes session_id. Derive a
+            // synthetic ConversationId so the registry always has a binding. If
+            // this live ID is already registered (reverse lookup), reuse it;
+            // otherwise register the binding so events route correctly.
+            let synthetic_conv =
+                crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
+            if sessions.route_event(sid).await.is_none() {
+                sessions
+                    .set_live(
+                        synthetic_conv,
+                        sid.to_string(),
+                        None,
+                        crate::session_registry::ProfileId::empty(),
+                        generation,
+                    )
+                    .await;
+            }
+            sid.to_string()
+        } else {
+            // No conversation_id and no session_id: create a new session and
+            // register it under a synthetic conversation_id so it participates in
+            // reconnect reconciliation.
+            let result = crate::ws_transport::create_session_on_connection_remote(
+                remote_ws_state,
+                "desktop",
+                request.profile.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("{:?}", e))?;
+            let profile =
+                crate::chat::resolve_profile(&result.info.profile_name, request.profile.as_deref());
+            let synthetic_conv =
+                crate::session_registry::ConversationId::new(format!("auto:{}", result.session_id));
+            sessions
+                .set_live(
+                    synthetic_conv,
+                    result.session_id.clone(),
+                    Some(result.stored_session_id),
+                    profile,
+                    generation,
+                )
+                .await;
+            result.session_id
+        };
+
+    // Submit the prompt — events stream back via chat_event.
+    crate::ws_transport::submit_prompt_on_connection_remote(
+        remote_ws_state,
+        &session_id,
+        &request.text,
+    )
+    .await
+    .map_err(|e| format!("{:?}", e))?;
+
+    Ok(session_id)
+}
+
+/// ADR-006: Send a chat message over the PERSISTENT SSH WS connection.
+///
+/// Ensures the connection is open (connecting once, lazily), resolves the
+/// session_id (creating a session if the frontend didn't pass one), and
+/// submits the prompt via the reader task's mpsc channel. Streaming events
+/// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
+async fn send_via_ws_persistent_ssh(
+    ssh_ws_state: &std::sync::Arc<crate::ws_transport::SshWsState>,
+    sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
+    tunnel_url: &str,
+    token: &str,
+    request: &SendMessageRequest,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    if token.is_empty() {
+        return Err("SSH session token is empty. Set it in Settings → Connection.".to_string());
+    }
+    let base = tunnel_url.trim_end_matches('/').trim_end_matches("/api/ws");
+    let ws_url = format!(
+        "{}/api/ws?token={}",
+        crate::ws_transport::to_ws_url(base),
+        token
+    );
+
+    // Ensure the persistent connection is open (idempotent).
+    let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
+    crate::ws_transport::ensure_ssh_ws_connection(&ws_url, emit_fn, ssh_ws_state, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
+    let generation = ssh_ws_state.runtime.lock().await.generation;
+
+    let session_id =
+        if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
+            let conv = crate::session_registry::ConversationId::new(conv_str);
+            match sessions.get_live(&conv).await {
+                Some(live) => live,
+                None => {
+                    let result = crate::ws_transport::create_session_on_connection_ssh(
+                        ssh_ws_state,
+                        "desktop",
+                        request.profile.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| format!("{:?}", e))?;
+                    let profile = crate::chat::resolve_profile(
+                        &result.info.profile_name,
+                        request.profile.as_deref(),
+                    );
+                    sessions
+                        .set_live(
+                            crate::session_registry::ConversationId::new(conv_str),
+                            result.session_id.clone(),
+                            Some(result.stored_session_id),
+                            crate::chat::resolve_profile(
+                                &result.info.profile_name,
+                                request.profile.as_deref(),
+                            ),
+                            ssh_ws_state.runtime.lock().await.generation,
+                        )
+                        .await;
+                    result.session_id
+                }
+            }
+        } else if let Some(sid) = request.session_id.as_deref().filter(|s| !s.is_empty()) {
+            let synthetic_conv =
+                crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
+            if sessions.route_event(sid).await.is_none() {
+                sessions
+                    .set_live(
+                        synthetic_conv,
+                        sid.to_string(),
+                        None,
+                        crate::session_registry::ProfileId::empty(),
+                        ssh_ws_state.runtime.lock().await.generation,
+                    )
+                    .await;
+            }
+            sid.to_string()
+        } else {
+            let result = crate::ws_transport::create_session_on_connection_ssh(
+                ssh_ws_state,
+                "desktop",
+                request.profile.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("{:?}", e))?;
+            let profile =
+                crate::chat::resolve_profile(&result.info.profile_name, request.profile.as_deref());
+            let synthetic_conv =
+                crate::session_registry::ConversationId::new(format!("auto:{}", result.session_id));
+            sessions
+                .set_live(
+                    synthetic_conv,
+                    result.session_id.clone(),
+                    Some(result.stored_session_id),
+                    profile,
+                    ssh_ws_state.runtime.lock().await.generation,
+                )
+                .await;
+            result.session_id
+        };
+
+    // Submit the prompt — events stream back via chat_event.
+    crate::ws_transport::submit_prompt_on_connection_ssh(ssh_ws_state, &session_id, &request.text)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+
+    Ok(session_id)
 }
 
 /// Local-mode WebSocket transport (ADR-004, Phase 0).
@@ -747,6 +988,8 @@ pub async fn send_message(
     request: SendMessageRequest,
     app_handle: &AppHandle,
     ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    remote_ws_state: &std::sync::Arc<crate::ws_transport::RemoteWsState>,
+    ssh_ws_state: &std::sync::Arc<crate::ws_transport::SshWsState>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
 ) -> Result<String, String> {
     // Note: model_config is no longer fetched here — the WS transport sends
@@ -775,7 +1018,15 @@ pub async fn send_message(
             // ADR-005: Remote talks to a remote `hermes serve` over the same
             // WS /api/ws transport. remote_api_key is interpreted as the remote
             // backend's session token (UI label rename is a separate task).
-            send_via_ws_remote(remote_url, remote_api_key, &request, app_handle).await
+            send_via_ws_persistent_remote(
+                &std::sync::Arc::clone(remote_ws_state),
+                &std::sync::Arc::clone(sessions),
+                remote_url,
+                remote_api_key,
+                &request,
+                app_handle,
+            )
+            .await
         }
         ConnectionMode::Ssh => {
             let ssh = ssh_config.as_ref().ok_or("SSH config not provided")?;
@@ -804,7 +1055,15 @@ pub async fn send_message(
                 })
                 .unwrap_or_default();
 
-            send_via_ws_remote(&tunnel_url, &tunneled_token, &request, app_handle).await
+            send_via_ws_persistent_ssh(
+                &std::sync::Arc::clone(ssh_ws_state),
+                &std::sync::Arc::clone(sessions),
+                &tunnel_url,
+                &tunneled_token,
+                &request,
+                app_handle,
+            )
+            .await
         }
     }
 }
