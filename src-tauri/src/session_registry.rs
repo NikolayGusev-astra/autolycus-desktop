@@ -244,12 +244,16 @@ impl SessionRegistry {
             .get(live_session_id)
             .filter(|conv| {
                 // Verify the conversation belongs to the correct runtime
-                inner.by_conversation.get(conv).map(|b| b.runtime_key == runtime_key).unwrap_or(false)
+                inner
+                    .by_conversation
+                    .get(conv)
+                    .map(|b| b.runtime_key == runtime_key)
+                    .unwrap_or(false)
             })
             .cloned()
     }
 
-/// Transition all bindings to Suspended (on disconnect). Durable IDs are
+    /// Transition all bindings to Suspended (on disconnect). Durable IDs are
     /// retained for resume; only the live IDs are considered stale.
     pub async fn suspend_all(&self, runtime_key: RuntimeKey) {
         let mut inner = self.inner.lock().await;
@@ -264,7 +268,10 @@ impl SessionRegistry {
             .by_live_session
             .iter()
             .filter_map(|(live, conv)| {
-                inner.by_conversation.get(conv).map(|b| (live.clone(), b.runtime_key == runtime_key))
+                inner
+                    .by_conversation
+                    .get(conv)
+                    .map(|b| (live.clone(), b.runtime_key == runtime_key))
             })
             .filter(|(_, matches)| *matches)
             .map(|(live, _)| live)
@@ -410,8 +417,15 @@ mod tests {
     async fn live_and_stored_ids_do_not_mix() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv.clone(), "live-aaa".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
-            .await;
+        r.set_live(
+            conv.clone(),
+            "live-aaa".into(),
+            None,
+            ProfileId::empty(),
+            1,
+            RuntimeKey::Local,
+        )
+        .await;
         // Backend reports a stored_session_id via session.info — must NOT
         // replace the live ID used for prompt.submit.
         let updated = r.set_stored(&conv, "stored-bbb".into()).await;
@@ -436,13 +450,33 @@ mod tests {
         let r = reg();
         let conv_a = ConversationId::new("conv-a");
         let conv_b = ConversationId::new("conv-b");
-        r.set_live(conv_a.clone(), "live-a".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
-            .await;
-        r.set_live(conv_b.clone(), "live-b".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
-            .await;
+        r.set_live(
+            conv_a.clone(),
+            "live-a".into(),
+            None,
+            ProfileId::empty(),
+            1,
+            RuntimeKey::Local,
+        )
+        .await;
+        r.set_live(
+            conv_b.clone(),
+            "live-b".into(),
+            None,
+            ProfileId::empty(),
+            1,
+            RuntimeKey::Local,
+        )
+        .await;
 
-        assert_eq!(r.route_event("live-a", RuntimeKey::Local).await, Some(conv_a));
-        assert_eq!(r.route_event("live-b", RuntimeKey::Local).await, Some(conv_b));
+        assert_eq!(
+            r.route_event("live-a", RuntimeKey::Local).await,
+            Some(conv_a)
+        );
+        assert_eq!(
+            r.route_event("live-b", RuntimeKey::Local).await,
+            Some(conv_b)
+        );
         assert_eq!(r.route_event("live-unknown", RuntimeKey::Local).await, None);
     }
 
@@ -476,7 +510,10 @@ mod tests {
         // Old live ID no longer routes.
         assert_eq!(r.route_event("live-old", RuntimeKey::Local).await, None);
         // New live ID routes correctly.
-        assert_eq!(r.route_event("live-new", RuntimeKey::Local).await, Some(conv.clone()));
+        assert_eq!(
+            r.route_event("live-new", RuntimeKey::Local).await,
+            Some(conv.clone())
+        );
         // Durable stored ID is preserved.
         let binding = r.get(&conv, RuntimeKey::Local).await.unwrap();
         assert_eq!(binding.stored_session_id.as_deref(), Some("stored-1"));
@@ -522,8 +559,15 @@ mod tests {
     async fn unknown_live_event_not_assigned() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv, "live-known".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
-            .await;
+        r.set_live(
+            conv,
+            "live-known".into(),
+            None,
+            ProfileId::empty(),
+            1,
+            RuntimeKey::Local,
+        )
+        .await;
         // An event for a session nobody owns.
         assert_eq!(r.route_event("live-orphan", RuntimeKey::Local).await, None);
     }

@@ -1544,10 +1544,7 @@ where
 
 /// Best-effort `session.close` via the generic RPC dispatcher. Returns Ok(())
 /// on success or if the backend does not support the method.
-async fn close_session_best_effort<State>(
-    ws_state: &State,
-    session_id: &str,
-) -> Result<(), WsError>
+async fn close_session_best_effort<State>(ws_state: &State, session_id: &str) -> Result<(), WsError>
 where
     State: StateLike + ?Sized,
 {
@@ -1641,189 +1638,189 @@ async fn reader_task<S, State>(
 
     loop {
         tokio::select! {
-            // Periodic cleanup of expired pending RPCs
-            _ = cleanup_tick.tick() => {
-                let now = Instant::now();
-                let mut expired_ids: Vec<RpcId> = Vec::new();
-                for (id, pending_req) in &pending {
-                    if now >= pending_req.timeout {
-                        expired_ids.push(*id);
-                    }
-                }
-                for id in expired_ids {
-                    if let Some(pending_req) = pending.remove(&id) {
-                        tracing::warn!(
-                            target: "steersman_desktop_lib::ws",
-                            id, method = %pending_req.method,
-                            "pending RPC expired (timer)"
-                        );
-                        // Use interruption_error so non-idempotent methods get
-                        // OutcomeUnknown, not a plain RpcTimeout.
-                        let _ = pending_req.reply.send(Err(interruption_error(
-                            &pending_req.method,
-                            InterruptionCause::Timeout,
-                        )));
-                    }
-                }
-            }
-            // Read incoming WS frames
-            msg = ws.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        let value: Value = match serde_json::from_str(&text) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-
-                        match classify_frame(&value) {
-                            Some(IncomingFrame::RpcResponse { id, result }) => {
-                                if let Some(pending_req) = pending.remove(&id) {
-                                    let _ = pending_req.reply.send(Ok(result));
-                                } else {
-                                    tracing::warn!(
-                                        target: "steersman_desktop_lib::ws",
-                                        id, "RPC response for unknown request"
-                                    );
-                                }
+                    // Periodic cleanup of expired pending RPCs
+                    _ = cleanup_tick.tick() => {
+                        let now = Instant::now();
+                        let mut expired_ids: Vec<RpcId> = Vec::new();
+                        for (id, pending_req) in &pending {
+                            if now >= pending_req.timeout {
+                                expired_ids.push(*id);
                             }
-                            Some(IncomingFrame::RpcError { id, error }) => {
-                                if let Some(pending_req) = pending.remove(&id) {
-                                    let msg = error
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("RPC error");
-                                    let _ = pending_req
-                                        .reply
-                                        .send(Err(GatewayClientError::BackendError(msg.to_string())));
-                                }
+                        }
+                        for id in expired_ids {
+                            if let Some(pending_req) = pending.remove(&id) {
+                                tracing::warn!(
+                                    target: "steersman_desktop_lib::ws",
+                                    id, method = %pending_req.method,
+                                    "pending RPC expired (timer)"
+                                );
+                                // Use interruption_error so non-idempotent methods get
+                                // OutcomeUnknown, not a plain RpcTimeout.
+                                let _ = pending_req.reply.send(Err(interruption_error(
+                                    &pending_req.method,
+                                    InterruptionCause::Timeout,
+                                )));
                             }
-                            Some(IncomingFrame::Event(routed_event)) => {
-                                // Resolve the owning conversation via the live
-                                // session_id in params. For session-scoped events
-                                // (those carrying a session_id), an UNKNOWN live
-                                // session must be dropped (early continue) — it is
-                                // a stale event from a dead generation, not a
-                                // global event. Only events WITHOUT a session_id
-                                // (truly global gateway events) may be emitted
-                                // with conversation_id=None.
-                                let runtime_key = state.runtime_key();
-                                let conversation_id = match (
-                                    &sessions,
-                                    routed_event.session_id.as_deref(),
-                                ) {
-                                    (Some(sessions), Some(live_sid)) if !live_sid.is_empty() => {
-                                        match sessions.route_event(live_sid, runtime_key).await {
-                                            Some(conv) => Some(conv.0),
-                                            None => {
-                                                // Unknown session-scoped event: log and DROP.
-                                                // Do not emit as a global event — a late
-                                                // event from a dead generation must not
-                                                // leak into an active conversation.
-                                                tracing::warn!(
-                                                    target: "steersman_desktop_lib::ws",
-                                                    live_session_id = live_sid,
-                                                    "dropping event for unknown live session"
-                                                );
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    // No session_id → truly global event (e.g. gateway
-                                    // status). Emit with conversation_id=None.
-                                    _ => None,
+                        }
+                    }
+                    // Read incoming WS frames
+                    msg = ws.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                let value: Value = match serde_json::from_str(&text) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
                                 };
 
-// For session.info events, update the registry's
-                                // stored_session_id (never overwrites live ID).
-                                if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) =
-                                    &routed_event.event
-                                {
-                                    if let (Some(sessions), Some(live_sid)) =
-                                        (&sessions, &routed_event.session_id)
-                                {
-                                    if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
-                                        if let Some(conv) = sessions.route_event(live_sid, runtime_key).await {
-                                            sessions
-                                                .set_stored(&conv, p.stored_session_id.clone())
-                                                .await;
+                                match classify_frame(&value) {
+                                    Some(IncomingFrame::RpcResponse { id, result }) => {
+                                        if let Some(pending_req) = pending.remove(&id) {
+                                            let _ = pending_req.reply.send(Ok(result));
+                                        } else {
+                                            tracing::warn!(
+                                                target: "steersman_desktop_lib::ws",
+                                                id, "RPC response for unknown request"
+                                            );
                                         }
                                     }
-                                }
-                                }
+                                    Some(IncomingFrame::RpcError { id, error }) => {
+                                        if let Some(pending_req) = pending.remove(&id) {
+                                            let msg = error
+                                                .get("message")
+                                                .and_then(|m| m.as_str())
+                                                .unwrap_or("RPC error");
+                                            let _ = pending_req
+                                                .reply
+                                                .send(Err(GatewayClientError::BackendError(msg.to_string())));
+                                        }
+                                    }
+                                    Some(IncomingFrame::Event(routed_event)) => {
+                                        // Resolve the owning conversation via the live
+                                        // session_id in params. For session-scoped events
+                                        // (those carrying a session_id), an UNKNOWN live
+                                        // session must be dropped (early continue) — it is
+                                        // a stale event from a dead generation, not a
+                                        // global event. Only events WITHOUT a session_id
+                                        // (truly global gateway events) may be emitted
+                                        // with conversation_id=None.
+                                        let runtime_key = state.runtime_key();
+                                        let conversation_id = match (
+                                            &sessions,
+                                            routed_event.session_id.as_deref(),
+                                        ) {
+                                            (Some(sessions), Some(live_sid)) if !live_sid.is_empty() => {
+                                                match sessions.route_event(live_sid, runtime_key).await {
+                                                    Some(conv) => Some(conv.0),
+                                                    None => {
+                                                        // Unknown session-scoped event: log and DROP.
+                                                        // Do not emit as a global event — a late
+                                                        // event from a dead generation must not
+                                                        // leak into an active conversation.
+                                                        tracing::warn!(
+                                                            target: "steersman_desktop_lib::ws",
+                                                            live_session_id = live_sid,
+                                                            "dropping event for unknown live session"
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            // No session_id → truly global event (e.g. gateway
+                                            // status). Emit with conversation_id=None.
+                                            _ => None,
+                                        };
 
-                                // Translate via typed parser to ChatEvent.
-                                if let Some(chat_event) = translate_gateway_event(&routed_event) {
-                                    let routed = RoutedChatEvent {
-                                        conversation_id,
-                                        event: chat_event,
-                                    };
-                                    (emit_fn)(&routed);
+        // For session.info events, update the registry's
+                                        // stored_session_id (never overwrites live ID).
+                                        if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) =
+                                            &routed_event.event
+                                        {
+                                            if let (Some(sessions), Some(live_sid)) =
+                                                (&sessions, &routed_event.session_id)
+                                        {
+                                            if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
+                                                if let Some(conv) = sessions.route_event(live_sid, runtime_key).await {
+                                                    sessions
+                                                        .set_stored(&conv, p.stored_session_id.clone())
+                                                        .await;
+                                                }
+                                            }
+                                        }
+                                        }
+
+                                        // Translate via typed parser to ChatEvent.
+                                        if let Some(chat_event) = translate_gateway_event(&routed_event) {
+                                            let routed = RoutedChatEvent {
+                                                conversation_id,
+                                                event: chat_event,
+                                            };
+                                            (emit_fn)(&routed);
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!(target: "steersman_desktop_lib::ws", "unrecognized frame");
+                                    }
                                 }
+                            }
+                            Some(Ok(Message::Close(_))) => {
+                                tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
+                                break;
+                            }
+                            Some(Ok(_)) => {} // Binary, Ping, Pong — ignore
+                            Some(Err(e)) => {
+                                tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, "ws read error");
+                                break;
                             }
                             None => {
-                                tracing::warn!(target: "steersman_desktop_lib::ws", "unrecognized frame");
+                                tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
+                                break;
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        tracing::info!(target: "steersman_desktop_lib::ws", "server closed connection");
-                        break;
-                    }
-                    Some(Ok(_)) => {} // Binary, Ping, Pong — ignore
-                    Some(Err(e)) => {
-                        tracing::warn!(target: "steersman_desktop_lib::ws", error = %e, "ws read error");
-                        break;
-                    }
-                    None => {
-                        tracing::info!(target: "steersman_desktop_lib::ws", "stream ended");
-                        break;
-                    }
-                }
-            }
-            // Process commands from Tauri command handlers.
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(WsCommand::Rpc { id, method, params, reply }) => {
-                        // Build JSON-RPC 2.0 request
-                        let req = json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "method": method,
-                            "params": params,
-                        });
-                        // Register pending before sending
-                        pending.insert(
-                            id,
-                            PendingRequest {
-                                reply,
-                                method: method.clone(),
-                                timeout: Instant::now() + Duration::from_secs(30),
-                            },
-                        );
-                        // Send
-                        if let Err(e) = send_json_gateway(&mut ws, &req).await {
-                            tracing::warn!(
-                                target: "steersman_desktop_lib::ws",
-                                error = %e, method, "RPC send failed"
-                            );
-                            // Remove from pending and notify caller. A send
-                            // failure means the frame may have been partially
-                            // sent — for non-idempotent methods the outcome is
-                            // unknown (server may have processed it).
-                            if let Some(p) = pending.remove(&id) {
-                                let err = interruption_error(&p.method, InterruptionCause::SendFailure);
-                                let _ = p.reply.send(Err(err));
+                    // Process commands from Tauri command handlers.
+                    cmd = cmd_rx.recv() => {
+                        match cmd {
+                            Some(WsCommand::Rpc { id, method, params, reply }) => {
+                                // Build JSON-RPC 2.0 request
+                                let req = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "method": method,
+                                    "params": params,
+                                });
+                                // Register pending before sending
+                                pending.insert(
+                                    id,
+                                    PendingRequest {
+                                        reply,
+                                        method: method.clone(),
+                                        timeout: Instant::now() + Duration::from_secs(30),
+                                    },
+                                );
+                                // Send
+                                if let Err(e) = send_json_gateway(&mut ws, &req).await {
+                                    tracing::warn!(
+                                        target: "steersman_desktop_lib::ws",
+                                        error = %e, method, "RPC send failed"
+                                    );
+                                    // Remove from pending and notify caller. A send
+                                    // failure means the frame may have been partially
+                                    // sent — for non-idempotent methods the outcome is
+                                    // unknown (server may have processed it).
+                                    if let Some(p) = pending.remove(&id) {
+                                        let err = interruption_error(&p.method, InterruptionCause::SendFailure);
+                                        let _ = p.reply.send(Err(err));
+                                    }
+                                    break;
+                                }
                             }
-                            break;
+                            Some(WsCommand::Shutdown) | None => {
+                                tracing::info!(target: "steersman_desktop_lib::ws", "reader task shutting down");
+                                break;
+                            }
                         }
                     }
-                    Some(WsCommand::Shutdown) | None => {
-                        tracing::info!(target: "steersman_desktop_lib::ws", "reader task shutting down");
-                        break;
-                    }
                 }
-            }
-        }
     }
 
     // Generation-guarded cleanup: only clear state if we are still the current generation.
@@ -2758,7 +2755,10 @@ mod tests {
         assert_eq!(bb.live_session_id, None);
         assert_eq!(bb.stored_session_id.as_deref(), Some("durable-b"));
         // Stale live IDs no longer route events.
-        assert_eq!(sessions.route_event("live-a", RuntimeKey::Local).await, None);
+        assert_eq!(
+            sessions.route_event("live-a", RuntimeKey::Local).await,
+            None
+        );
     }
 
     /// Test 12: Reconnect restores multiple conversations by resuming durable
@@ -2823,10 +2823,19 @@ mod tests {
         let bb = sessions.get(&conv_b, RuntimeKey::Local).await.unwrap();
         assert_eq!(ba.state, SessionState::Active);
         assert_eq!(bb.state, SessionState::Active);
-        assert_eq!(sessions.route_event("live-a2", RuntimeKey::Local).await, Some(conv_a));
-        assert_eq!(sessions.route_event("live-b2", RuntimeKey::Local).await, Some(conv_b));
+        assert_eq!(
+            sessions.route_event("live-a2", RuntimeKey::Local).await,
+            Some(conv_a)
+        );
+        assert_eq!(
+            sessions.route_event("live-b2", RuntimeKey::Local).await,
+            Some(conv_b)
+        );
         // Old live IDs from generation 1 no longer route.
-        assert_eq!(sessions.route_event("live-a1", RuntimeKey::Local).await, None);
+        assert_eq!(
+            sessions.route_event("live-a1", RuntimeKey::Local).await,
+            None
+        );
     }
 
     /// Test 13: RPC retry classification uses an explicit SAFE allowlist.
@@ -3257,12 +3266,20 @@ mod tests {
 
         // Verify both bindings became Suspended automatically (reader cleanup).
         assert_eq!(
-            sessions.get(&conv_a, RuntimeKey::Local).await.unwrap().state,
+            sessions
+                .get(&conv_a, RuntimeKey::Local)
+                .await
+                .unwrap()
+                .state,
             SessionState::Suspended,
             "conv-a must be Suspended after real disconnect cleanup"
         );
         assert_eq!(
-            sessions.get(&conv_b, RuntimeKey::Local).await.unwrap().state,
+            sessions
+                .get(&conv_b, RuntimeKey::Local)
+                .await
+                .unwrap()
+                .state,
             SessionState::Suspended,
             "conv-b must be Suspended after real disconnect cleanup"
         );
@@ -3294,8 +3311,14 @@ mod tests {
         );
 
         // 5. Verify new live IDs in registry (Active, resumed).
-        let ba = sessions.get(&conv_a, RuntimeKey::Local).await.expect("conv-a binding");
-        let bb = sessions.get(&conv_b, RuntimeKey::Local).await.expect("conv-b binding");
+        let ba = sessions
+            .get(&conv_a, RuntimeKey::Local)
+            .await
+            .expect("conv-a binding");
+        let bb = sessions
+            .get(&conv_b, RuntimeKey::Local)
+            .await
+            .expect("conv-b binding");
         assert_eq!(
             ba.state,
             SessionState::Active,
@@ -3454,11 +3477,19 @@ mod tests {
         );
         // Both bindings restored.
         assert_eq!(
-            sessions.get(&conv_a, RuntimeKey::Local).await.unwrap().state,
+            sessions
+                .get(&conv_a, RuntimeKey::Local)
+                .await
+                .unwrap()
+                .state,
             SessionState::Active
         );
         assert_eq!(
-            sessions.get(&conv_b, RuntimeKey::Local).await.unwrap().state,
+            sessions
+                .get(&conv_b, RuntimeKey::Local)
+                .await
+                .unwrap()
+                .state,
             SessionState::Active
         );
     }

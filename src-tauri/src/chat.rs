@@ -590,9 +590,14 @@ async fn send_via_ws_persistent(
 
     // Ensure the persistent connection is open (idempotent).
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
-    crate::ws_transport::ensure_ws_connection(&ws_url, emit_fn, remote_ws_state, Some(sessions.clone()))
-        .await
-        .map_err(|e| e.to_string())?;
+    crate::ws_transport::ensure_ws_connection(
+        &ws_url,
+        emit_fn,
+        remote_ws_state,
+        Some(sessions.clone()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
     // The registry is the AUTHORITATIVE source of session IDs — every created
@@ -643,7 +648,11 @@ async fn send_via_ws_persistent(
             // otherwise register the binding so events route correctly.
             let synthetic_conv =
                 crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
-            if sessions.route_event(sid, remote_ws_state.runtime_key).await.is_none() {
+            if sessions
+                .route_event(sid, remote_ws_state.runtime_key)
+                .await
+                .is_none()
+            {
                 sessions
                     .set_live(
                         synthetic_conv,
@@ -685,13 +694,9 @@ async fn send_via_ws_persistent(
         };
 
     // Submit the prompt — events stream back via chat_event.
-    crate::ws_transport::submit_prompt_on_connection(
-        remote_ws_state,
-        &session_id,
-        &request.text,
-    )
-    .await
-    .map_err(|e| format!("{:?}", e))?;
+    crate::ws_transport::submit_prompt_on_connection(remote_ws_state, &session_id, &request.text)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
 
     Ok(session_id)
 }
@@ -759,7 +764,10 @@ pub async fn send_via_ws_persistent_local(
     let session_id =
         if let Some(conv_str) = request.conversation_id.as_deref().filter(|s| !s.is_empty()) {
             let conv = crate::session_registry::ConversationId::new(conv_str);
-            match sessions.get_live(&conv, crate::session_registry::RuntimeKey::Local).await {
+            match sessions
+                .get_live(&conv, crate::session_registry::RuntimeKey::Local)
+                .await
+            {
                 Some(live) => live,
                 None => {
                     // No live ID for this conversation yet — create one and register.
@@ -793,7 +801,11 @@ pub async fn send_via_ws_persistent_local(
             // otherwise register the binding so events route correctly.
             let synthetic_conv =
                 crate::session_registry::ConversationId::new(format!("legacy:{}", sid));
-            if sessions.route_event(sid, crate::session_registry::RuntimeKey::Local).await.is_none() {
+            if sessions
+                .route_event(sid, crate::session_registry::RuntimeKey::Local)
+                .await
+                .is_none()
+            {
                 sessions
                     .set_live(
                         synthetic_conv,

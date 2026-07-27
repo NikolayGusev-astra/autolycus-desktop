@@ -55,10 +55,7 @@ pub use profiles::ProfileInfo;
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
-pub use ws_transport::{
-    ensure_ws_connection,
-    submit_prompt_on_connection, to_ws_url, WsState,
-};
+pub use ws_transport::{ensure_ws_connection, submit_prompt_on_connection, to_ws_url, WsState};
 
 // ── App State ─────────────────────────────────────────────────────────────
 
