@@ -225,6 +225,7 @@ where
 /// Returns the session_id the turn ran under (created or resumed). The actual
 /// reply content arrives as streaming `Token` events via `chat_event`, exactly
 /// like the HTTP transport — the Ok value is just the session handle.
+#[allow(dead_code)]
 pub async fn send_message_via_ws(
     ws_url: &str,
     session_id: Option<&str>,
