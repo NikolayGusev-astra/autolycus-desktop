@@ -1390,7 +1390,10 @@ async fn reconcile_sessions<State>(
 where
     State: StateLike,
 {
-    let to_resume = sessions.take_suspended_for_resume(generation).await;
+    let runtime_key = ws_state.runtime_key();
+    let to_resume = sessions
+        .take_suspended_for_resume(generation, runtime_key)
+        .await;
     if to_resume.is_empty() {
         return ReconciliationReport::default();
     }
@@ -1412,7 +1415,7 @@ where
                 stored_id = %durable.stored_session_id,
                 "reconciliation stopped due to prior connection loss; returning to Suspended"
             );
-            sessions.return_to_suspended(&conv).await;
+            sessions.return_to_suspended(&conv, runtime_key).await;
             report.interrupted.push(conv);
             continue;
         }
@@ -1425,7 +1428,7 @@ where
                         stored_id = %durable.stored_session_id,
                         "resume returned empty live session_id"
                     );
-                    sessions.mark_resume_failed(&conv).await;
+                    sessions.mark_resume_failed(&conv, runtime_key).await;
                     report.failed.push(conv);
                     continue;
                 }
@@ -1445,7 +1448,7 @@ where
                         Some(new_stored),
                         durable.profile.clone(),
                         generation,
-                        ws_state.runtime_key(),
+                        runtime_key,
                     )
                     .await;
                 tracing::info!(
@@ -1475,7 +1478,7 @@ where
                         error = %e,
                         "session.resume interrupted; returning to Suspended for retry"
                     );
-                    sessions.return_to_suspended(&conv).await;
+                    sessions.return_to_suspended(&conv, runtime_key).await;
                     report.interrupted.push(conv);
                     // Mark that the connection is lost so subsequent resumes
                     // in this reconciliation are also marked interrupted.
@@ -1488,7 +1491,7 @@ where
                         error = %e,
                         "session.resume failed; marking ResumeFailed"
                     );
-                    sessions.mark_resume_failed(&conv).await;
+                    sessions.mark_resume_failed(&conv, runtime_key).await;
                     report.failed.push(conv);
                 }
             }
@@ -1742,7 +1745,7 @@ async fn reader_task<S, State>(
                                             if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
                                                 if let Some(conv) = sessions.route_event(live_sid, runtime_key).await {
                                                     sessions
-                                                        .set_stored(&conv, p.stored_session_id.clone())
+                                                        .set_stored(&conv, runtime_key, p.stored_session_id.clone())
                                                         .await;
                                                 }
                                             }
@@ -1846,7 +1849,9 @@ async fn reader_task<S, State>(
         if let Some(sessions) = &sessions {
             // Suspend THIS generation's bindings (== match). The dead socket's
             // live IDs become stale; durable IDs retained for resume.
-            sessions.suspend_generation(my_generation).await;
+            sessions
+                .suspend_generation(my_generation, state.runtime_key())
+                .await;
         }
     }
 
@@ -2743,7 +2748,9 @@ mod tests {
 
         // Simulate disconnect: reader task marks stale for the NEW generation
         // (2), so any binding from an older generation (1) becomes Suspended.
-        sessions.mark_stale_for_generation(2).await;
+        sessions
+            .mark_stale_for_generation(2, RuntimeKey::Local)
+            .await;
 
         // Both bindings must be Suspended.
         let ba = sessions.get(&conv_a, RuntimeKey::Local).await.unwrap();
@@ -2795,7 +2802,9 @@ mod tests {
             .await;
 
         // Disconnect (generation 1 dies).
-        sessions.mark_stale_for_generation(2).await;
+        sessions
+            .mark_stale_for_generation(2, RuntimeKey::Local)
+            .await;
 
         // Reconnect (generation 2): resume each durable session → new live IDs.
         sessions
@@ -3551,7 +3560,9 @@ mod tests {
         // manually transition to Resuming (as take_suspended_for_resume does),
         // then call suspend_generation to simulate the reader cleanup firing on
         // the second socket death during reconciliation.
-        sessions.take_suspended_for_resume(gen1).await; // transitions to Resuming
+        sessions
+            .take_suspended_for_resume(gen1, RuntimeKey::Local)
+            .await; // transitions to Resuming
         assert_eq!(
             sessions
                 .get(&ConversationId::new("c1"), RuntimeKey::Local)
@@ -3565,7 +3576,7 @@ mod tests {
         // The second reader task dies; its cleanup must return Resuming→Suspended.
         // In the real flow this is suspend_generation(gen2); here gen1 bindings
         // are Resuming so suspend_generation(gen1) tests the path.
-        sessions.suspend_generation(gen1).await;
+        sessions.suspend_generation(gen1, RuntimeKey::Local).await;
         assert_eq!(
             sessions
                 .get(&ConversationId::new("c1"), RuntimeKey::Local)

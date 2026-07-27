@@ -130,9 +130,9 @@ pub struct SessionRegistry {
 
 #[derive(Default)]
 struct RegistryInner {
-    by_conversation: HashMap<ConversationId, SessionBinding>,
+    by_conversation: HashMap<(RuntimeKey, ConversationId), SessionBinding>,
     /// Reverse index: live session ID → conversation ID, for event routing.
-    by_live_session: HashMap<String, ConversationId>,
+    by_live_session: HashMap<(RuntimeKey, String), ConversationId>,
 }
 
 impl SessionRegistry {
@@ -160,17 +160,18 @@ impl SessionRegistry {
         // live ID out of the immutable borrow before mutating the reverse map.
         let old_live_to_remove = inner
             .by_conversation
-            .get(&conversation_id)
+            .get(&(runtime_key, conversation_id.clone()))
             .and_then(|old| old.live_session_id.clone())
             .filter(|old_live| old_live != &live_session_id);
         if let Some(old_live) = old_live_to_remove {
-            inner.by_live_session.remove(&old_live);
+            inner.by_live_session.remove(&(runtime_key, old_live));
         }
-        inner
-            .by_live_session
-            .insert(live_session_id.clone(), conversation_id.clone());
-        inner.by_conversation.insert(
+        inner.by_live_session.insert(
+            (runtime_key, live_session_id.clone()),
             conversation_id.clone(),
+        );
+        inner.by_conversation.insert(
+            (runtime_key, conversation_id.clone()),
             SessionBinding {
                 conversation_id,
                 live_session_id: Some(live_session_id),
@@ -189,10 +190,14 @@ impl SessionRegistry {
     pub async fn set_stored(
         &self,
         conversation_id: &ConversationId,
+        runtime_key: RuntimeKey,
         stored_session_id: String,
     ) -> bool {
         let mut inner = self.inner.lock().await;
-        if let Some(b) = inner.by_conversation.get_mut(conversation_id) {
+        if let Some(b) = inner
+            .by_conversation
+            .get_mut(&(runtime_key, conversation_id.clone()))
+        {
             b.stored_session_id = Some(stored_session_id);
             true
         } else {
@@ -211,8 +216,7 @@ impl SessionRegistry {
         let inner = self.inner.lock().await;
         inner
             .by_conversation
-            .get(conversation_id)
-            .filter(|b| b.runtime_key == runtime_key)
+            .get(&(runtime_key, conversation_id.clone()))
             .and_then(|b| b.live_session_id.clone())
     }
 
@@ -225,8 +229,7 @@ impl SessionRegistry {
         let inner = self.inner.lock().await;
         inner
             .by_conversation
-            .get(conversation_id)
-            .filter(|b| b.runtime_key == runtime_key)
+            .get(&(runtime_key, conversation_id.clone()))
             .cloned()
     }
 
@@ -241,15 +244,7 @@ impl SessionRegistry {
         let inner = self.inner.lock().await;
         inner
             .by_live_session
-            .get(live_session_id)
-            .filter(|conv| {
-                // Verify the conversation belongs to the correct runtime
-                inner
-                    .by_conversation
-                    .get(conv)
-                    .map(|b| b.runtime_key == runtime_key)
-                    .unwrap_or(false)
-            })
+            .get(&(runtime_key, live_session_id.to_owned()))
             .cloned()
     }
 
@@ -257,24 +252,18 @@ impl SessionRegistry {
     /// retained for resume; only the live IDs are considered stale.
     pub async fn suspend_all(&self, runtime_key: RuntimeKey) {
         let mut inner = self.inner.lock().await;
-        for b in inner.by_conversation.values_mut() {
-            if b.runtime_key == runtime_key {
+        for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
+            if *binding_runtime_key == runtime_key {
                 b.state = SessionState::Suspended;
             }
         }
         // Live IDs for this runtime are now stale; clear the reverse index
         // so stale events don't route to a suspended conversation.
-        let to_remove: Vec<String> = inner
+        let to_remove: Vec<(RuntimeKey, String)> = inner
             .by_live_session
             .iter()
-            .filter_map(|(live, conv)| {
-                inner
-                    .by_conversation
-                    .get(conv)
-                    .map(|b| (live.clone(), b.runtime_key == runtime_key))
-            })
-            .filter(|(_, matches)| *matches)
-            .map(|(live, _)| live)
+            .filter(|((binding_runtime_key, _), _)| *binding_runtime_key == runtime_key)
+            .map(|(live, _)| live.clone())
             .collect();
         for live in to_remove {
             inner.by_live_session.remove(&live);
@@ -285,15 +274,19 @@ impl SessionRegistry {
     /// connection generation. Used after reconnect before reconciliation.
     /// Clears their live IDs (stale) so events from a dead connection don't
     /// route, while preserving durable stored IDs for resume.
-    pub async fn mark_stale_for_generation(&self, current_generation: u64) {
+    pub async fn mark_stale_for_generation(
+        &self,
+        current_generation: u64,
+        runtime_key: RuntimeKey,
+    ) {
         let mut inner = self.inner.lock().await;
         // Collect the stale live IDs first to avoid borrowing inner twice.
-        let mut stale_lives: Vec<String> = Vec::new();
-        for b in inner.by_conversation.values_mut() {
-            if b.connection_generation < current_generation {
+        let mut stale_lives: Vec<(RuntimeKey, String)> = Vec::new();
+        for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
+            if *binding_runtime_key == runtime_key && b.connection_generation < current_generation {
                 b.state = SessionState::Suspended;
                 if let Some(live) = b.live_session_id.take() {
-                    stale_lives.push(live);
+                    stale_lives.push((runtime_key, live));
                 }
             }
         }
@@ -308,10 +301,13 @@ impl SessionRegistry {
     /// in flight when the socket died). Both return to Suspended so the next
     /// reconnect retries them. Without the Resuming match, a disconnect during
     /// reconciliation would permanently strand the binding.
-    pub async fn suspend_generation(&self, dead_generation: u64) {
+    pub async fn suspend_generation(&self, dead_generation: u64, runtime_key: RuntimeKey) {
         let mut inner = self.inner.lock().await;
-        let mut stale_lives: Vec<String> = Vec::new();
-        for b in inner.by_conversation.values_mut() {
+        let mut stale_lives: Vec<(RuntimeKey, String)> = Vec::new();
+        for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
+            if *binding_runtime_key != runtime_key {
+                continue;
+            }
             let should_suspend = match &b.state {
                 SessionState::Active => b.connection_generation == dead_generation,
                 SessionState::Resuming { attempt_generation } => {
@@ -322,7 +318,7 @@ impl SessionRegistry {
             if should_suspend {
                 b.state = SessionState::Suspended;
                 if let Some(live) = b.live_session_id.take() {
-                    stale_lives.push(live);
+                    stale_lives.push((runtime_key, live));
                 }
             }
         }
@@ -340,11 +336,12 @@ impl SessionRegistry {
     pub async fn take_suspended_for_resume(
         &self,
         attempt_generation: u64,
+        runtime_key: RuntimeKey,
     ) -> Vec<(ConversationId, DurableSessionRef)> {
         let mut inner = self.inner.lock().await;
         let mut out = Vec::new();
-        for b in inner.by_conversation.values_mut() {
-            if b.state == SessionState::Suspended {
+        for ((binding_runtime_key, _), b) in inner.by_conversation.iter_mut() {
+            if *binding_runtime_key == runtime_key && b.state == SessionState::Suspended {
                 if let Some(stored) = b.stored_session_id.clone() {
                     if !stored.is_empty() {
                         b.state = SessionState::Resuming { attempt_generation };
@@ -363,9 +360,16 @@ impl SessionRegistry {
     }
 
     /// Mark a conversation's resume as failed (keeps durable ID for manual retry).
-    pub async fn mark_resume_failed(&self, conversation_id: &ConversationId) {
+    pub async fn mark_resume_failed(
+        &self,
+        conversation_id: &ConversationId,
+        runtime_key: RuntimeKey,
+    ) {
         let mut inner = self.inner.lock().await;
-        if let Some(b) = inner.by_conversation.get_mut(conversation_id) {
+        if let Some(b) = inner
+            .by_conversation
+            .get_mut(&(runtime_key, conversation_id.clone()))
+        {
             b.state = SessionState::ResumeFailed;
         }
     }
@@ -374,9 +378,16 @@ impl SessionRegistry {
     /// was interrupted by a network error (ConnectionLost/RpcTimeout) rather
     /// than a genuine backend rejection — the session may still be resumable on
     /// the next reconnect, so it must NOT be permanently marked ResumeFailed.
-    pub async fn return_to_suspended(&self, conversation_id: &ConversationId) {
+    pub async fn return_to_suspended(
+        &self,
+        conversation_id: &ConversationId,
+        runtime_key: RuntimeKey,
+    ) {
         let mut inner = self.inner.lock().await;
-        if let Some(b) = inner.by_conversation.get_mut(conversation_id) {
+        if let Some(b) = inner
+            .by_conversation
+            .get_mut(&(runtime_key, conversation_id.clone()))
+        {
             if matches!(b.state, SessionState::Resuming { .. }) {
                 b.state = SessionState::Suspended;
             }
@@ -390,11 +401,18 @@ impl SessionRegistry {
     }
 
     /// Remove a conversation entirely (e.g. user closes it).
-    pub async fn remove(&self, conversation_id: &ConversationId) -> Option<SessionBinding> {
+    pub async fn remove(
+        &self,
+        conversation_id: &ConversationId,
+        runtime_key: RuntimeKey,
+    ) -> Option<SessionBinding> {
         let mut inner = self.inner.lock().await;
-        if let Some(b) = inner.by_conversation.remove(conversation_id) {
+        if let Some(b) = inner
+            .by_conversation
+            .remove(&(runtime_key, conversation_id.clone()))
+        {
             if let Some(live) = &b.live_session_id {
-                inner.by_live_session.remove(live);
+                inner.by_live_session.remove(&(runtime_key, live.clone()));
             }
             Some(b)
         } else {
@@ -428,7 +446,9 @@ mod tests {
         .await;
         // Backend reports a stored_session_id via session.info — must NOT
         // replace the live ID used for prompt.submit.
-        let updated = r.set_stored(&conv, "stored-bbb".into()).await;
+        let updated = r
+            .set_stored(&conv, RuntimeKey::Local, "stored-bbb".into())
+            .await;
         assert!(
             updated,
             "set_stored should succeed for existing conversation"
@@ -536,7 +556,7 @@ mod tests {
         )
         .await;
         // Simulate reconnect to generation 2, before reconciliation.
-        r.mark_stale_for_generation(2).await;
+        r.mark_stale_for_generation(2, RuntimeKey::Local).await;
 
         let binding = r.get(&conv, RuntimeKey::Local).await.unwrap();
         assert_eq!(binding.state, SessionState::Suspended);
@@ -570,5 +590,49 @@ mod tests {
         .await;
         // An event for a session nobody owns.
         assert_eq!(r.route_event("live-orphan", RuntimeKey::Local).await, None);
+    }
+
+    #[tokio::test]
+    async fn runtimes_isolate_identical_conversation_and_live_ids() {
+        let r = reg();
+        let conv = ConversationId::new("conv-1");
+        for runtime_key in [RuntimeKey::Local, RuntimeKey::Remote] {
+            r.set_live(
+                conv.clone(),
+                "live-1".into(),
+                Some(format!("stored-{runtime_key:?}")),
+                ProfileId::empty(),
+                1,
+                runtime_key,
+            )
+            .await;
+        }
+
+        assert_eq!(r.len().await, 2);
+        assert_eq!(
+            r.route_event("live-1", RuntimeKey::Local).await,
+            Some(conv.clone())
+        );
+        assert_eq!(
+            r.route_event("live-1", RuntimeKey::Remote).await,
+            Some(conv.clone())
+        );
+
+        r.suspend_generation(1, RuntimeKey::Local).await;
+        assert_eq!(r.route_event("live-1", RuntimeKey::Local).await, None);
+        assert_eq!(
+            r.route_event("live-1", RuntimeKey::Remote).await,
+            Some(conv.clone())
+        );
+        assert_eq!(
+            r.take_suspended_for_resume(2, RuntimeKey::Local)
+                .await
+                .len(),
+            1
+        );
+        assert!(r
+            .take_suspended_for_resume(2, RuntimeKey::Remote)
+            .await
+            .is_empty());
     }
 }
