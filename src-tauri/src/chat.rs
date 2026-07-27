@@ -571,6 +571,7 @@ pub fn to_ws_url(url: &str) -> String {
 /// session_id (creating a session if the frontend didn't pass one), and
 /// submits the prompt via the reader task's mpsc channel. Streaming events
 /// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
+#[allow(clippy::too_many_arguments)]
 async fn send_via_ws_persistent(
     remote_ws_state: &std::sync::Arc<crate::ws_transport::GatewayClient>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
