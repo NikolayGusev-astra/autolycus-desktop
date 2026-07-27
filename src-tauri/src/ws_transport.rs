@@ -112,6 +112,18 @@ impl Debug for EndpointIdentity {
     }
 }
 
+/// Complete, non-secret description of the endpoint a connection attempt owns.
+///
+/// `identity` is intentionally supplied by the runtime owner rather than
+/// reconstructed by the transport so credential and SSH tunnel rotations are
+/// preserved through the whole connection lifecycle.
+#[derive(Clone, Debug)]
+pub struct EndpointSnapshot {
+    pub ws_url: String,
+    pub identity: EndpointIdentity,
+    pub runtime_key: crate::session_registry::RuntimeKey,
+}
+
 /// Build a gateway WebSocket URL without interpolating auth into the URL text.
 pub fn build_ws_url(base: &str, token: &str) -> Result<(String, GatewayAuth), WsError> {
     let mut url = Url::parse(&to_ws_url(base))
@@ -1196,9 +1208,14 @@ impl GatewayClient {
     /// connection state and session registry ownership. The next
     /// [`Self::ensure_connected`] call rotates the socket if the identity
     /// changed.
-    pub async fn configure_endpoint(&self, endpoint: impl Into<String>, auth: Option<GatewayAuth>) {
+    pub async fn configure_endpoint(
+        &self,
+        endpoint: impl Into<String>,
+        auth: Option<GatewayAuth>,
+        tunnel_generation: Option<u64>,
+    ) {
         let ws_url = endpoint.into();
-        let identity = EndpointIdentity::from_ws_url(&ws_url, auth.as_ref(), None);
+        let identity = EndpointIdentity::from_ws_url(&ws_url, auth.as_ref(), tunnel_generation);
         *self.endpoint.write().await = Box::new(StaticRuntimeEndpoint {
             ws_url,
             auth,
@@ -1221,13 +1238,19 @@ impl GatewayClient {
         // legacy helper continues deriving its compatibility identity from the
         // URL for callers that do not have a RuntimeEndpoint.
         let endpoint = self.endpoint.read().await;
-        let ws_url = endpoint.ws_url();
-        let _auth = endpoint.auth().cloned();
-        let _identity = endpoint.identity();
-        let _runtime_key = endpoint.runtime_key();
+        let snapshot = EndpointSnapshot {
+            ws_url: endpoint.ws_url(),
+            // Read auth alongside identity so the endpoint's full configuration
+            // remains the source of truth; identity contains its fingerprint.
+            identity: {
+                let _auth = endpoint.auth();
+                endpoint.identity()
+            },
+            runtime_key: endpoint.runtime_key(),
+        };
         drop(endpoint);
         let state = Arc::new(self.clone());
-        ensure_ws_connection(&ws_url, emit_fn, &state, sessions).await
+        ensure_connection_with_endpoint(snapshot, emit_fn, &state, sessions).await
     }
 }
 
@@ -1382,10 +1405,33 @@ pub async fn ensure_ws_connection<State>(
 where
     State: StateLike,
 {
+    let snapshot = EndpointSnapshot {
+        ws_url: ws_url.to_string(),
+        identity: EndpointIdentity::from_ws_url(ws_url, None, None),
+        runtime_key: ws_state.runtime_key(),
+    };
+    ensure_connection_with_endpoint(snapshot, emit_fn, ws_state, sessions).await
+}
+
+/// Core persistent connection lifecycle for a fully identified endpoint.
+async fn ensure_connection_with_endpoint<State>(
+    snapshot: EndpointSnapshot,
+    emit_fn: EmitFn,
+    ws_state: &Arc<State>,
+    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
+) -> Result<(), WsError>
+where
+    State: StateLike,
+{
     // Fast path: keep a live connection only when it belongs to the requested
     // endpoint identity. The token is represented only by its SHA-256
     // fingerprint, so credential rotation reconnects without retaining secrets.
-    let endpoint_identity = EndpointIdentity::from_ws_url(ws_url, None, None);
+    let EndpointSnapshot {
+        ws_url,
+        identity: endpoint_identity,
+        runtime_key,
+    } = snapshot;
+    debug_assert_eq!(runtime_key, ws_state.runtime_key());
     let redacted_url = endpoint_identity.public_url.clone();
     let shutdown_tx = {
         let mut runtime = ws_state.runtime().lock().await;
@@ -1448,7 +1494,7 @@ where
 
     // Connect.
     tracing::info!(target: "steersman_desktop_lib::ws", ws_url = %redacted_url, "opening persistent connection");
-    let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
+    let (ws, _resp) = match tokio_tungstenite::connect_async(&ws_url).await {
         Ok(result) => result,
         Err(e) => {
             ws_state.runtime().lock().await.state = ConnectionState::Disconnected;
@@ -2986,13 +3032,21 @@ mod tests {
         ));
 
         let (emit_a, _) = mock_emitter();
-        ensure_ws_connection(&url_a, emit_a, &gateway, None)
+        gateway
+            .configure_endpoint(url_a.clone(), Some(auth_a.clone()), None)
+            .await;
+        gateway
+            .ensure_connected(emit_a, None)
             .await
             .expect("connect token-A");
         let first_generation = gateway.generation.load(Ordering::Acquire);
 
         let (emit_b, _) = mock_emitter();
-        ensure_ws_connection(&url_b, emit_b, &gateway, None)
+        gateway
+            .configure_endpoint(url_b.clone(), Some(auth_b.clone()), None)
+            .await;
+        gateway
+            .ensure_connected(emit_b, None)
             .await
             .expect("reconnect token-B");
 
@@ -3004,6 +3058,48 @@ mod tests {
             auth_b.sha256_fingerprint()
         );
         assert_ne!(auth_a.sha256_fingerprint(), auth_b.sha256_fingerprint());
+        assert!(gateway.generation.load(Ordering::Acquire) > first_generation);
+    }
+
+    #[tokio::test]
+    async fn ensure_connected_rotates_when_ssh_tunnel_generation_changes() {
+        let ws_url = start_multi_runtime_mock_backend().await;
+        let (ws_url, auth) = build_ws_url(ws_url.split('?').next().unwrap(), "ssh-token").unwrap();
+        let gateway = Arc::new(GatewayClient::new(
+            RuntimeKey::Ssh("tunnel-identity".into()),
+            "",
+            None,
+        ));
+
+        let (emit_a, _) = mock_emitter();
+        gateway
+            .configure_endpoint(ws_url.clone(), Some(auth.clone()), Some(1))
+            .await;
+        gateway
+            .ensure_connected(emit_a, None)
+            .await
+            .expect("connect tunnel generation 1");
+        let first_generation = gateway.generation.load(Ordering::Acquire);
+
+        let (emit_b, _) = mock_emitter();
+        gateway
+            .configure_endpoint(ws_url, Some(auth), Some(2))
+            .await;
+        gateway
+            .ensure_connected(emit_b, None)
+            .await
+            .expect("reconnect tunnel generation 2");
+
+        let runtime = gateway.runtime.lock().await;
+        assert_eq!(runtime.state, ConnectionState::Connected);
+        assert_eq!(
+            runtime
+                .endpoint_identity
+                .as_ref()
+                .unwrap()
+                .tunnel_generation,
+            Some(2)
+        );
         assert!(gateway.generation.load(Ordering::Acquire) > first_generation);
     }
 

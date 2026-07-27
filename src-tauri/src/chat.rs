@@ -577,6 +577,7 @@ async fn send_via_ws_persistent(
     runtime_key: crate::session_registry::RuntimeKey,
     remote_url: &str,
     token: &str,
+    tunnel_generation: Option<u64>,
     request: &SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
@@ -596,7 +597,9 @@ async fn send_via_ws_persistent(
     // The GatewayClient owns the current endpoint. Updating it here preserves
     // the persistent connection state while allowing Settings changes to rotate
     // the URL or token on the next connection attempt.
-    remote_ws_state.configure_endpoint(ws_url, Some(auth)).await;
+    remote_ws_state
+        .configure_endpoint(ws_url, Some(auth), tunnel_generation)
+        .await;
 
     // Ensure the persistent connection is open (idempotent).
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
@@ -912,6 +915,7 @@ pub async fn send_message(
                 crate::session_registry::RuntimeKey::Remote(config::remote_instance_id(remote_url)),
                 remote_url,
                 remote_api_key,
+                None,
                 &request,
                 app_handle,
             )
@@ -930,6 +934,7 @@ pub async fn send_message(
 
             let tunnel_url =
                 crate::ssh::get_tunnel_url(ssh_state).ok_or("SSH tunnel not available")?;
+            let tunnel_generation = ssh_state.tunnel_generation();
 
             // The remote backend's session token (same resolution as Remote).
             let tunneled_token = config::get_api_server_key(hermes_home, None)
@@ -950,6 +955,7 @@ pub async fn send_message(
                 crate::session_registry::RuntimeKey::Ssh(config::ssh_tunnel_id(ssh)),
                 &tunnel_url,
                 &tunneled_token,
+                Some(tunnel_generation),
                 &request,
                 app_handle,
             )

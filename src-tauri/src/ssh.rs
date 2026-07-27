@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Child;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,6 +47,7 @@ pub struct SshState {
     pub tunnel_process: Arc<Mutex<Option<Child>>>,
     pub active_config: Arc<Mutex<Option<SshConfig>>>,
     pub tunnel_running: Arc<Mutex<bool>>,
+    tunnel_generation: AtomicU64,
 }
 
 impl SshState {
@@ -54,7 +56,13 @@ impl SshState {
             tunnel_process: Arc::new(Mutex::new(None)),
             active_config: Arc::new(Mutex::new(None)),
             tunnel_running: Arc::new(Mutex::new(false)),
+            tunnel_generation: AtomicU64::new(0),
         }
+    }
+
+    /// Monotonically increasing generation of successfully started tunnels.
+    pub fn tunnel_generation(&self) -> u64 {
+        self.tunnel_generation.load(Ordering::Acquire)
     }
 }
 
@@ -177,6 +185,7 @@ pub fn start_ssh_tunnel(
     *state.tunnel_running.lock().unwrap() = true;
     *state.active_config.lock().unwrap() = Some(config);
     *state.tunnel_process.lock().unwrap() = Some(child);
+    state.tunnel_generation.fetch_add(1, Ordering::Release);
 
     Ok(local_port)
 }
