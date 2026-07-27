@@ -56,10 +56,8 @@ pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
 pub use ws_transport::{
-    create_session_on_connection_remote, create_session_on_connection_ssh,
-    ensure_remote_ws_connection, ensure_ssh_ws_connection, ensure_ws_connection,
-    submit_prompt_on_connection, submit_prompt_on_connection_remote,
-    submit_prompt_on_connection_ssh, to_ws_url, RemoteWsState, SshWsState, WsState,
+    ensure_ws_connection,
+    submit_prompt_on_connection, to_ws_url, WsState,
 };
 
 // ── App State ─────────────────────────────────────────────────────────────
@@ -77,9 +75,9 @@ pub struct AppState {
     /// connect-per-message. Remote/SSH modes use their own persistent states.
     pub ws: std::sync::Arc<ws_transport::WsState>,
     /// Persistent WS connection to a remote `hermes serve` backend.
-    pub remote_ws: std::sync::Arc<ws_transport::RemoteWsState>,
+    pub remote_ws: std::sync::Arc<ws_transport::GatewayClient>,
     /// Persistent WS connection to a remote backend via SSH tunnel.
-    pub ssh_ws: std::sync::Arc<ws_transport::SshWsState>,
+    pub ssh_ws: std::sync::Arc<ws_transport::GatewayClient>,
     /// Phase 1C.2: session registry mapping conversation IDs (product layer)
     /// to Hermes live/durable session IDs. Replaces the single global
     /// session_id that was on WsState.
@@ -94,8 +92,14 @@ impl AppState {
             hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
-            remote_ws: std::sync::Arc::new(ws_transport::RemoteWsState::new()),
-            ssh_ws: std::sync::Arc::new(ws_transport::SshWsState::new()),
+            remote_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
+                session_registry::RuntimeKey::Remote,
+                String::new(),
+            )),
+            ssh_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
+                session_registry::RuntimeKey::Ssh,
+                String::new(),
+            )),
             sessions: session_registry::SessionRegistry::new(),
         }
     }

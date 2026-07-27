@@ -35,6 +35,16 @@ pub struct ConversationId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ProfileId(pub String);
 
+/// Runtime identity: Local Hermes, Remote Hermes, or SSH-tunneled Hermes.
+/// Bindings are scoped to a specific runtime so Local/Remote/SSH sessions
+/// don't mix in the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeKey {
+    Local,
+    Remote,
+    Ssh,
+}
+
 impl ProfileId {
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
@@ -98,14 +108,14 @@ pub struct SessionBinding {
     pub conversation_id: ConversationId,
     pub live_session_id: Option<String>,
     pub stored_session_id: Option<String>,
-    /// Profile scope for this binding's durable ID. Resume must key on
-    /// (profile, stored_session_id), not stored_session_id alone.
     pub profile: ProfileId,
     pub state: SessionState,
     /// The connection generation this binding's live ID belongs to. A
     /// generation mismatch means the live ID is stale and must be resumed
     /// before use (Phase 1C.3 reconnect reconciliation).
     pub connection_generation: u64,
+    /// The runtime this binding belongs to (Local/Remote/SSH).
+    pub runtime_key: RuntimeKey,
 }
 
 /// Registry mapping conversations ↔ Hermes session IDs, indexed both ways for
@@ -142,6 +152,7 @@ impl SessionRegistry {
         stored_session_id: Option<String>,
         profile: ProfileId,
         connection_generation: u64,
+        runtime_key: RuntimeKey,
     ) {
         let mut inner = self.inner.lock().await;
         // Remove the old reverse mapping if the conversation already had a
@@ -167,6 +178,7 @@ impl SessionRegistry {
                 profile,
                 state: SessionState::Active,
                 connection_generation,
+                runtime_key,
             },
         );
     }
@@ -191,38 +203,75 @@ impl SessionRegistry {
     /// Look up the live session ID for a conversation (for `prompt.submit`).
     /// Returns None if the conversation is unknown or has no live ID (must
     /// create/resume first).
-    pub async fn get_live(&self, conversation_id: &ConversationId) -> Option<String> {
+    pub async fn get_live(
+        &self,
+        conversation_id: &ConversationId,
+        runtime_key: RuntimeKey,
+    ) -> Option<String> {
         let inner = self.inner.lock().await;
         inner
             .by_conversation
             .get(conversation_id)
+            .filter(|b| b.runtime_key == runtime_key)
             .and_then(|b| b.live_session_id.clone())
     }
 
     /// Get the full binding for a conversation.
-    pub async fn get(&self, conversation_id: &ConversationId) -> Option<SessionBinding> {
+    pub async fn get(
+        &self,
+        conversation_id: &ConversationId,
+        runtime_key: RuntimeKey,
+    ) -> Option<SessionBinding> {
         let inner = self.inner.lock().await;
-        inner.by_conversation.get(conversation_id).cloned()
+        inner
+            .by_conversation
+            .get(conversation_id)
+            .filter(|b| b.runtime_key == runtime_key)
+            .cloned()
     }
 
     /// Route an inbound event: given the external live session ID from
     /// `params.session_id`, find the owning conversation. Returns None for
     /// unknown sessions (logged by caller, not assigned to a random convo).
-    pub async fn route_event(&self, live_session_id: &str) -> Option<ConversationId> {
+    pub async fn route_event(
+        &self,
+        live_session_id: &str,
+        runtime_key: RuntimeKey,
+    ) -> Option<ConversationId> {
         let inner = self.inner.lock().await;
-        inner.by_live_session.get(live_session_id).cloned()
+        inner
+            .by_live_session
+            .get(live_session_id)
+            .filter(|conv| {
+                // Verify the conversation belongs to the correct runtime
+                inner.by_conversation.get(conv).map(|b| b.runtime_key == runtime_key).unwrap_or(false)
+            })
+            .cloned()
     }
 
-    /// Transition all bindings to Suspended (on disconnect). Durable IDs are
+/// Transition all bindings to Suspended (on disconnect). Durable IDs are
     /// retained for resume; only the live IDs are considered stale.
-    pub async fn suspend_all(&self) {
+    pub async fn suspend_all(&self, runtime_key: RuntimeKey) {
         let mut inner = self.inner.lock().await;
         for b in inner.by_conversation.values_mut() {
-            b.state = SessionState::Suspended;
+            if b.runtime_key == runtime_key {
+                b.state = SessionState::Suspended;
+            }
         }
-        // Live IDs are now stale; clear the reverse index so stale events
-        // don't route to a suspended conversation.
-        inner.by_live_session.clear();
+        // Live IDs for this runtime are now stale; clear the reverse index
+        // so stale events don't route to a suspended conversation.
+        let to_remove: Vec<String> = inner
+            .by_live_session
+            .iter()
+            .filter_map(|(live, conv)| {
+                inner.by_conversation.get(conv).map(|b| (live.clone(), b.runtime_key == runtime_key))
+            })
+            .filter(|(_, matches)| *matches)
+            .map(|(live, _)| live)
+            .collect();
+        for live in to_remove {
+            inner.by_live_session.remove(&live);
+        }
     }
 
     /// Mark all bindings as Suspended if their generation predates the current
@@ -361,7 +410,7 @@ mod tests {
     async fn live_and_stored_ids_do_not_mix() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv.clone(), "live-aaa".into(), None, ProfileId::empty(), 1)
+        r.set_live(conv.clone(), "live-aaa".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
             .await;
         // Backend reports a stored_session_id via session.info — must NOT
         // replace the live ID used for prompt.submit.
@@ -370,12 +419,12 @@ mod tests {
             updated,
             "set_stored should succeed for existing conversation"
         );
-        let live = r.get_live(&conv).await.unwrap();
+        let live = r.get_live(&conv, RuntimeKey::Local).await.unwrap();
         assert_eq!(
             live, "live-aaa",
             "live ID must not be overwritten by stored ID"
         );
-        let binding = r.get(&conv).await.unwrap();
+        let binding = r.get(&conv, RuntimeKey::Local).await.unwrap();
         assert_eq!(binding.stored_session_id.as_deref(), Some("stored-bbb"));
         assert_eq!(binding.live_session_id.as_deref(), Some("live-aaa"));
     }
@@ -387,14 +436,14 @@ mod tests {
         let r = reg();
         let conv_a = ConversationId::new("conv-a");
         let conv_b = ConversationId::new("conv-b");
-        r.set_live(conv_a.clone(), "live-a".into(), None, ProfileId::empty(), 1)
+        r.set_live(conv_a.clone(), "live-a".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
             .await;
-        r.set_live(conv_b.clone(), "live-b".into(), None, ProfileId::empty(), 1)
+        r.set_live(conv_b.clone(), "live-b".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
             .await;
 
-        assert_eq!(r.route_event("live-a").await, Some(conv_a));
-        assert_eq!(r.route_event("live-b").await, Some(conv_b));
-        assert_eq!(r.route_event("live-unknown").await, None);
+        assert_eq!(r.route_event("live-a", RuntimeKey::Local).await, Some(conv_a));
+        assert_eq!(r.route_event("live-b", RuntimeKey::Local).await, Some(conv_b));
+        assert_eq!(r.route_event("live-unknown", RuntimeKey::Local).await, None);
     }
 
     /// Test 8: After a reconnect (new live ID), set_live atomically replaces
@@ -410,6 +459,7 @@ mod tests {
             Some("stored-1".into()),
             ProfileId::empty(),
             1,
+            RuntimeKey::Local,
         )
         .await;
         // Reconnect: new live ID, same stored/durable ID.
@@ -419,15 +469,16 @@ mod tests {
             Some("stored-1".into()),
             ProfileId::empty(),
             2,
+            RuntimeKey::Local,
         )
         .await;
 
         // Old live ID no longer routes.
-        assert_eq!(r.route_event("live-old").await, None);
+        assert_eq!(r.route_event("live-old", RuntimeKey::Local).await, None);
         // New live ID routes correctly.
-        assert_eq!(r.route_event("live-new").await, Some(conv.clone()));
+        assert_eq!(r.route_event("live-new", RuntimeKey::Local).await, Some(conv.clone()));
         // Durable stored ID is preserved.
-        let binding = r.get(&conv).await.unwrap();
+        let binding = r.get(&conv, RuntimeKey::Local).await.unwrap();
         assert_eq!(binding.stored_session_id.as_deref(), Some("stored-1"));
         assert_eq!(binding.connection_generation, 2);
     }
@@ -444,12 +495,13 @@ mod tests {
             Some("stored-1".into()),
             ProfileId::empty(),
             1,
+            RuntimeKey::Local,
         )
         .await;
         // Simulate reconnect to generation 2, before reconciliation.
         r.mark_stale_for_generation(2).await;
 
-        let binding = r.get(&conv).await.unwrap();
+        let binding = r.get(&conv, RuntimeKey::Local).await.unwrap();
         assert_eq!(binding.state, SessionState::Suspended);
         assert_eq!(
             binding.live_session_id, None,
@@ -461,7 +513,7 @@ mod tests {
             "durable ID must be retained"
         );
         // Stale live ID no longer routes.
-        assert_eq!(r.route_event("live-1").await, None);
+        assert_eq!(r.route_event("live-1", RuntimeKey::Local).await, None);
     }
 
     /// Test 10: An unknown live session event is not assigned to any
@@ -470,9 +522,9 @@ mod tests {
     async fn unknown_live_event_not_assigned() {
         let r = reg();
         let conv = ConversationId::new("conv-1");
-        r.set_live(conv, "live-known".into(), None, ProfileId::empty(), 1)
+        r.set_live(conv, "live-known".into(), None, ProfileId::empty(), 1, RuntimeKey::Local)
             .await;
         // An event for a session nobody owns.
-        assert_eq!(r.route_event("live-orphan").await, None);
+        assert_eq!(r.route_event("live-orphan", RuntimeKey::Local).await, None);
     }
 }

@@ -58,8 +58,8 @@ fn next_rpc_id() -> RpcId {
 /// Generic RPC dispatcher for the persistent connection.
 /// Sends a command through the mpsc channel, waits for the response with timeout,
 /// and returns the parsed result or a typed error.
-pub async fn call_rpc<P, R>(
-    ws_state: &WsState,
+pub async fn call_rpc<P, R, State>(
+    ws_state: &State,
     method: &'static str,
     params: P,
     timeout: Duration,
@@ -67,12 +67,13 @@ pub async fn call_rpc<P, R>(
 where
     P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
     R: for<'de> Deserialize<'de> + std::fmt::Debug,
+    State: StateLike + ?Sized,
 {
     // Clone the sender under the runtime lock, then release immediately.
     // This prevents holding the connection mutex across an async await,
     // which would block reader cleanup and state transitions.
     let tx = {
-        let runtime = ws_state.runtime.lock().await;
+        let runtime = ws_state.runtime().lock().await;
 
         // Check connection state atomically with sender retrieval.
         // Allow Connecting state for the handshake phase (session.create/resume).
@@ -121,79 +122,17 @@ where
 /// Submit a prompt on the persistent connection using the generic RPC dispatcher.
 /// Waits for the RPC acknowledgement from Hermes before returning.
 ///
-/// Refuses to send if the compatibility handshake has not completed or failed
-/// Submit a prompt on a remote persistent connection.
-pub async fn submit_prompt_on_connection_remote(
-    remote_state: &Arc<RemoteWsState>,
-    session_id: &str,
-    text: &str,
-) -> Result<PromptSubmitResult, WsError> {
-    {
-        let compat = remote_state.compatibility.lock().await;
-        match &*compat {
-            crate::hermes_protocol::RuntimeCompatibility::Compatible { .. } => {}
-            crate::hermes_protocol::RuntimeCompatibility::Unknown => {
-                return Err(WsError::Protocol(
-                    "prompt.submit before compatibility handshake".into(),
-                ));
-            }
-            other => {
-                return Err(WsError::Incompatible(other.clone()));
-            }
-        }
-    }
-    call_rpc_remote(
-        remote_state,
-        "prompt.submit",
-        PromptSubmitParams {
-            session_id: session_id.to_owned(),
-            text: text.to_owned(),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
-/// Submit a prompt on an SSH persistent connection.
-pub async fn submit_prompt_on_connection_ssh(
-    ssh_state: &Arc<SshWsState>,
-    session_id: &str,
-    text: &str,
-) -> Result<PromptSubmitResult, WsError> {
-    {
-        let compat = ssh_state.compatibility.lock().await;
-        match &*compat {
-            crate::hermes_protocol::RuntimeCompatibility::Compatible { .. } => {}
-            crate::hermes_protocol::RuntimeCompatibility::Unknown => {
-                return Err(WsError::Protocol(
-                    "prompt.submit before compatibility handshake".into(),
-                ));
-            }
-            other => {
-                return Err(WsError::Incompatible(other.clone()));
-            }
-        }
-    }
-    call_rpc_ssh(
-        ssh_state,
-        "prompt.submit",
-        PromptSubmitParams {
-            session_id: session_id.to_owned(),
-            text: text.to_owned(),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
 /// Create a session on the persistent connection using the generic RPC dispatcher.
 /// `requested_profile` selects the Hermes profile scope (state.db, config, etc.);
 /// pass None for the launch/default profile.
-pub async fn create_session_on_connection(
-    ws_state: &WsState,
+pub async fn create_session_on_connection<State>(
+    ws_state: &State,
     source: &str,
     requested_profile: Option<&str>,
-) -> Result<SessionCreateResult, WsError> {
+) -> Result<SessionCreateResult, WsError>
+where
+    State: StateLike + ?Sized,
+{
     call_rpc(
         ws_state,
         "session.create",
@@ -213,14 +152,17 @@ pub async fn create_session_on_connection(
 /// Refuses to send if the compatibility handshake has not completed or failed
 /// (Phase 1C.1): `prompt.submit` must not proceed against an unknown or
 /// incompatible backend.
-pub async fn submit_prompt_on_connection(
-    ws_state: &WsState,
+pub async fn submit_prompt_on_connection<State>(
+    ws_state: &State,
     session_id: &str,
     text: &str,
-) -> Result<PromptSubmitResult, WsError> {
+) -> Result<PromptSubmitResult, WsError>
+where
+    State: StateLike + ?Sized,
+{
     // Compatibility gate: do not allow user work until the handshake succeeds.
     {
-        let compat = ws_state.compatibility.lock().await;
+        let compat = ws_state.compatibility().lock().await;
         match &*compat {
             crate::hermes_protocol::RuntimeCompatibility::Compatible { .. } => {}
             crate::hermes_protocol::RuntimeCompatibility::Unknown => {
@@ -249,10 +191,13 @@ pub async fn submit_prompt_on_connection(
 /// reconciliation loop to obtain a fresh live session_id for the new connection
 /// while preserving conversation history. Sends `session_id` (the durable ID)
 /// in the wire params per the real Hermes contract.
-pub async fn resume_session_on_connection(
-    ws_state: &WsState,
+pub async fn resume_session_on_connection<State>(
+    ws_state: &State,
     durable: &crate::session_registry::DurableSessionRef,
-) -> Result<crate::hermes_protocol::SessionResumeResult, WsError> {
+) -> Result<crate::hermes_protocol::SessionResumeResult, WsError>
+where
+    State: StateLike + ?Sized,
+{
     call_rpc(
         ws_state,
         "session.resume",
@@ -1047,13 +992,78 @@ impl Default for ConnectionRuntime {
     }
 }
 
+/// Identifies the WebSocket endpoint used by a gateway runtime.
+pub trait RuntimeEndpoint {
+    fn ws_url(&self) -> &str;
+}
+
+/// Fixed endpoint used while GatewayClient owns a single runtime URL.
+struct StaticRuntimeEndpoint(String);
+
+impl RuntimeEndpoint for StaticRuntimeEndpoint {
+    fn ws_url(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Persistent WebSocket client for one Local, Remote, or SSH runtime.
+///
+/// This is the Phase 1 replacement for the three legacy state types. The
+/// existing types remain in use until their callers move to this client.
+pub struct GatewayClient {
+    pub runtime: Arc<tokio::sync::Mutex<ConnectionRuntime>>,
+    pub generation: AtomicU64,
+    pub connect_lock: tokio::sync::Mutex<()>,
+    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
+    pub runtime_key: crate::session_registry::RuntimeKey,
+    pub endpoint: Box<dyn RuntimeEndpoint + Send + Sync>,
+}
+
+impl GatewayClient {
+    /// Creates a disconnected client for a runtime and its WebSocket endpoint.
+    pub fn new(
+        runtime_key: crate::session_registry::RuntimeKey,
+        ws_url: impl Into<String>,
+    ) -> Self {
+        let ws_url = ws_url.into();
+        Self {
+            runtime: Arc::new(tokio::sync::Mutex::new(ConnectionRuntime {
+                ws_url: ws_url.clone(),
+                ..ConnectionRuntime::default()
+            })),
+            generation: AtomicU64::new(1),
+            connect_lock: tokio::sync::Mutex::new(()),
+            compatibility: tokio::sync::Mutex::new(
+                crate::hermes_protocol::RuntimeCompatibility::Unknown,
+            ),
+            runtime_key,
+            endpoint: Box::new(StaticRuntimeEndpoint(ws_url)),
+        }
+    }
+}
+
+impl Default for GatewayClient {
+    fn default() -> Self {
+        Self::new(crate::session_registry::RuntimeKey::Local, String::new())
+    }
+}
+
+// Keep this compile-time contract explicit while the legacy states coexist.
+#[allow(dead_code)]
+fn assert_gateway_client_traits()
+where
+    GatewayClient: Send + Sync + 'static,
+{
+}
+
 /// Trait for state types that can be used with the reader task.
-/// All state types (WsState, RemoteWsState, SshWsState) have the same
-/// runtime, generation, and connect_lock fields.
-trait StateLike: Send + Sync + 'static {
+pub trait StateLike: Send + Sync + 'static {
     fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime>;
     fn generation(&self) -> &std::sync::atomic::AtomicU64;
     fn connect_lock(&self) -> &tokio::sync::Mutex<()>;
+    fn compatibility(&self) -> &tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>;
+    /// Returns the RuntimeKey for this state type (Local/Remote/Ssh).
+    fn runtime_key(&self) -> crate::session_registry::RuntimeKey;
 }
 
 // Blanket implementation for Arc<T> where T: StateLike
@@ -1067,6 +1077,30 @@ impl<T: StateLike + ?Sized> StateLike for Arc<T> {
     fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
         (**self).connect_lock()
     }
+    fn compatibility(&self) -> &tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility> {
+        (**self).compatibility()
+    }
+    fn runtime_key(&self) -> crate::session_registry::RuntimeKey {
+        (**self).runtime_key()
+    }
+}
+
+impl StateLike for GatewayClient {
+    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
+        self.runtime.as_ref()
+    }
+    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.generation
+    }
+    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.connect_lock
+    }
+    fn compatibility(&self) -> &tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility> {
+        &self.compatibility
+    }
+    fn runtime_key(&self) -> crate::session_registry::RuntimeKey {
+        self.runtime_key
+    }
 }
 
 impl StateLike for WsState {
@@ -1079,29 +1113,11 @@ impl StateLike for WsState {
     fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.connect_lock
     }
-}
-
-impl StateLike for RemoteWsState {
-    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
-        &self.runtime
+    fn compatibility(&self) -> &tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility> {
+        &self.compatibility
     }
-    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
-        &self.generation
-    }
-    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
-        &self.connect_lock
-    }
-}
-
-impl StateLike for SshWsState {
-    fn runtime(&self) -> &tokio::sync::Mutex<ConnectionRuntime> {
-        &self.runtime
-    }
-    fn generation(&self) -> &std::sync::atomic::AtomicU64 {
-        &self.generation
-    }
-    fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
-        &self.connect_lock
+    fn runtime_key(&self) -> crate::session_registry::RuntimeKey {
+        crate::session_registry::RuntimeKey::Local
     }
 }
 
@@ -1151,91 +1167,6 @@ impl Default for WsState {
     }
 }
 
-/// Persistent WS connection state for Remote mode.
-///
-/// Same structure as `WsState` but for a remote backend URL.
-/// Used by Remote mode to maintain a single persistent WS connection
-/// to a remote `hermes serve` instance.
-pub struct RemoteWsState {
-    /// Connection runtime: generation, state, cmd_tx, ws_url under one lock.
-    pub runtime: tokio::sync::Mutex<ConnectionRuntime>,
-    /// Serializes concurrent connect attempts.
-    pub connect_lock: tokio::sync::Mutex<()>,
-    /// Runtime compatibility result (reset on each connect).
-    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
-    /// Monotonically increasing generation counter.
-    pub generation: std::sync::atomic::AtomicU64,
-}
-
-impl RemoteWsState {
-    /// Create a fresh Disconnected state.
-    pub fn new() -> Self {
-        Self {
-            runtime: tokio::sync::Mutex::new(ConnectionRuntime::default()),
-            connect_lock: tokio::sync::Mutex::new(()),
-            compatibility: tokio::sync::Mutex::new(
-                crate::hermes_protocol::RuntimeCompatibility::Unknown,
-            ),
-            generation: std::sync::atomic::AtomicU64::new(1),
-        }
-    }
-
-    /// Bump generation and return the new value.
-    pub fn next_generation(&self) -> u64 {
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::Release)
-            + 1
-    }
-}
-
-impl Default for RemoteWsState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Persistent WS connection state for SSH mode.
-///
-/// Same structure as `WsState` but for a remote backend accessed
-/// via an SSH tunnel. The tunnel itself is managed by `ssh.rs`.
-pub struct SshWsState {
-    /// Connection runtime: generation, state, cmd_tx, ws_url under one lock.
-    pub runtime: tokio::sync::Mutex<ConnectionRuntime>,
-    /// Serializes concurrent connect attempts.
-    pub connect_lock: tokio::sync::Mutex<()>,
-    /// Runtime compatibility result (reset on each connect).
-    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
-    /// Monotonically increasing generation counter.
-    pub generation: std::sync::atomic::AtomicU64,
-}
-
-impl SshWsState {
-    /// Create a fresh Disconnected state.
-    pub fn new() -> Self {
-        Self {
-            runtime: tokio::sync::Mutex::new(ConnectionRuntime::default()),
-            connect_lock: tokio::sync::Mutex::new(()),
-            compatibility: tokio::sync::Mutex::new(
-                crate::hermes_protocol::RuntimeCompatibility::Unknown,
-            ),
-            generation: std::sync::atomic::AtomicU64::new(1),
-        }
-    }
-
-    /// Bump generation and return the new value.
-    pub fn next_generation(&self) -> u64 {
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::Release)
-            + 1
-    }
-}
-
-impl Default for SshWsState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ── T2 (ADR-006): ensure_ws_connection + reader_task ───────────────────────
 //
 // ensure_ws_connection opens the socket ONCE (idempotent: if already Connected
@@ -1253,15 +1184,18 @@ impl Default for SshWsState {
 /// stores the `cmd_tx` sender into `ws_state`, and sets state to `Connected`.
 /// On socket drop (detected by the reader task), state returns to
 /// `Disconnected` and the next call re-connects.
-pub async fn ensure_ws_connection(
+pub async fn ensure_ws_connection<State>(
     ws_url: &str,
     emit_fn: EmitFn,
-    ws_state: &Arc<WsState>,
+    ws_state: &Arc<State>,
     sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
-) -> Result<(), WsError> {
+) -> Result<(), WsError>
+where
+    State: StateLike,
+{
     // Fast path: already connected (no lock contention on connect_lock).
     {
-        let runtime = ws_state.runtime.lock().await;
+        let runtime = ws_state.runtime().lock().await;
         if runtime.state == ConnectionState::Connected {
             return Ok(());
         }
@@ -1270,12 +1204,12 @@ pub async fn ensure_ws_connection(
     // Serialize concurrent connect attempts. The first caller does the actual
     // connect; subsequent callers acquire the lock after the first finishes
     // and observe the final state.
-    let _connect_guard = ws_state.connect_lock.lock().await;
+    let _connect_guard = ws_state.connect_lock().lock().await;
 
     // Double-check after acquiring the lock — the first caller may have already
     // connected while we were waiting.
     {
-        let mut runtime = ws_state.runtime.lock().await;
+        let mut runtime = ws_state.runtime().lock().await;
         match runtime.state {
             ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
             ConnectionState::Connecting => {
@@ -1293,7 +1227,7 @@ pub async fn ensure_ws_connection(
     let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
         Ok(result) => result,
         Err(e) => {
-            ws_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            ws_state.runtime().lock().await.state = ConnectionState::Disconnected;
             return Err(WsError::Connect(e.to_string()));
         }
     };
@@ -1304,11 +1238,11 @@ pub async fn ensure_ws_connection(
     let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => {
-            ws_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            ws_state.runtime().lock().await.state = ConnectionState::Disconnected;
             return Err(e);
         }
         Err(_) => {
-            ws_state.runtime.lock().await.state = ConnectionState::Disconnected;
+            ws_state.runtime().lock().await.state = ConnectionState::Disconnected;
             return Err(WsError::ReadyTimeout);
         }
     };
@@ -1317,11 +1251,11 @@ pub async fn ensure_ws_connection(
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
 
     // Bump generation before storing cmd_tx.
-    let generation = ws_state.next_generation();
+    let generation = ws_state.generation().fetch_add(1, Ordering::Release) + 1;
 
     // Store ws_url, cmd_tx, and generation atomically under runtime lock.
     {
-        let mut runtime = ws_state.runtime.lock().await;
+        let mut runtime = ws_state.runtime().lock().await;
         runtime.ws_url = ws_url.to_string();
         runtime.cmd_tx = Some(cmd_tx);
         runtime.generation = generation;
@@ -1343,7 +1277,7 @@ pub async fn ensure_ws_connection(
     // refuse to enter Connected until the contract is supported. The probe
     // session is closed immediately after (best-effort).
     {
-        *ws_state.compatibility.lock().await =
+        *ws_state.compatibility().lock().await =
             crate::hermes_protocol::RuntimeCompatibility::Checking;
     }
     match run_compatibility_handshake(ws_state).await {
@@ -1354,13 +1288,13 @@ pub async fn ensure_ws_connection(
                 generation,
                 "compatibility handshake passed"
             );
-            *ws_state.compatibility.lock().await = c;
+            *ws_state.compatibility().lock().await = c;
         }
         Err(e) => {
-            *ws_state.compatibility.lock().await =
+            *ws_state.compatibility().lock().await =
                 crate::hermes_protocol::RuntimeCompatibility::Unknown;
             // Atomic cleanup of state + cmd_tx under runtime lock.
-            let mut runtime = ws_state.runtime.lock().await;
+            let mut runtime = ws_state.runtime().lock().await;
             runtime.state = ConnectionState::Disconnected;
             runtime.cmd_tx = None;
             // Signal the reader task to shut down.
@@ -1404,7 +1338,7 @@ pub async fn ensure_ws_connection(
     // All checks and the final state update are done atomically under runtime lock.
     // If interrupted, also send Shutdown to the old reader to stop it cleanly.
     let shutdown_tx = {
-        let mut runtime = ws_state.runtime.lock().await;
+        let mut runtime = ws_state.runtime().lock().await;
         let fail = interrupted
             || runtime.generation != generation
             || runtime.cmd_tx.is_none()
@@ -1428,9 +1362,9 @@ pub async fn ensure_ws_connection(
         let _ = tx.send(WsCommand::Shutdown).await;
         return Err(WsError::ConnectionLost);
     } else if interrupted
-        || ws_state.runtime.lock().await.state == ConnectionState::Disconnected
-        || ws_state.runtime.lock().await.cmd_tx.is_none()
-        || ws_state.runtime.lock().await.generation != generation
+        || ws_state.runtime().lock().await.state == ConnectionState::Disconnected
+        || ws_state.runtime().lock().await.cmd_tx.is_none()
+        || ws_state.runtime().lock().await.generation != generation
     {
         // No sender to shut down, but we still must fail.
         return Err(WsError::ConnectionLost);
@@ -1447,11 +1381,14 @@ pub async fn ensure_ws_connection(
 /// returns to Active. On failure: the binding is marked ResumeFailed (durable
 /// ID retained) and logged — it does not block other conversations or the
 /// connection from reaching Connected.
-async fn reconcile_sessions(
-    ws_state: &Arc<WsState>,
+async fn reconcile_sessions<State>(
+    ws_state: &Arc<State>,
     sessions: &Arc<crate::session_registry::SessionRegistry>,
     generation: u64,
-) -> ReconciliationReport {
+) -> ReconciliationReport
+where
+    State: StateLike,
+{
     let to_resume = sessions.take_suspended_for_resume(generation).await;
     if to_resume.is_empty() {
         return ReconciliationReport::default();
@@ -1507,6 +1444,7 @@ async fn reconcile_sessions(
                         Some(new_stored),
                         durable.profile.clone(),
                         generation,
+                        ws_state.runtime_key(),
                     )
                     .await;
                 tracing::info!(
@@ -1565,9 +1503,12 @@ async fn reconcile_sessions(
 /// `Err(Incompatible(..))` / other transport errors on failure. The probe
 /// session is closed best-effort: a close failure does not mask the real
 /// compatibility result.
-async fn run_compatibility_handshake(
-    ws_state: &Arc<WsState>,
-) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
+async fn run_compatibility_handshake<State>(
+    ws_state: &Arc<State>,
+) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError>
+where
+    State: StateLike,
+{
     // Probe with source "compat_probe" so the backend marks it as a service
     // session (hidden from the feed, like briefing_smart).
     let probe_result = create_session_on_connection(ws_state, "compat_probe", None)
@@ -1603,15 +1544,18 @@ async fn run_compatibility_handshake(
 
 /// Best-effort `session.close` via the generic RPC dispatcher. Returns Ok(())
 /// on success or if the backend does not support the method.
-async fn close_session_best_effort(
-    ws_state: &Arc<WsState>,
+async fn close_session_best_effort<State>(
+    ws_state: &State,
     session_id: &str,
-) -> Result<(), WsError> {
+) -> Result<(), WsError>
+where
+    State: StateLike + ?Sized,
+{
     // Use serde_json::Value as the params type to avoid imposing Deserialize
     // on a request-only struct. session.close is best-effort: we only care that
     // it was accepted, not its result body.
     let params = serde_json::json!({ "session_id": session_id });
-    match call_rpc::<serde_json::Value, serde_json::Value>(
+    match call_rpc::<serde_json::Value, serde_json::Value, State>(
         ws_state,
         "session.close",
         params,
@@ -1762,12 +1706,13 @@ async fn reader_task<S, State>(
                                 // global event. Only events WITHOUT a session_id
                                 // (truly global gateway events) may be emitted
                                 // with conversation_id=None.
+                                let runtime_key = state.runtime_key();
                                 let conversation_id = match (
                                     &sessions,
                                     routed_event.session_id.as_deref(),
                                 ) {
                                     (Some(sessions), Some(live_sid)) if !live_sid.is_empty() => {
-                                        match sessions.route_event(live_sid).await {
+                                        match sessions.route_event(live_sid, runtime_key).await {
                                             Some(conv) => Some(conv.0),
                                             None => {
                                                 // Unknown session-scoped event: log and DROP.
@@ -1788,22 +1733,22 @@ async fn reader_task<S, State>(
                                     _ => None,
                                 };
 
-                                // For session.info events, update the registry's
+// For session.info events, update the registry's
                                 // stored_session_id (never overwrites live ID).
                                 if let ParsedGatewayEvent::Known(GatewayEvent::SessionInfo(p)) =
                                     &routed_event.event
                                 {
                                     if let (Some(sessions), Some(live_sid)) =
                                         (&sessions, &routed_event.session_id)
-                                    {
-                                        if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
-                                            if let Some(conv) = sessions.route_event(live_sid).await {
-                                                sessions
-                                                    .set_stored(&conv, p.stored_session_id.clone())
-                                                    .await;
-                                            }
+                                {
+                                    if !live_sid.is_empty() && !p.stored_session_id.is_empty() {
+                                        if let Some(conv) = sessions.route_event(live_sid, runtime_key).await {
+                                            sessions
+                                                .set_stored(&conv, p.stored_session_id.clone())
+                                                .await;
                                         }
                                     }
+                                }
                                 }
 
                                 // Translate via typed parser to ChatEvent.
@@ -1962,345 +1907,10 @@ where
     })
 }
 
-/// Generic RPC dispatcher for remote connections.
-pub async fn call_rpc_remote<P, R>(
-    remote_state: &Arc<RemoteWsState>,
-    method: &'static str,
-    params: P,
-    timeout: Duration,
-) -> Result<R, GatewayClientError>
-where
-    P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
-    R: for<'de> Deserialize<'de> + std::fmt::Debug,
-{
-    let tx = {
-        let runtime = remote_state.runtime.lock().await;
-        if runtime.state != ConnectionState::Connected && runtime.state != ConnectionState::Degraded
-        {
-            return Err(GatewayClientError::ConnectionLost);
-        }
-        runtime
-            .cmd_tx
-            .clone()
-            .ok_or(GatewayClientError::ConnectionLost)?
-    };
-
-    let id = next_rpc_id();
-    let params_value = serde_json::to_value(&params)
-        .map_err(|e| GatewayClientError::Protocol(format!("serialize params: {}", e)))?;
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(WsCommand::Rpc {
-        id,
-        method: method.to_string(),
-        params: params_value,
-        reply: reply_tx,
-    })
-    .await
-    .map_err(|_| GatewayClientError::ConnectionLost)?;
-
-    let response_value = tokio::time::timeout(timeout, reply_rx)
-        .await
-        .map_err(|_| interruption_error(method, InterruptionCause::Timeout))?
-        .map_err(|_| interruption_error(method, InterruptionCause::ClosedChannel))??;
-
-    serde_json::from_value::<R>(response_value)
-        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))
-}
-
-/// Generic RPC dispatcher for SSH connections.
-pub async fn call_rpc_ssh<P, R>(
-    ssh_state: &Arc<SshWsState>,
-    method: &'static str,
-    params: P,
-    timeout: Duration,
-) -> Result<R, GatewayClientError>
-where
-    P: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
-    R: for<'de> Deserialize<'de> + std::fmt::Debug,
-{
-    let tx = {
-        let runtime = ssh_state.runtime.lock().await;
-        if runtime.state != ConnectionState::Connected && runtime.state != ConnectionState::Degraded
-        {
-            return Err(GatewayClientError::ConnectionLost);
-        }
-        runtime
-            .cmd_tx
-            .clone()
-            .ok_or(GatewayClientError::ConnectionLost)?
-    };
-
-    let id = next_rpc_id();
-    let params_value = serde_json::to_value(&params)
-        .map_err(|e| GatewayClientError::Protocol(format!("serialize params: {}", e)))?;
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(WsCommand::Rpc {
-        id,
-        method: method.to_string(),
-        params: params_value,
-        reply: reply_tx,
-    })
-    .await
-    .map_err(|_| GatewayClientError::ConnectionLost)?;
-
-    let response_value = tokio::time::timeout(timeout, reply_rx)
-        .await
-        .map_err(|_| interruption_error(method, InterruptionCause::Timeout))?
-        .map_err(|_| interruption_error(method, InterruptionCause::ClosedChannel))??;
-
-    serde_json::from_value::<R>(response_value)
-        .map_err(|e| GatewayClientError::Protocol(format!("response parse: {}", e)))
-}
-
-/// Reconcile sessions for remote connections.
-async fn reconcile_sessions_remote(
-    remote_state: &Arc<RemoteWsState>,
-    sessions: &Arc<crate::session_registry::SessionRegistry>,
-    generation: u64,
-) -> ReconciliationReport {
-    let to_resume = sessions.take_suspended_for_resume(generation).await;
-    if to_resume.is_empty() {
-        return ReconciliationReport::default();
-    }
-    tracing::info!(
-        target: "steersman_desktop_lib::ws",
-        count = to_resume.len(),
-        generation,
-        "reconciling suspended sessions on remote"
-    );
-    let mut report = ReconciliationReport::default();
-    let mut connection_lost = false;
-    for (conv, durable) in to_resume {
-        if connection_lost {
-            tracing::warn!(
-                target: "steersman_desktop_lib::ws",
-                conversation = %conv,
-                stored_id = %durable.stored_session_id,
-                "reconciliation stopped due to prior connection loss; returning to Suspended"
-            );
-            sessions.return_to_suspended(&conv).await;
-            report.interrupted.push(conv);
-            continue;
-        }
-        match resume_session_on_connection_remote(remote_state, &durable).await {
-            Ok(result) => {
-                if result.session_id.is_empty() {
-                    tracing::warn!(
-                        target: "steersman_desktop_lib::ws",
-                        conversation = %conv,
-                        stored_id = %durable.stored_session_id,
-                        "resume returned empty live session_id"
-                    );
-                    sessions.mark_resume_failed(&conv).await;
-                    report.failed.push(conv);
-                    continue;
-                }
-                let new_stored = {
-                    let d = result.durable_id();
-                    if d.is_empty() {
-                        durable.stored_session_id.clone()
-                    } else {
-                        d.to_string()
-                    }
-                };
-                sessions
-                    .set_live(
-                        conv.clone(),
-                        result.session_id,
-                        Some(new_stored),
-                        durable.profile.clone(),
-                        generation,
-                    )
-                    .await;
-                tracing::info!(
-                    target: "steersman_desktop_lib::ws",
-                    conversation = %conv,
-                    generation,
-                    "session resumed on remote"
-                );
-                report.restored.push(conv);
-            }
-            Err(e) => {
-                let is_interruption = matches!(
-                    e,
-                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
-                );
-                if is_interruption {
-                    tracing::warn!(
-                        target: "steersman_desktop_lib::ws",
-                        conversation = %conv,
-                        stored_id = %durable.stored_session_id,
-                        error = %e,
-                        "session.resume interrupted; returning to Suspended for retry"
-                    );
-                    sessions.return_to_suspended(&conv).await;
-                    report.interrupted.push(conv);
-                    connection_lost = true;
-                } else {
-                    tracing::warn!(
-                        target: "steersman_desktop_lib::ws",
-                        conversation = %conv,
-                        stored_id = %durable.stored_session_id,
-                        error = %e,
-                        "session.resume failed; marking ResumeFailed"
-                    );
-                    sessions.mark_resume_failed(&conv).await;
-                    report.failed.push(conv);
-                }
-            }
-        }
-    }
-    report
-}
-
-/// Reconcile sessions for SSH connections.
-async fn reconcile_sessions_ssh(
-    ssh_state: &Arc<SshWsState>,
-    sessions: &Arc<crate::session_registry::SessionRegistry>,
-    generation: u64,
-) -> ReconciliationReport {
-    let to_resume = sessions.take_suspended_for_resume(generation).await;
-    if to_resume.is_empty() {
-        return ReconciliationReport::default();
-    }
-    tracing::info!(
-        target: "steersman_desktop_lib::ws",
-        count = to_resume.len(),
-        generation,
-        "reconciling suspended sessions on SSH"
-    );
-    let mut report = ReconciliationReport::default();
-    let mut connection_lost = false;
-    for (conv, durable) in to_resume {
-        if connection_lost {
-            tracing::warn!(
-                target: "steersman_desktop_lib::ws",
-                conversation = %conv,
-                stored_id = %durable.stored_session_id,
-                "reconciliation stopped due to prior connection loss; returning to Suspended"
-            );
-            sessions.return_to_suspended(&conv).await;
-            report.interrupted.push(conv);
-            continue;
-        }
-        match resume_session_on_connection_ssh(ssh_state, &durable).await {
-            Ok(result) => {
-                if result.session_id.is_empty() {
-                    tracing::warn!(
-                        target: "steersman_desktop_lib::ws",
-                        conversation = %conv,
-                        stored_id = %durable.stored_session_id,
-                        "resume returned empty live session_id"
-                    );
-                    sessions.mark_resume_failed(&conv).await;
-                    report.failed.push(conv);
-                    continue;
-                }
-                let new_stored = {
-                    let d = result.durable_id();
-                    if d.is_empty() {
-                        durable.stored_session_id.clone()
-                    } else {
-                        d.to_string()
-                    }
-                };
-                sessions
-                    .set_live(
-                        conv.clone(),
-                        result.session_id,
-                        Some(new_stored),
-                        durable.profile.clone(),
-                        generation,
-                    )
-                    .await;
-                tracing::info!(
-                    target: "steersman_desktop_lib::ws",
-                    conversation = %conv,
-                    generation,
-                    "session resumed on SSH"
-                );
-                report.restored.push(conv);
-            }
-            Err(e) => {
-                let is_interruption = matches!(
-                    e,
-                    WsError::ConnectionLost | WsError::RpcTimeout | WsError::OutcomeUnknown { .. }
-                );
-                if is_interruption {
-                    tracing::warn!(
-                        target: "steersman_desktop_lib::ws",
-                        conversation = %conv,
-                        stored_id = %durable.stored_session_id,
-                        error = %e,
-                        "session.resume interrupted; returning to Suspended for retry"
-                    );
-                    sessions.return_to_suspended(&conv).await;
-                    report.interrupted.push(conv);
-                    connection_lost = true;
-                } else {
-                    tracing::warn!(
-                        target: "steersman_desktop_lib::ws",
-                        conversation = %conv,
-                        stored_id = %durable.stored_session_id,
-                        error = %e,
-                        "session.resume failed; marking ResumeFailed"
-                    );
-                    sessions.mark_resume_failed(&conv).await;
-                    report.failed.push(conv);
-                }
-            }
-        }
-    }
-    report
-}
-
-/// Resume a session on a remote connection.
-pub async fn resume_session_on_connection_remote(
-    remote_state: &Arc<RemoteWsState>,
-    durable: &crate::session_registry::DurableSessionRef,
-) -> Result<crate::hermes_protocol::SessionResumeResult, WsError> {
-    call_rpc_remote(
-        remote_state,
-        "session.resume",
-        crate::hermes_protocol::SessionResumeParams {
-            session_id: durable.stored_session_id.clone(),
-            profile: if durable.profile.0.is_empty() {
-                None
-            } else {
-                Some(durable.profile.0.clone())
-            },
-            cols: Some(96),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
-/// Resume a session on an SSH connection.
-pub async fn resume_session_on_connection_ssh(
-    ssh_state: &Arc<SshWsState>,
-    durable: &crate::session_registry::DurableSessionRef,
-) -> Result<crate::hermes_protocol::SessionResumeResult, WsError> {
-    call_rpc_ssh(
-        ssh_state,
-        "session.resume",
-        crate::hermes_protocol::SessionResumeParams {
-            session_id: durable.stored_session_id.clone(),
-            profile: if durable.profile.0.is_empty() {
-                None
-            } else {
-                Some(durable.profile.0.clone())
-            },
-            cols: Some(96),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_registry::RuntimeKey;
 
     // RED: these tests assert that the WS transport returns typed WsError
     // variants, not bare Strings. Currently send_message_via_ws returns
@@ -2864,6 +2474,7 @@ mod tests {
                 Some(result.stored_session_id),
                 crate::session_registry::ProfileId::empty(),
                 generation,
+                RuntimeKey::Local,
             )
             .await;
         submit_prompt_on_connection(&ws_state, &sid, "test prompt")
@@ -3118,6 +2729,7 @@ mod tests {
                 Some("durable-a".into()),
                 crate::session_registry::ProfileId::empty(),
                 1,
+                RuntimeKey::Local,
             )
             .await;
         sessions
@@ -3127,6 +2739,7 @@ mod tests {
                 Some("durable-b".into()),
                 crate::session_registry::ProfileId::empty(),
                 1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -3135,8 +2748,8 @@ mod tests {
         sessions.mark_stale_for_generation(2).await;
 
         // Both bindings must be Suspended.
-        let ba = sessions.get(&conv_a).await.unwrap();
-        let bb = sessions.get(&conv_b).await.unwrap();
+        let ba = sessions.get(&conv_a, RuntimeKey::Local).await.unwrap();
+        let bb = sessions.get(&conv_b, RuntimeKey::Local).await.unwrap();
         assert_eq!(ba.state, SessionState::Suspended);
         assert_eq!(bb.state, SessionState::Suspended);
         // Live IDs cleared (stale), but durable IDs retained for resume.
@@ -3145,7 +2758,7 @@ mod tests {
         assert_eq!(bb.live_session_id, None);
         assert_eq!(bb.stored_session_id.as_deref(), Some("durable-b"));
         // Stale live IDs no longer route events.
-        assert_eq!(sessions.route_event("live-a").await, None);
+        assert_eq!(sessions.route_event("live-a", RuntimeKey::Local).await, None);
     }
 
     /// Test 12: Reconnect restores multiple conversations by resuming durable
@@ -3166,6 +2779,7 @@ mod tests {
                 Some("durable-a".into()),
                 crate::session_registry::ProfileId::empty(),
                 1,
+                RuntimeKey::Local,
             )
             .await;
         sessions
@@ -3175,6 +2789,7 @@ mod tests {
                 Some("durable-b".into()),
                 crate::session_registry::ProfileId::empty(),
                 1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -3189,6 +2804,7 @@ mod tests {
                 Some("durable-a".into()),
                 crate::session_registry::ProfileId::empty(),
                 2,
+                RuntimeKey::Local,
             )
             .await;
         sessions
@@ -3198,18 +2814,19 @@ mod tests {
                 Some("durable-b".into()),
                 crate::session_registry::ProfileId::empty(),
                 2,
+                RuntimeKey::Local,
             )
             .await;
 
         // Both conversations restored, Active, routing via new live IDs.
-        let ba = sessions.get(&conv_a).await.unwrap();
-        let bb = sessions.get(&conv_b).await.unwrap();
+        let ba = sessions.get(&conv_a, RuntimeKey::Local).await.unwrap();
+        let bb = sessions.get(&conv_b, RuntimeKey::Local).await.unwrap();
         assert_eq!(ba.state, SessionState::Active);
         assert_eq!(bb.state, SessionState::Active);
-        assert_eq!(sessions.route_event("live-a2").await, Some(conv_a));
-        assert_eq!(sessions.route_event("live-b2").await, Some(conv_b));
+        assert_eq!(sessions.route_event("live-a2", RuntimeKey::Local).await, Some(conv_a));
+        assert_eq!(sessions.route_event("live-b2", RuntimeKey::Local).await, Some(conv_b));
         // Old live IDs from generation 1 no longer route.
-        assert_eq!(sessions.route_event("live-a1").await, None);
+        assert_eq!(sessions.route_event("live-a1", RuntimeKey::Local).await, None);
     }
 
     /// Test 13: RPC retry classification uses an explicit SAFE allowlist.
@@ -3602,6 +3219,7 @@ mod tests {
                 Some(ra.stored_session_id),
                 crate::session_registry::ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
         let rb = create_session_on_connection(&ws_state, "convb", None)
@@ -3614,6 +3232,7 @@ mod tests {
                 Some(rb.stored_session_id),
                 crate::session_registry::ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -3638,12 +3257,12 @@ mod tests {
 
         // Verify both bindings became Suspended automatically (reader cleanup).
         assert_eq!(
-            sessions.get(&conv_a).await.unwrap().state,
+            sessions.get(&conv_a, RuntimeKey::Local).await.unwrap().state,
             SessionState::Suspended,
             "conv-a must be Suspended after real disconnect cleanup"
         );
         assert_eq!(
-            sessions.get(&conv_b).await.unwrap().state,
+            sessions.get(&conv_b, RuntimeKey::Local).await.unwrap().state,
             SessionState::Suspended,
             "conv-b must be Suspended after real disconnect cleanup"
         );
@@ -3675,8 +3294,8 @@ mod tests {
         );
 
         // 5. Verify new live IDs in registry (Active, resumed).
-        let ba = sessions.get(&conv_a).await.expect("conv-a binding");
-        let bb = sessions.get(&conv_b).await.expect("conv-b binding");
+        let ba = sessions.get(&conv_a, RuntimeKey::Local).await.expect("conv-a binding");
+        let bb = sessions.get(&conv_b, RuntimeKey::Local).await.expect("conv-b binding");
         assert_eq!(
             ba.state,
             SessionState::Active,
@@ -3694,8 +3313,8 @@ mod tests {
         drop(frames);
 
         // 6. Submit prompts on both — events route with correct conversation_id.
-        let live_a = sessions.get_live(&conv_a).await.unwrap();
-        let live_b = sessions.get_live(&conv_b).await.unwrap();
+        let live_a = sessions.get_live(&conv_a, RuntimeKey::Local).await.unwrap();
+        let live_b = sessions.get_live(&conv_b, RuntimeKey::Local).await.unwrap();
         // Submit both (they stream interleaved events).
         submit_prompt_on_connection(&ws_state, &live_a, "msg A")
             .await
@@ -3780,6 +3399,7 @@ mod tests {
                 Some("same-durable".into()),
                 ProfileId::new("work"),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
         sessions
@@ -3789,6 +3409,7 @@ mod tests {
                 Some("same-durable".into()),
                 ProfileId::new("personal"),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -3833,11 +3454,11 @@ mod tests {
         );
         // Both bindings restored.
         assert_eq!(
-            sessions.get(&conv_a).await.unwrap().state,
+            sessions.get(&conv_a, RuntimeKey::Local).await.unwrap().state,
             SessionState::Active
         );
         assert_eq!(
-            sessions.get(&conv_b).await.unwrap().state,
+            sessions.get(&conv_b, RuntimeKey::Local).await.unwrap().state,
             SessionState::Active
         );
     }
@@ -3871,6 +3492,7 @@ mod tests {
                 Some("d1".into()),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
         sessions
@@ -3880,6 +3502,7 @@ mod tests {
                 Some("d2".into()),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -3899,7 +3522,7 @@ mod tests {
         sessions.take_suspended_for_resume(gen1).await; // transitions to Resuming
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c1"))
+                .get(&ConversationId::new("c1"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -3913,7 +3536,7 @@ mod tests {
         sessions.suspend_generation(gen1).await;
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c1"))
+                .get(&ConversationId::new("c1"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -3922,7 +3545,7 @@ mod tests {
         );
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c2"))
+                .get(&ConversationId::new("c2"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -3959,6 +3582,7 @@ mod tests {
                 Some("d1".into()),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
         sessions
@@ -3968,6 +3592,7 @@ mod tests {
                 Some("d2".into()),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -3997,7 +3622,7 @@ mod tests {
         // Bindings must be back to Suspended (not stuck in Resuming/ResumeFailed).
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c1"))
+                .get(&ConversationId::new("c1"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -4006,7 +3631,7 @@ mod tests {
         );
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c2"))
+                .get(&ConversationId::new("c2"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -4026,7 +3651,7 @@ mod tests {
         // Both bindings must be Active with new live IDs.
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c1"))
+                .get(&ConversationId::new("c1"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -4034,7 +3659,7 @@ mod tests {
         );
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c2"))
+                .get(&ConversationId::new("c2"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -4097,6 +3722,7 @@ mod tests {
                 Some(ra.stored_session_id),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -4110,12 +3736,13 @@ mod tests {
                 Some(rb.stored_session_id),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
         // Submit prompts on BOTH conversations concurrently (they will be queued in the mock).
-        let live_a = sessions.get_live(&conv_a).await.unwrap();
-        let live_b = sessions.get_live(&conv_b).await.unwrap();
+        let live_a = sessions.get_live(&conv_a, RuntimeKey::Local).await.unwrap();
+        let live_b = sessions.get_live(&conv_b, RuntimeKey::Local).await.unwrap();
 
         // Fire both submits without awaiting - they go through the mpsc channel.
         let submit_a = submit_prompt_on_connection(&ws_state, &live_a, "msg A");
@@ -4194,6 +3821,7 @@ mod tests {
                 Some("malformed-resume".into()),
                 ProfileId::empty(),
                 gen1,
+                RuntimeKey::Local,
             )
             .await;
 
@@ -4219,7 +3847,7 @@ mod tests {
         );
         assert_eq!(
             sessions
-                .get(&ConversationId::new("c1"))
+                .get(&ConversationId::new("c1"), RuntimeKey::Local)
                 .await
                 .unwrap()
                 .state,
@@ -4271,442 +3899,4 @@ mod tests {
             received.lock().await
         );
     }
-}
-
-/// Compatibility handshake for remote connections.
-async fn run_compatibility_handshake_remote(
-    remote_state: &Arc<RemoteWsState>,
-) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
-    let probe_result = create_session_on_connection_remote(remote_state, "compat_probe", None)
-        .await
-        .map_err(|e| match e {
-            WsError::BackendError(msg) => {
-                WsError::Protocol(format!("compatibility probe failed: {}", msg))
-            }
-            other => other,
-        })?;
-
-    let received = probe_result.info.desktop_contract;
-    let compat = crate::hermes_protocol::RuntimeCompatibility::evaluate(received);
-
-    if let Err(e) = close_session_best_effort_remote(remote_state, &probe_result.session_id).await {
-        tracing::warn!(
-            target: "steersman_desktop_lib::ws",
-            error = %e,
-            session_id = %probe_result.session_id,
-            "probe session close failed (non-fatal)"
-        );
-    }
-
-    if !compat.is_compatible() {
-        return Err(WsError::Incompatible(compat));
-    }
-    Ok(compat)
-}
-
-/// Compatibility handshake for SSH connections.
-async fn run_compatibility_handshake_ssh(
-    ssh_state: &Arc<SshWsState>,
-) -> Result<crate::hermes_protocol::RuntimeCompatibility, WsError> {
-    let probe_result = create_session_on_connection_ssh(ssh_state, "compat_probe", None)
-        .await
-        .map_err(|e| match e {
-            WsError::BackendError(msg) => {
-                WsError::Protocol(format!("compatibility probe failed: {}", msg))
-            }
-            other => other,
-        })?;
-
-    let received = probe_result.info.desktop_contract;
-    let compat = crate::hermes_protocol::RuntimeCompatibility::evaluate(received);
-
-    if let Err(e) = close_session_best_effort_ssh(ssh_state, &probe_result.session_id).await {
-        tracing::warn!(
-            target: "steersman_desktop_lib::ws",
-            error = %e,
-            session_id = %probe_result.session_id,
-            "probe session close failed (non-fatal)"
-        );
-    }
-
-    if !compat.is_compatible() {
-        return Err(WsError::Incompatible(compat));
-    }
-    Ok(compat)
-}
-
-/// Create a session on a remote connection.
-pub async fn create_session_on_connection_remote(
-    remote_state: &Arc<RemoteWsState>,
-    source: &str,
-    requested_profile: Option<&str>,
-) -> Result<SessionCreateResult, WsError> {
-    call_rpc_remote(
-        remote_state,
-        "session.create",
-        SessionCreateParams {
-            source: source.to_owned(),
-            cols: 96,
-            profile: requested_profile.map(|s| s.to_string()),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
-/// Create a session on an SSH connection.
-pub async fn create_session_on_connection_ssh(
-    ssh_state: &Arc<SshWsState>,
-    source: &str,
-    requested_profile: Option<&str>,
-) -> Result<SessionCreateResult, WsError> {
-    call_rpc_ssh(
-        ssh_state,
-        "session.create",
-        SessionCreateParams {
-            source: source.to_owned(),
-            cols: 96,
-            profile: requested_profile.map(|s| s.to_string()),
-        },
-        RPC_TIMEOUT,
-    )
-    .await
-}
-
-/// Close a session on a remote connection (best effort).
-async fn close_session_best_effort_remote(
-    remote_state: &Arc<RemoteWsState>,
-    session_id: &str,
-) -> Result<(), WsError> {
-    let params = serde_json::json!({ "session_id": session_id });
-    match call_rpc_remote::<serde_json::Value, serde_json::Value>(
-        remote_state,
-        "session.close",
-        params,
-        Duration::from_secs(10),
-    )
-    .await
-    {
-        Ok(_) => Ok(()),
-        Err(WsError::BackendError(_)) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Close a session on an SSH connection (best effort).
-async fn close_session_best_effort_ssh(
-    ssh_state: &Arc<SshWsState>,
-    session_id: &str,
-) -> Result<(), WsError> {
-    let params = serde_json::json!({ "session_id": session_id });
-    match call_rpc_ssh::<serde_json::Value, serde_json::Value>(
-        ssh_state,
-        "session.close",
-        params,
-        Duration::from_secs(10),
-    )
-    .await
-    {
-        Ok(_) => Ok(()),
-        Err(WsError::BackendError(_)) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-pub async fn ensure_remote_ws_connection(
-    ws_url: &str,
-    emit_fn: EmitFn,
-    remote_state: &Arc<RemoteWsState>,
-    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
-) -> Result<(), WsError> {
-    // Fast path: already connected (no lock contention on connect_lock).
-    {
-        let runtime = remote_state.runtime.lock().await;
-        if runtime.state == ConnectionState::Connected {
-            return Ok(());
-        }
-    }
-
-    // Serialize concurrent connect attempts.
-    let _connect_guard = remote_state.connect_lock.lock().await;
-
-    // Double-check after acquiring the lock.
-    {
-        let mut runtime = remote_state.runtime.lock().await;
-        match runtime.state {
-            ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
-            ConnectionState::Connecting => {
-                return Err(WsError::Protocol("concurrent connect race".into()));
-            }
-            ConnectionState::Disconnected => {}
-        }
-        runtime.state = ConnectionState::Connecting;
-    }
-
-    // Connect to the remote backend.
-    tracing::info!(target: "steersman_desktop_lib::ws", remote_url = %ws_url, "opening persistent remote connection");
-    let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
-        Ok(result) => result,
-        Err(e) => {
-            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            return Err(WsError::Connect(e.to_string()));
-        }
-    };
-
-    // Strict gateway.ready barrier.
-    let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
-        Ok(Ok(ws)) => ws,
-        Ok(Err(e)) => {
-            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            return Err(e);
-        }
-        Err(_) => {
-            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            return Err(WsError::ReadyTimeout);
-        }
-    };
-
-    // Create the mpsc channel for command handlers -> reader task.
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-
-    // Bump generation before storing cmd_tx.
-    let generation = remote_state.next_generation();
-
-    remote_state.runtime.lock().await.ws_url = ws_url.to_string();
-    remote_state.runtime.lock().await.cmd_tx = Some(cmd_tx);
-
-    // Spawn the reader task with the generation.
-    tokio::spawn(reader_task(
-        ws,
-        cmd_rx,
-        emit_fn,
-        Arc::clone(&remote_state),
-        sessions.clone(),
-        generation,
-    ));
-
-    // Compatibility handshake (Phase 1C.1).
-    {
-        *remote_state.compatibility.lock().await =
-            crate::hermes_protocol::RuntimeCompatibility::Checking;
-    }
-    match run_compatibility_handshake_remote(remote_state).await {
-        Ok(c) => {
-            tracing::info!(
-                target: "steersman_desktop_lib::ws",
-                compatibility = ?c,
-                generation,
-                "compatibility handshake passed"
-            );
-            *remote_state.compatibility.lock().await = c;
-        }
-        Err(e) => {
-            *remote_state.compatibility.lock().await =
-                crate::hermes_protocol::RuntimeCompatibility::Unknown;
-            remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            remote_state.runtime.lock().await.cmd_tx = None;
-            return Err(e);
-        }
-    }
-
-    // Reconnect reconciliation (Phase 1C.4).
-    let mut degraded = false;
-    let mut interrupted = false;
-    if let Some(sessions) = &sessions {
-        let report = reconcile_sessions_remote(remote_state, sessions, generation).await;
-        if !report.interrupted.is_empty() {
-            interrupted = true;
-            tracing::warn!(
-                target: "steersman_desktop_lib::ws",
-                interrupted = report.interrupted.len(),
-                generation,
-                "reconciliation interrupted by disconnect; not declaring Connected"
-            );
-        } else if !report.failed.is_empty() {
-            degraded = true;
-            tracing::warn!(
-                target: "steersman_desktop_lib::ws",
-                restored = report.restored.len(),
-                failed = report.failed.len(),
-                generation,
-                "reconciliation partial: some conversations failed to resume"
-            );
-        }
-    }
-
-    // GUARD: never set Connected if the socket died during reconciliation or
-    // the reader task exited. Verify the connection is still ours and alive.
-    if interrupted
-        || remote_state
-            .generation
-            .load(std::sync::atomic::Ordering::Acquire)
-            != generation
-        || remote_state.runtime.lock().await.cmd_tx.is_none()
-        || remote_state.runtime.lock().await.state == ConnectionState::Disconnected
-    {
-        remote_state.runtime.lock().await.state = ConnectionState::Disconnected;
-        return Err(WsError::ConnectionLost);
-    }
-
-    // Connected only if all resumes succeeded; otherwise Degraded.
-    {
-        let mut runtime = remote_state.runtime.lock().await;
-        runtime.state = if degraded {
-            ConnectionState::Degraded
-        } else {
-            ConnectionState::Connected
-        };
-    }
-    tracing::info!(target: "steersman_desktop_lib::ws", generation, degraded, "persistent remote connection established");
-
-    Ok(())
-}
-
-/// Ensure the persistent WS connection is open for an SSH backend.
-pub async fn ensure_ssh_ws_connection(
-    ws_url: &str,
-    emit_fn: EmitFn,
-    ssh_state: &Arc<SshWsState>,
-    sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
-) -> Result<(), WsError> {
-    // Fast path: already connected (no lock contention on connect_lock).
-    {
-        let runtime = ssh_state.runtime.lock().await;
-        if runtime.state == ConnectionState::Connected {
-            return Ok(());
-        }
-    }
-
-    // Serialize concurrent connect attempts.
-    let _connect_guard = ssh_state.connect_lock.lock().await;
-
-    // Double-check after acquiring the lock.
-    {
-        let mut runtime = ssh_state.runtime.lock().await;
-        match runtime.state {
-            ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
-            ConnectionState::Connecting => {
-                return Err(WsError::Protocol("concurrent connect race".into()));
-            }
-            ConnectionState::Disconnected => {}
-        }
-        runtime.state = ConnectionState::Connecting;
-    }
-
-    // Connect to the SSH tunnel endpoint.
-    tracing::info!(target: "steersman_desktop_lib::ws", remote_url = %ws_url, "opening persistent SSH connection");
-    let (ws, _resp) = match tokio_tungstenite::connect_async(ws_url).await {
-        Ok(result) => result,
-        Err(e) => {
-            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            return Err(WsError::Connect(e.to_string()));
-        }
-    };
-
-    // Strict gateway.ready barrier.
-    let ws = match tokio::time::timeout(Duration::from_secs(5), wait_for_gateway_ready(ws)).await {
-        Ok(Ok(ws)) => ws,
-        Ok(Err(e)) => {
-            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            return Err(e);
-        }
-        Err(_) => {
-            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            return Err(WsError::ReadyTimeout);
-        }
-    };
-
-    // Create the mpsc channel for command handlers -> reader task.
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-
-    // Bump generation before storing cmd_tx.
-    let generation = ssh_state.next_generation();
-
-    ssh_state.runtime.lock().await.ws_url = ws_url.to_string();
-    ssh_state.runtime.lock().await.cmd_tx = Some(cmd_tx);
-
-    // Spawn the reader task with the generation.
-    tokio::spawn(reader_task(
-        ws,
-        cmd_rx,
-        emit_fn,
-        Arc::clone(&ssh_state),
-        sessions.clone(),
-        generation,
-    ));
-
-    // Compatibility handshake.
-    {
-        *ssh_state.compatibility.lock().await =
-            crate::hermes_protocol::RuntimeCompatibility::Checking;
-    }
-    match run_compatibility_handshake_ssh(ssh_state).await {
-        Ok(c) => {
-            tracing::info!(
-                target: "steersman_desktop_lib::ws",
-                compatibility = ?c,
-                generation,
-                "compatibility handshake passed"
-            );
-            *ssh_state.compatibility.lock().await = c;
-        }
-        Err(e) => {
-            *ssh_state.compatibility.lock().await =
-                crate::hermes_protocol::RuntimeCompatibility::Unknown;
-            ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
-            ssh_state.runtime.lock().await.cmd_tx = None;
-            return Err(e);
-        }
-    }
-
-    // Reconnect reconciliation (Phase 1C.4).
-    let mut degraded = false;
-    let mut interrupted = false;
-    if let Some(sessions) = &sessions {
-        let report = reconcile_sessions_ssh(ssh_state, sessions, generation).await;
-        if !report.interrupted.is_empty() {
-            interrupted = true;
-            tracing::warn!(
-                target: "steersman_desktop_lib::ws",
-                interrupted = report.interrupted.len(),
-                generation,
-                "reconciliation interrupted by disconnect; not declaring Connected"
-            );
-        } else if !report.failed.is_empty() {
-            degraded = true;
-            tracing::warn!(
-                target: "steersman_desktop_lib::ws",
-                restored = report.restored.len(),
-                failed = report.failed.len(),
-                generation,
-                "reconciliation partial: some conversations failed to resume"
-            );
-        }
-    }
-
-    // GUARD: never set Connected if the socket died during reconciliation or
-    // the reader task exited. Verify the connection is still ours and alive.
-    if interrupted
-        || ssh_state
-            .generation
-            .load(std::sync::atomic::Ordering::Acquire)
-            != generation
-        || ssh_state.runtime.lock().await.cmd_tx.is_none()
-        || ssh_state.runtime.lock().await.state == ConnectionState::Disconnected
-    {
-        ssh_state.runtime.lock().await.state = ConnectionState::Disconnected;
-        return Err(WsError::ConnectionLost);
-    }
-
-    // Connected only if all resumes succeeded; otherwise Degraded.
-    {
-        let mut runtime = ssh_state.runtime.lock().await;
-        runtime.state = if degraded {
-            ConnectionState::Degraded
-        } else {
-            ConnectionState::Connected
-        };
-    }
-    tracing::info!(target: "steersman_desktop_lib::ws", generation, degraded, "persistent SSH connection established");
-
-    Ok(())
 }
