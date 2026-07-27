@@ -574,27 +574,36 @@ pub fn to_ws_url(url: &str) -> String {
 async fn send_via_ws_persistent(
     remote_ws_state: &std::sync::Arc<crate::ws_transport::GatewayClient>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
+    runtime_key: crate::session_registry::RuntimeKey,
     remote_url: &str,
     token: &str,
     request: &SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
+    if remote_ws_state.runtime_key != runtime_key {
+        return Err(
+            "Connection settings changed. Restart the app before sending a message.".into(),
+        );
+    }
+
     if token.is_empty() {
         return Err("Remote session token is empty. Set it in Settings → Connection.".to_string());
     }
     let base = remote_url.trim_end_matches('/').trim_end_matches("/api/ws");
-    let ws_url = crate::ws_transport::build_ws_url(base, token).map_err(|e| e.to_string())?;
+    let (ws_url, auth) =
+        crate::ws_transport::build_ws_url(base, token).map_err(|e| e.to_string())?;
+
+    // The GatewayClient owns the current endpoint. Updating it here preserves
+    // the persistent connection state while allowing Settings changes to rotate
+    // the URL or token on the next connection attempt.
+    remote_ws_state.configure_endpoint(ws_url, Some(auth)).await;
 
     // Ensure the persistent connection is open (idempotent).
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
-    crate::ws_transport::ensure_ws_connection(
-        &ws_url,
-        emit_fn,
-        remote_ws_state,
-        Some(sessions.clone()),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    remote_ws_state
+        .ensure_connected(emit_fn, Some(sessions.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
     // The registry is the AUTHORITATIVE source of session IDs — every created
@@ -725,6 +734,7 @@ async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, Stri
                 .to_string()
         })?;
     crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
+        .map(|(ws_url, _)| ws_url)
         .map_err(|e| e.to_string())
 }
 
@@ -899,6 +909,7 @@ pub async fn send_message(
             send_via_ws_persistent(
                 &std::sync::Arc::clone(remote_ws_state),
                 &std::sync::Arc::clone(sessions),
+                crate::session_registry::RuntimeKey::Remote(config::remote_instance_id(remote_url)),
                 remote_url,
                 remote_api_key,
                 &request,
@@ -936,6 +947,7 @@ pub async fn send_message(
             send_via_ws_persistent(
                 &std::sync::Arc::clone(ssh_ws_state),
                 &std::sync::Arc::clone(sessions),
+                crate::session_registry::RuntimeKey::Ssh(config::ssh_tunnel_id(ssh)),
                 &tunnel_url,
                 &tunneled_token,
                 &request,

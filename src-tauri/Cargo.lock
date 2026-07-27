@@ -4206,6 +4206,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "futures",
+ "hex",
  "keyring",
  "libc",
  "openssl-sys",

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
@@ -46,7 +47,7 @@ pub fn to_ws_url(url: &str) -> String {
 }
 
 /// Authentication material used when connecting to a Hermes gateway.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GatewayAuth {
     pub api_key: String,
 }
@@ -55,10 +56,64 @@ impl GatewayAuth {
     pub fn redacted(&self) -> String {
         "***".to_string()
     }
+
+    /// Stable, non-reversible identity used to notice credential rotation.
+    pub fn sha256_fingerprint(&self) -> String {
+        hex::encode(Sha256::digest(self.api_key.as_bytes()))
+    }
+}
+
+impl Debug for GatewayAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GatewayAuth(<redacted>)")
+    }
+}
+
+/// Non-secret identity of a WebSocket connection target.
+#[derive(Clone, Eq, PartialEq)]
+pub struct EndpointIdentity {
+    pub public_url: String,
+    pub auth_fingerprint: String,
+    pub tunnel_generation: Option<u64>,
+}
+
+impl EndpointIdentity {
+    pub fn from_ws_url(
+        ws_url: &str,
+        auth: Option<&GatewayAuth>,
+        tunnel_generation: Option<u64>,
+    ) -> Self {
+        let url_auth = Url::parse(ws_url).ok().and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "token")
+                .map(|(_, value)| GatewayAuth {
+                    api_key: value.into_owned(),
+                })
+        });
+        Self {
+            public_url: redacted_ws_url(ws_url),
+            auth_fingerprint: auth
+                .map(GatewayAuth::sha256_fingerprint)
+                .or_else(|| url_auth.as_ref().map(GatewayAuth::sha256_fingerprint))
+                .unwrap_or_default(),
+            tunnel_generation,
+        }
+    }
+}
+
+impl Debug for EndpointIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EndpointIdentity")
+            .field("public_url", &self.public_url)
+            .field("auth_fingerprint", &"<redacted>")
+            .field("tunnel_generation", &self.tunnel_generation)
+            .finish()
+    }
 }
 
 /// Build a gateway WebSocket URL without interpolating auth into the URL text.
-pub fn build_ws_url(base: &str, token: &str) -> Result<String, WsError> {
+pub fn build_ws_url(base: &str, token: &str) -> Result<(String, GatewayAuth), WsError> {
     let mut url = Url::parse(&to_ws_url(base))
         .map_err(|error| WsError::Protocol(format!("invalid WebSocket URL: {}", error)))?;
 
@@ -69,7 +124,12 @@ pub fn build_ws_url(base: &str, token: &str) -> Result<String, WsError> {
     url.set_query(None);
     url.query_pairs_mut().append_pair("token", token);
 
-    Ok(url.into())
+    Ok((
+        url.into(),
+        GatewayAuth {
+            api_key: token.to_string(),
+        },
+    ))
 }
 
 /// Return a diagnostic-safe WebSocket URL with its token query parameter removed.
@@ -1026,6 +1086,8 @@ pub struct ConnectionRuntime {
     pub cmd_tx: Option<tokio::sync::mpsc::Sender<WsCommand>>,
     /// Diagnostic-safe WebSocket URL for this connection.
     pub ws_url: String,
+    /// Identity of the connected endpoint, including an auth fingerprint.
+    pub endpoint_identity: Option<EndpointIdentity>,
 }
 
 impl Default for ConnectionRuntime {
@@ -1035,21 +1097,42 @@ impl Default for ConnectionRuntime {
             state: ConnectionState::Disconnected,
             cmd_tx: None,
             ws_url: String::new(),
+            endpoint_identity: None,
         }
     }
 }
 
 /// Identifies the WebSocket endpoint used by a gateway runtime.
-pub trait RuntimeEndpoint {
-    fn ws_url(&self) -> &str;
+pub trait RuntimeEndpoint: Send + Sync {
+    fn ws_url(&self) -> String;
+    fn auth(&self) -> Option<&GatewayAuth>;
+    fn identity(&self) -> EndpointIdentity;
+    fn runtime_key(&self) -> crate::session_registry::RuntimeKey;
 }
 
 /// Fixed endpoint used while GatewayClient owns a single runtime URL.
-struct StaticRuntimeEndpoint(String);
+struct StaticRuntimeEndpoint {
+    ws_url: String,
+    auth: Option<GatewayAuth>,
+    runtime_key: crate::session_registry::RuntimeKey,
+    identity: EndpointIdentity,
+}
 
 impl RuntimeEndpoint for StaticRuntimeEndpoint {
-    fn ws_url(&self) -> &str {
-        &self.0
+    fn ws_url(&self) -> String {
+        self.ws_url.clone()
+    }
+
+    fn auth(&self) -> Option<&GatewayAuth> {
+        self.auth.as_ref()
+    }
+
+    fn identity(&self) -> EndpointIdentity {
+        self.identity.clone()
+    }
+
+    fn runtime_key(&self) -> crate::session_registry::RuntimeKey {
+        self.runtime_key.clone()
     }
 }
 
@@ -1059,40 +1142,98 @@ impl RuntimeEndpoint for StaticRuntimeEndpoint {
 /// existing types remain in use until their callers move to this client.
 pub struct GatewayClient {
     pub runtime: Arc<tokio::sync::Mutex<ConnectionRuntime>>,
-    pub generation: AtomicU64,
-    pub connect_lock: tokio::sync::Mutex<()>,
-    pub compatibility: tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>,
+    pub generation: Arc<AtomicU64>,
+    pub connect_lock: Arc<tokio::sync::Mutex<()>>,
+    pub compatibility: Arc<tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility>>,
     pub runtime_key: crate::session_registry::RuntimeKey,
-    pub endpoint: Box<dyn RuntimeEndpoint + Send + Sync>,
+    pub endpoint: Arc<tokio::sync::RwLock<Box<dyn RuntimeEndpoint>>>,
+}
+
+impl Clone for GatewayClient {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            generation: self.generation.clone(),
+            connect_lock: self.connect_lock.clone(),
+            compatibility: self.compatibility.clone(),
+            runtime_key: self.runtime_key.clone(),
+            endpoint: self.endpoint.clone(),
+        }
+    }
 }
 
 impl GatewayClient {
     /// Creates a disconnected client for a runtime and its WebSocket endpoint.
     pub fn new(
         runtime_key: crate::session_registry::RuntimeKey,
-        ws_url: impl Into<String>,
+        endpoint: impl Into<String>,
+        auth: Option<GatewayAuth>,
     ) -> Self {
-        let ws_url = ws_url.into();
-        let redacted_url = redacted_ws_url(&ws_url);
+        let endpoint = endpoint.into();
+        let endpoint_identity = EndpointIdentity::from_ws_url(&endpoint, auth.as_ref(), None);
+        let redacted_url = endpoint_identity.public_url.clone();
         Self {
             runtime: Arc::new(tokio::sync::Mutex::new(ConnectionRuntime {
                 ws_url: redacted_url,
                 ..ConnectionRuntime::default()
             })),
-            generation: AtomicU64::new(1),
-            connect_lock: tokio::sync::Mutex::new(()),
-            compatibility: tokio::sync::Mutex::new(
+            generation: Arc::new(AtomicU64::new(1)),
+            connect_lock: Arc::new(tokio::sync::Mutex::new(())),
+            compatibility: Arc::new(tokio::sync::Mutex::new(
                 crate::hermes_protocol::RuntimeCompatibility::Unknown,
-            ),
-            runtime_key,
-            endpoint: Box::new(StaticRuntimeEndpoint(redacted_ws_url(&ws_url))),
+            )),
+            runtime_key: runtime_key.clone(),
+            endpoint: Arc::new(tokio::sync::RwLock::new(Box::new(StaticRuntimeEndpoint {
+                ws_url: endpoint,
+                auth,
+                runtime_key,
+                identity: endpoint_identity,
+            }))),
         }
+    }
+
+    /// Replace the endpoint configuration while preserving this client's
+    /// connection state and session registry ownership. The next
+    /// [`Self::ensure_connected`] call rotates the socket if the identity
+    /// changed.
+    pub async fn configure_endpoint(&self, endpoint: impl Into<String>, auth: Option<GatewayAuth>) {
+        let ws_url = endpoint.into();
+        let identity = EndpointIdentity::from_ws_url(&ws_url, auth.as_ref(), None);
+        *self.endpoint.write().await = Box::new(StaticRuntimeEndpoint {
+            ws_url,
+            auth,
+            runtime_key: self.runtime_key.clone(),
+            identity,
+        });
+    }
+
+    /// Ensure this client's configured endpoint is connected.
+    ///
+    /// New production code should prefer this over supplying a URL to the
+    /// backward-compatible [`ensure_ws_connection`] helper.
+    pub async fn ensure_connected(
+        &self,
+        emit_fn: EmitFn,
+        sessions: Option<Arc<crate::session_registry::SessionRegistry>>,
+    ) -> Result<(), WsError> {
+        // The endpoint is authoritative for this client. Reading all endpoint
+        // fields here keeps connection ownership local to GatewayClient; the
+        // legacy helper continues deriving its compatibility identity from the
+        // URL for callers that do not have a RuntimeEndpoint.
+        let endpoint = self.endpoint.read().await;
+        let ws_url = endpoint.ws_url();
+        let _auth = endpoint.auth().cloned();
+        let _identity = endpoint.identity();
+        let _runtime_key = endpoint.runtime_key();
+        drop(endpoint);
+        let state = Arc::new(self.clone());
+        ensure_ws_connection(&ws_url, emit_fn, &state, sessions).await
     }
 }
 
 impl Default for GatewayClient {
     fn default() -> Self {
-        Self::new(crate::session_registry::RuntimeKey::Local, String::new())
+        Self::new(crate::session_registry::RuntimeKey::Local, "", None)
     }
 }
 
@@ -1138,13 +1279,13 @@ impl StateLike for GatewayClient {
         self.runtime.as_ref()
     }
     fn generation(&self) -> &std::sync::atomic::AtomicU64 {
-        &self.generation
+        self.generation.as_ref()
     }
     fn connect_lock(&self) -> &tokio::sync::Mutex<()> {
-        &self.connect_lock
+        self.connect_lock.as_ref()
     }
     fn compatibility(&self) -> &tokio::sync::Mutex<crate::hermes_protocol::RuntimeCompatibility> {
-        &self.compatibility
+        self.compatibility.as_ref()
     }
     fn runtime_key(&self) -> crate::session_registry::RuntimeKey {
         self.runtime_key.clone()
@@ -1242,14 +1383,15 @@ where
     State: StateLike,
 {
     // Fast path: keep a live connection only when it belongs to the requested
-    // endpoint. `ConnectionRuntime::ws_url` is always redacted, so the token
-    // cannot make an otherwise identical endpoint look different.
-    let redacted_url = redacted_ws_url(ws_url);
+    // endpoint identity. The token is represented only by its SHA-256
+    // fingerprint, so credential rotation reconnects without retaining secrets.
+    let endpoint_identity = EndpointIdentity::from_ws_url(ws_url, None, None);
+    let redacted_url = endpoint_identity.public_url.clone();
     let shutdown_tx = {
         let mut runtime = ws_state.runtime().lock().await;
         if runtime.state != ConnectionState::Connected {
             None
-        } else if runtime.ws_url == redacted_url {
+        } else if runtime.endpoint_identity.as_ref() == Some(&endpoint_identity) {
             return Ok(());
         } else {
             runtime.state = ConnectionState::Disconnected;
@@ -1274,17 +1416,33 @@ where
 
     // Double-check after acquiring the lock — the first caller may have already
     // connected while we were waiting.
-    {
+    let shutdown_tx = {
         let mut runtime = ws_state.runtime().lock().await;
         match runtime.state {
-            ConnectionState::Connected | ConnectionState::Degraded => return Ok(()),
+            ConnectionState::Connected | ConnectionState::Degraded
+                if runtime.endpoint_identity.as_ref() == Some(&endpoint_identity) =>
+            {
+                return Ok(());
+            }
+            ConnectionState::Connected | ConnectionState::Degraded => {
+                runtime.state = ConnectionState::Disconnected;
+                runtime.generation = ws_state.generation().fetch_add(1, Ordering::Release) + 1;
+                runtime.cmd_tx.take()
+            }
             ConnectionState::Connecting => {
                 // Should not happen under connect_lock, but guard anyway.
                 return Err(WsError::Protocol("concurrent connect race".into()));
             }
-            ConnectionState::Disconnected => {}
+            ConnectionState::Disconnected => None,
         }
-        // We are the single connector. Set Connecting.
+    };
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(WsCommand::Shutdown).await;
+    }
+    {
+        let mut runtime = ws_state.runtime().lock().await;
+        // We are the single connector. Set Connecting after stopping any
+        // mismatched connection discovered while waiting for the lock.
         runtime.state = ConnectionState::Connecting;
     }
 
@@ -1323,6 +1481,7 @@ where
     {
         let mut runtime = ws_state.runtime().lock().await;
         runtime.ws_url = redacted_url;
+        runtime.endpoint_identity = Some(endpoint_identity);
         runtime.cmd_tx = Some(cmd_tx);
         runtime.generation = generation;
     }
@@ -1991,7 +2150,7 @@ mod tests {
     #[test]
     fn redacted_ws_url_removes_token() {
         let token = "token with spaces&symbols";
-        let ws_url = build_ws_url("https://gateway.example.test", token).unwrap();
+        let (ws_url, _) = build_ws_url("https://gateway.example.test", token).unwrap();
         let redacted = redacted_ws_url(&ws_url);
 
         assert!(!redacted.contains(token));
@@ -2002,10 +2161,16 @@ mod tests {
     #[test]
     fn gateway_auth_redacts_api_key() {
         let auth = GatewayAuth {
-            api_key: "secret".to_string(),
+            api_key: "secret-token".to_string(),
         };
 
         assert_eq!(auth.redacted(), "***");
+        assert_eq!(format!("{:?}", auth), "GatewayAuth(<redacted>)");
+        assert!(!format!("{:?}", auth).contains("secret-token"));
+        assert_eq!(
+            auth.sha256_fingerprint(),
+            "930bbdc51b6aed5c2a5678fd6e28dee7a05e8a4b643cfc0b4427c3efb86c0d94"
+        );
     }
 
     // RED: these tests assert that the WS transport returns typed WsError
@@ -2580,7 +2745,7 @@ mod tests {
             RuntimeKey::Remote(_) => RuntimeKey::Remote("test-instance".into()),
             RuntimeKey::Ssh(_) => RuntimeKey::Ssh("test-tunnel".into()),
         };
-        Arc::new(GatewayClient::new(runtime_key, ws_url))
+        Arc::new(GatewayClient::new(runtime_key, ws_url, None))
     }
 
     async fn wait_connected<State: StateLike>(ws_state: &State, timeout_ms: u64) {
@@ -2628,6 +2793,32 @@ mod tests {
 
         // cmd_tx must be set.
         assert!(ws_state.runtime.lock().await.cmd_tx.is_some());
+    }
+
+    #[tokio::test]
+    async fn gateway_client_ensure_connected_uses_its_configured_endpoint() {
+        let (ws_url, _) = start_mock_backend(4).await;
+        let auth = GatewayAuth {
+            api_key: "test".into(),
+        };
+        let gateway = Arc::new(GatewayClient::new(
+            RuntimeKey::Remote("endpoint-owned".into()),
+            ws_url,
+            Some(auth.clone()),
+        ));
+        let (emit_fn, _) = mock_emitter();
+
+        gateway.ensure_connected(emit_fn, None).await.unwrap();
+
+        let runtime = gateway.runtime.lock().await;
+        assert_eq!(runtime.state, ConnectionState::Connected);
+        assert_eq!(
+            runtime
+                .endpoint_identity
+                .as_ref()
+                .map(|identity| &identity.auth_fingerprint),
+            Some(&auth.sha256_fingerprint())
+        );
     }
 
     #[tokio::test]
@@ -2752,7 +2943,8 @@ mod tests {
         let (url_b, _reader_b_exited) = start_rotation_mock_backend().await;
         let gateway = Arc::new(GatewayClient::new(
             crate::session_registry::RuntimeKey::Remote("rotation-test".into()),
-            String::new(),
+            "",
+            None,
         ));
 
         let (emit_a, _) = mock_emitter();
@@ -2779,6 +2971,40 @@ mod tests {
             .await
             .expect("old reader did not exit")
             .expect("old backend did not observe the reader exit");
+    }
+
+    #[tokio::test]
+    async fn ensure_connection_rotates_when_auth_token_changes() {
+        let initial_url = start_multi_runtime_mock_backend().await;
+        let base_url = initial_url.split('?').next().unwrap();
+        let (url_a, auth_a) = build_ws_url(base_url, "token-A").unwrap();
+        let (url_b, auth_b) = build_ws_url(base_url, "token-B").unwrap();
+        let gateway = Arc::new(GatewayClient::new(
+            RuntimeKey::Remote("token-rotation-test".into()),
+            "",
+            None,
+        ));
+
+        let (emit_a, _) = mock_emitter();
+        ensure_ws_connection(&url_a, emit_a, &gateway, None)
+            .await
+            .expect("connect token-A");
+        let first_generation = gateway.generation.load(Ordering::Acquire);
+
+        let (emit_b, _) = mock_emitter();
+        ensure_ws_connection(&url_b, emit_b, &gateway, None)
+            .await
+            .expect("reconnect token-B");
+
+        let runtime = gateway.runtime.lock().await;
+        assert_eq!(runtime.state, ConnectionState::Connected);
+        assert_eq!(redacted_ws_url(&url_a), redacted_ws_url(&url_b));
+        assert_eq!(
+            runtime.endpoint_identity.as_ref().unwrap().auth_fingerprint,
+            auth_b.sha256_fingerprint()
+        );
+        assert_ne!(auth_a.sha256_fingerprint(), auth_b.sha256_fingerprint());
+        assert!(gateway.generation.load(Ordering::Acquire) > first_generation);
     }
 
     #[tokio::test]

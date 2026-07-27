@@ -57,7 +57,7 @@ pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
 pub use ws_transport::{
     build_ws_url, ensure_ws_connection, redacted_ws_url, submit_prompt_on_connection, to_ws_url,
-    GatewayAuth, WsState,
+    EndpointIdentity, GatewayAuth, WsState,
 };
 
 // ── App State ─────────────────────────────────────────────────────────────
@@ -86,6 +86,10 @@ pub struct AppState {
 
 impl AppState {
     fn new() -> Self {
+        let connection_config = config::read_desktop_config(&config::resolve_hermes_home());
+        let remote_instance_id = config::remote_instance_id(&connection_config.remote_url);
+        let ssh_tunnel_id = config::ssh_tunnel_id(&connection_config.ssh);
+
         Self {
             gateway: GatewayState::new(),
             ssh: SshState::new(),
@@ -93,12 +97,14 @@ impl AppState {
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
             remote_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
-                session_registry::RuntimeKey::Remote("default-remote".into()),
-                String::new(),
+                session_registry::RuntimeKey::Remote(remote_instance_id),
+                "",
+                None,
             )),
             ssh_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
-                session_registry::RuntimeKey::Ssh("default-ssh".into()),
-                String::new(),
+                session_registry::RuntimeKey::Ssh(ssh_tunnel_id),
+                "",
+                None,
             )),
             sessions: session_registry::SessionRegistry::new(),
         }
@@ -1169,8 +1175,9 @@ async fn generate_smart_briefing_cmd(
     let token = gateway::get_gateway_session_token(&state.gateway, None)
         .await
         .ok_or("No session token for briefing")?;
-    let ws_url = crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
-        .map_err(|e| e.to_string())?;
+    let (ws_url, _) =
+        crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
+            .map_err(|e| e.to_string())?;
 
     // Send via WS — streaming tokens arrive as chat_event (frontend ChatView
     // picks them up if visible). The buffered variant also accumulates the
@@ -1406,8 +1413,9 @@ async fn generate_meeting_briefing_cmd(
         .await
         .ok_or("No session token for meeting briefing")?;
     eprintln!("[meeting_briefing] Got session token");
-    let ws_url = crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
-        .map_err(|e| e.to_string())?;
+    let (ws_url, _) =
+        crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &token)
+            .map_err(|e| e.to_string())?;
     eprintln!(
         "[meeting_briefing] WS URL: {}",
         crate::ws_transport::redacted_ws_url(&ws_url)

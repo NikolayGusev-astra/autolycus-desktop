@@ -245,7 +245,7 @@ pub async fn start_gateway(
     } else {
         match crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{}", port), &session_token)
         {
-            Ok(ws_url) => probe_ws_ready(&ws_url).await,
+            Ok((ws_url, _)) => probe_ws_ready(&ws_url).await,
             Err(error) => {
                 tracing::warn!(target: "steersman_desktop_lib::gateway", %error, "could not build readiness WebSocket URL");
                 false

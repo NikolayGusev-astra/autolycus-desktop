@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ── Hermes Home ──────────────────────────────────────────────────────────
 
@@ -132,6 +133,46 @@ pub struct ConnectionConfig {
     #[serde(rename = "remoteApiKey")]
     pub api_key: String,
     pub ssh: SshConfig,
+}
+
+/// Stable identity for a configured remote Hermes instance. The URL itself may
+/// carry credentials, so retain only its SHA-256 digest in the runtime key.
+pub fn remote_instance_id(remote_url: &str) -> crate::session_registry::RemoteInstanceId {
+    format!(
+        "remote:{}",
+        hex::encode(Sha256::digest(remote_url.trim().as_bytes()))
+    )
+}
+
+/// Stable identity for the SSH forwarding target used by a configured tunnel.
+pub fn ssh_tunnel_id(ssh: &SshConfig) -> crate::session_registry::SshTunnelId {
+    format!("ssh:{}:{}", ssh.host.trim(), ssh.remote_port)
+}
+
+#[cfg(test)]
+mod instance_identity_tests {
+    use super::{remote_instance_id, ssh_tunnel_id, SshConfig};
+
+    #[test]
+    fn instance_ids_are_derived_from_connection_config() {
+        let first_remote = remote_instance_id("https://alpha.example.test:8443/api");
+        let second_remote = remote_instance_id("https://beta.example.test:8443/api");
+        assert_ne!(first_remote, second_remote);
+        assert!(first_remote.starts_with("remote:"));
+
+        let first_tunnel = ssh_tunnel_id(&SshConfig {
+            host: "bastion-a.example.test".into(),
+            remote_port: 8787,
+            ..Default::default()
+        });
+        let second_tunnel = ssh_tunnel_id(&SshConfig {
+            host: "bastion-b.example.test".into(),
+            remote_port: 8787,
+            ..Default::default()
+        });
+        assert_eq!(first_tunnel, "ssh:bastion-a.example.test:8787");
+        assert_ne!(first_tunnel, second_tunnel);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
