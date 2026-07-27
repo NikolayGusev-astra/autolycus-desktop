@@ -2842,19 +2842,17 @@ mod tests {
     ///
     /// Returns (ws_url, received_frames, emitted_events) where emitted_events
     /// records the exact sequence of (conversation_id, event_type) for assertions.
-    async fn start_interleaved_mock_backend() -> (
-        String,
-        Arc<tokio::sync::Mutex<Vec<Value>>>,
-        Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>>,
-    ) {
+    // Type alias to reduce complexity for clippy::type_complexity.
+    type EmitOrder = Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>>;
+
+    async fn start_interleaved_mock_backend() -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let received: Arc<tokio::sync::Mutex<Vec<Value>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let received_clone = Arc::clone(&received);
         // Record the exact emitted event sequence for the test to assert against.
-        let emit_order: Arc<tokio::sync::Mutex<Vec<(Option<String>, &'static str)>>> =
-            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let emit_order: EmitOrder = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let emit_order_clone = Arc::clone(&emit_order);
 
         tokio::spawn(async move {
@@ -2994,7 +2992,6 @@ mod tests {
         (
             format!("ws://127.0.0.1:{}/api/ws?token=test", port),
             received,
-            emit_order,
         )
     }
 
@@ -3509,7 +3506,7 @@ mod tests {
         use crate::session_registry::{ConversationId, ProfileId};
 
         // Start a mock backend that accumulates two prompt.submits and emits interleaved events.
-        let (ws_url, received, _emit_order) = start_interleaved_mock_backend().await;
+        let (ws_url, received) = start_interleaved_mock_backend().await;
         let ws_state = Arc::new(WsState::new());
         let sessions = crate::session_registry::SessionRegistry::new();
         let (emit_fn, events) = mock_emitter();
