@@ -573,7 +573,7 @@ pub fn to_ws_url(url: &str) -> String {
 /// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
 #[allow(clippy::too_many_arguments)]
 async fn send_via_ws_persistent(
-    remote_ws_state: &std::sync::Arc<crate::ws_transport::GatewayClient>,
+    supervisor: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
     runtime_key: crate::session_registry::RuntimeKey,
     remote_url: &str,
@@ -582,7 +582,7 @@ async fn send_via_ws_persistent(
     request: &SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
-    if remote_ws_state.runtime_key != runtime_key {
+    if supervisor.runtime_key() != runtime_key {
         return Err(
             "Connection settings changed. Restart the app before sending a message.".into(),
         );
@@ -595,19 +595,23 @@ async fn send_via_ws_persistent(
     let (ws_url, auth) =
         crate::ws_transport::build_ws_url(base, token).map_err(|e| e.to_string())?;
 
-    // The GatewayClient owns the current endpoint. Updating it here preserves
-    // the persistent connection state while allowing Settings changes to rotate
-    // the URL or token on the next connection attempt.
-    remote_ws_state
-        .configure_endpoint(ws_url, Some(auth), tunnel_generation)
-        .await;
-
-    // Ensure the persistent connection is open (idempotent).
+    let endpoint = crate::ws_transport::EndpointSnapshot {
+        identity: crate::ws_transport::EndpointIdentity::from_ws_url(
+            &ws_url,
+            Some(&auth),
+            tunnel_generation,
+        ),
+        ws_url,
+        runtime_key: runtime_key.clone(),
+    };
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
-    remote_ws_state
-        .ensure_connected(emit_fn, Some(sessions.clone()))
+    supervisor
+        .start(endpoint, emit_fn)
         .await
         .map_err(|e| e.to_string())?;
+    supervisor
+        .spawn_background_reconnect(crate::ws_transport::make_tauri_emitter(app_handle.clone()));
+    let remote_ws_state = supervisor.client();
 
     // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
     // The registry is the AUTHORITATIVE source of session IDs — every created
@@ -880,8 +884,8 @@ pub async fn send_message(
     request: SendMessageRequest,
     app_handle: &AppHandle,
     ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
-    remote_ws_state: &std::sync::Arc<crate::ws_transport::GatewayClient>,
-    ssh_ws_state: &std::sync::Arc<crate::ws_transport::GatewayClient>,
+    remote_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
+    ssh_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
 ) -> Result<String, String> {
     // Note: model_config is no longer fetched here — the WS transport sends

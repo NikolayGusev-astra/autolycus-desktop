@@ -124,6 +124,15 @@ pub struct EndpointSnapshot {
     pub runtime_key: crate::session_registry::RuntimeKey,
 }
 
+/// Connection health as observed by a runtime supervisor.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HealthStatus {
+    Connected,
+    Degraded { reason: String },
+    Disconnected { reason: String },
+}
+
 /// Build a gateway WebSocket URL without interpolating auth into the URL text.
 pub fn build_ws_url(base: &str, token: &str) -> Result<(String, GatewayAuth), WsError> {
     let mut url = Url::parse(&to_ws_url(base))
@@ -1221,6 +1230,19 @@ impl GatewayClient {
             auth,
             runtime_key: self.runtime_key.clone(),
             identity,
+        });
+    }
+
+    /// Configure an already resolved endpoint snapshot.  The supervisor owns
+    /// the identity, including credential rotation, so it must not be rebuilt
+    /// from a URL that may intentionally redact or omit credentials.
+    pub async fn configure_snapshot(&self, snapshot: EndpointSnapshot) {
+        debug_assert_eq!(snapshot.runtime_key, self.runtime_key);
+        *self.endpoint.write().await = Box::new(StaticRuntimeEndpoint {
+            ws_url: snapshot.ws_url,
+            auth: None,
+            runtime_key: snapshot.runtime_key,
+            identity: snapshot.identity,
         });
     }
 
@@ -2865,6 +2887,27 @@ mod tests {
                 .map(|identity| &identity.auth_fingerprint),
             Some(&auth.sha256_fingerprint())
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_supervisor_starts_and_reports_connected() {
+        let (ws_url, _) = start_mock_backend(4).await;
+        let runtime_key = RuntimeKey::Remote("supervisor-test".into());
+        let supervisor =
+            crate::runtime_supervisor::RuntimeSupervisor::new(runtime_key.clone(), None);
+        let (emit_fn, _) = mock_emitter();
+        supervisor
+            .start(
+                EndpointSnapshot {
+                    identity: EndpointIdentity::from_ws_url(&ws_url, None, None),
+                    ws_url,
+                    runtime_key,
+                },
+                emit_fn,
+            )
+            .await
+            .unwrap();
+        assert_eq!(supervisor.health_check().await, HealthStatus::Connected);
     }
 
     #[tokio::test]

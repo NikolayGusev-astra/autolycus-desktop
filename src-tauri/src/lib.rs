@@ -27,6 +27,7 @@ mod productivity;
 mod profiles;
 mod provider_registry;
 mod registry;
+mod runtime_supervisor;
 mod secrets;
 mod session_registry;
 mod sessions;
@@ -52,12 +53,13 @@ pub use gateway::{GatewayStartResult, GatewayState};
 pub use mcp::{McpCatalogEntry, McpServer, McpServerInput};
 pub use models::SavedModel;
 pub use profiles::ProfileInfo;
+pub use runtime_supervisor::RuntimeSupervisor;
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
 pub use ws_transport::{
     build_ws_url, ensure_ws_connection, redacted_ws_url, submit_prompt_on_connection, to_ws_url,
-    EndpointIdentity, GatewayAuth, WsState,
+    EndpointIdentity, GatewayAuth, HealthStatus, WsState,
 };
 
 // ── App State ─────────────────────────────────────────────────────────────
@@ -75,9 +77,9 @@ pub struct AppState {
     /// connect-per-message. Remote/SSH modes use their own persistent states.
     pub ws: std::sync::Arc<ws_transport::WsState>,
     /// Persistent WS connection to a remote `hermes serve` backend.
-    pub remote_ws: std::sync::Arc<ws_transport::GatewayClient>,
+    pub remote_ws: std::sync::Arc<RuntimeSupervisor>,
     /// Persistent WS connection to a remote backend via SSH tunnel.
-    pub ssh_ws: std::sync::Arc<ws_transport::GatewayClient>,
+    pub ssh_ws: std::sync::Arc<RuntimeSupervisor>,
     /// Phase 1C.2: session registry mapping conversation IDs (product layer)
     /// to Hermes live/durable session IDs. Replaces the single global
     /// session_id that was on WsState.
@@ -90,23 +92,22 @@ impl AppState {
         let remote_instance_id = config::remote_instance_id(&connection_config.remote_url);
         let ssh_tunnel_id = config::ssh_tunnel_id(&connection_config.ssh);
 
+        let sessions = session_registry::SessionRegistry::new();
         Self {
             gateway: GatewayState::new(),
             ssh: SshState::new(),
             hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
-            remote_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
+            remote_ws: std::sync::Arc::new(RuntimeSupervisor::new(
                 session_registry::RuntimeKey::Remote(remote_instance_id),
-                "",
-                None,
+                Some(sessions.clone()),
             )),
-            ssh_ws: std::sync::Arc::new(ws_transport::GatewayClient::new(
+            ssh_ws: std::sync::Arc::new(RuntimeSupervisor::new(
                 session_registry::RuntimeKey::Ssh(ssh_tunnel_id),
-                "",
-                None,
+                Some(sessions.clone()),
             )),
-            sessions: session_registry::SessionRegistry::new(),
+            sessions,
         }
     }
 
@@ -1040,6 +1041,34 @@ async fn send_message_cmd(
 async fn abort_message_cmd(app_handle: AppHandle) -> Result<(), String> {
     let _ = app_handle.emit("chat-abort", ());
     Ok(())
+}
+
+#[tauri::command]
+async fn get_remote_health(state: State<'_, AppState>) -> Result<HealthStatus, String> {
+    Ok(state.remote_ws.health_check().await)
+}
+
+#[tauri::command]
+async fn get_ssh_health(state: State<'_, AppState>) -> Result<HealthStatus, String> {
+    Ok(state.ssh_ws.health_check().await)
+}
+
+#[tauri::command]
+async fn reconnect_remote(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
+    state
+        .remote_ws
+        .reconnect(ws_transport::make_tauri_emitter(app_handle))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reconnect_ssh(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
+    state
+        .ssh_ws
+        .reconnect(ws_transport::make_tauri_emitter(app_handle))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Session Commands ──────────────────────────────────────────────────────
@@ -3437,6 +3466,10 @@ pub fn run() {
             // Chat
             send_message_cmd,
             abort_message_cmd,
+            get_remote_health,
+            get_ssh_health,
+            reconnect_remote,
+            reconnect_ssh,
             // Sessions
             list_sessions_cmd,
             get_session_messages_cmd,
