@@ -1,6 +1,8 @@
 //! Runtime ownership and lifecycle supervision for gateway WebSocket clients.
 
 use std::{
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
@@ -24,6 +26,18 @@ use crate::{
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+
+/// Recreates the runtime-owned resource and returns the endpoint it exposes.
+/// Factories also transfer ownership of the new resource to their supervisor
+/// before resolving the endpoint.
+pub type ResourceFactory = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<EndpointSnapshot, RuntimeError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Named alias for callers that describe the factory by its supervisor role.
+pub type RuntimeResourceFactory = ResourceFactory;
 
 /// Full lifecycle of a gateway runtime, including process ownership and the
 /// connection phases hidden beneath the WebSocket transport.
@@ -186,7 +200,10 @@ pub struct RuntimeSupervisor {
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     lifecycle_lock: Arc<Mutex<()>>,
+    lifecycle_epoch: Arc<AtomicU64>,
     background_task: Arc<StdMutex<Option<JoinHandle<()>>>>,
+    resource_factory: Arc<StdMutex<Option<ResourceFactory>>>,
+    resource_recovery_failed: Arc<AtomicBool>,
     /// Optional local Hermes process owned by this runtime.
     local_gateway_handle: Arc<Mutex<Option<ChildGuard>>>,
     /// Optional SSH tunnel monitor owned by this runtime.
@@ -213,7 +230,10 @@ impl RuntimeSupervisor {
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
             lifecycle_lock: Arc::new(Mutex::new(())),
+            lifecycle_epoch: Arc::new(AtomicU64::new(0)),
             background_task: Arc::new(StdMutex::new(None)),
+            resource_factory: Arc::new(StdMutex::new(None)),
+            resource_recovery_failed: Arc::new(AtomicBool::new(false)),
             local_gateway_handle: Arc::new(Mutex::new(None)),
             ssh_tunnel_handle: Arc::new(Mutex::new(None)),
         }
@@ -224,9 +244,20 @@ impl RuntimeSupervisor {
     /// when the immediate attempt fails.
     pub async fn start(&self, endpoint: EndpointSnapshot, emit_fn: EmitFn) -> Result<(), WsError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
+        self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+        self.start_locked(endpoint, emit_fn).await
+    }
+
+    async fn start_locked(
+        &self,
+        endpoint: EndpointSnapshot,
+        emit_fn: EmitFn,
+    ) -> Result<(), WsError> {
         self.transition(RuntimeState::Starting);
         self.shutdown.store(false, Ordering::Release);
-        *self.emit_fn.lock().await = emit_fn;
+        self.resource_recovery_failed
+            .store(false, Ordering::Release);
+        *self.emit_fn.lock().await = emit_fn.clone();
         self.store_endpoint(endpoint).await;
         self.spawn_background_reconnect();
         self.transition(RuntimeState::AwaitingGateway);
@@ -235,10 +266,50 @@ impl RuntimeSupervisor {
 
     pub async fn update_endpoint(&self, endpoint: EndpointSnapshot) -> Result<(), WsError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
+        self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+        self.update_endpoint_locked(endpoint).await
+    }
+
+    async fn update_endpoint_locked(&self, endpoint: EndpointSnapshot) -> Result<(), WsError> {
         self.store_endpoint(endpoint).await;
         // Endpoint changes deliberately rotate a healthy socket too.
         self.shutdown_current_connection().await;
         self.connect_current().await
+    }
+
+    /// Start only when needed. A ready runtime keeps its socket when the
+    /// endpoint identity is unchanged, and rotates it when it has changed.
+    pub async fn ensure_started(
+        &self,
+        endpoint: EndpointSnapshot,
+        emit_fn: EmitFn,
+    ) -> Result<(), WsError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        *self.emit_fn.lock().await = emit_fn.clone();
+        let same_endpoint = self
+            .endpoint
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|current| current.identity == endpoint.identity);
+        match self.state() {
+            RuntimeState::Ready | RuntimeState::Degraded { .. } if same_endpoint => Ok(()),
+            RuntimeState::Ready | RuntimeState::Degraded { .. } => {
+                self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+                self.update_endpoint_locked(endpoint).await
+            }
+            _ => {
+                self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+                self.start_locked(endpoint, emit_fn).await
+            }
+        }
+    }
+
+    pub fn set_resource_factory(&self, factory: ResourceFactory) {
+        *self
+            .resource_factory
+            .lock()
+            .expect("resource factory mutex poisoned") = Some(factory);
     }
 
     pub async fn health_check(&self) -> HealthStatus {
@@ -311,17 +382,20 @@ impl RuntimeSupervisor {
     /// Stop the reader and the supervisor loop, then leave the instance ready
     /// for a later `start` call.
     pub async fn stop(&self) {
-        let task = {
+        let (epoch, task) = {
             let _lifecycle = self.lifecycle_lock.lock().await;
+            let epoch = self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
             self.transition(RuntimeState::Stopping);
             self.shutdown.store(true, Ordering::Release);
             self.shutdown_notify.notify_waiters();
             self.stop_owned_resources().await;
             self.shutdown_current_connection().await;
-            self.background_task
+            let task = self
+                .background_task
                 .lock()
                 .expect("background task mutex poisoned")
-                .take()
+                .take();
+            (epoch, task)
         };
 
         if let Some(task) = task {
@@ -330,11 +404,16 @@ impl RuntimeSupervisor {
             }
         }
 
-        *self.reconnect_delay.lock().await = INITIAL_RECONNECT_DELAY;
-        self.reconnect_attempt.store(0, Ordering::Release);
-        *self.last_connected.lock().await = None;
-        self.shutdown.store(false, Ordering::Release);
-        self.transition(RuntimeState::Stopped);
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.lifecycle_epoch.load(Ordering::Acquire) == epoch {
+            *self.reconnect_delay.lock().await = INITIAL_RECONNECT_DELAY;
+            self.reconnect_attempt.store(0, Ordering::Release);
+            *self.last_connected.lock().await = None;
+            self.shutdown.store(false, Ordering::Release);
+            self.resource_recovery_failed
+                .store(false, Ordering::Release);
+            self.transition(RuntimeState::Stopped);
+        }
     }
 
     /// Compatibility shim for existing callers. `start` starts this itself.
@@ -343,19 +422,26 @@ impl RuntimeSupervisor {
             .background_task
             .lock()
             .expect("background task mutex poisoned");
-        if task.is_some() {
-            return;
+        if let Some(previous) = task.take() {
+            previous.abort();
         }
 
         let supervisor = self.clone();
+        let epoch = self.lifecycle_epoch.load(Ordering::Acquire);
         *task = Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     _ = supervisor.shutdown_notify.notified() => break,
                 }
-                if supervisor.shutdown.load(Ordering::Acquire) {
+                if supervisor.shutdown.load(Ordering::Acquire)
+                    || supervisor.lifecycle_epoch.load(Ordering::Acquire) != epoch
+                {
                     break;
+                }
+                if !supervisor.process_health().await {
+                    supervisor.recover_resource(epoch).await;
+                    continue;
                 }
                 if matches!(
                     supervisor.health_check().await,
@@ -404,6 +490,8 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(ChildGuard::new(child)) {
             previous.kill().await;
         }
+        self.resource_recovery_failed
+            .store(false, Ordering::Release);
     }
 
     /// Adopt a ready Hermes process that was spawned by the compatibility
@@ -413,6 +501,8 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(ChildGuard::from_gateway(process)) {
             previous.kill().await;
         }
+        self.resource_recovery_failed
+            .store(false, Ordering::Release);
     }
 
     pub async fn local_gateway_endpoint(&self) -> Option<(u16, String)> {
@@ -442,6 +532,8 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(SshTunnelGuard::new(port, monitor)) {
             previous.close();
         }
+        self.resource_recovery_failed
+            .store(false, Ordering::Release);
     }
 
     /// Like `set_ssh_tunnel`, with the SSH-layer close operation invoked when
@@ -461,6 +553,8 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(guard) {
             previous.close();
         }
+        self.resource_recovery_failed
+            .store(false, Ordering::Release);
     }
 
     /// Whether every resource owned by this supervisor is still alive.
@@ -484,6 +578,41 @@ impl RuntimeSupervisor {
         }
         if let Some(mut tunnel) = self.ssh_tunnel_handle.lock().await.take() {
             tunnel.close();
+        }
+    }
+
+    async fn recover_resource(&self, expected_epoch: u64) {
+        if self.resource_recovery_failed.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(factory) = self
+            .resource_factory
+            .lock()
+            .expect("resource factory mutex poisoned")
+            .clone()
+        else {
+            return;
+        };
+
+        let result = factory().await;
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.shutdown.load(Ordering::Acquire)
+            || self.lifecycle_epoch.load(Ordering::Acquire) != expected_epoch
+        {
+            return;
+        }
+        match result {
+            Ok(endpoint) => {
+                self.resource_recovery_failed
+                    .store(false, Ordering::Release);
+                if let Err(error) = self.update_endpoint_locked(endpoint).await {
+                    tracing::warn!(runtime = ?self.runtime_key, %error, "resource recovered but WebSocket reconnect failed");
+                }
+            }
+            Err(error) => {
+                self.resource_recovery_failed.store(true, Ordering::Release);
+                self.transition(RuntimeState::Failed { error });
+            }
         }
     }
 
@@ -629,10 +758,14 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     fn endpoint(url: &str) -> EndpointSnapshot {
+        endpoint_for(url, RuntimeKey::Remote("test".into()))
+    }
+
+    fn endpoint_for(url: &str, runtime_key: RuntimeKey) -> EndpointSnapshot {
         EndpointSnapshot {
             ws_url: url.into(),
             identity: EndpointIdentity::from_ws_url(url, None, None),
-            runtime_key: RuntimeKey::Remote("test".into()),
+            runtime_key,
         }
     }
 
@@ -809,6 +942,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_started_is_a_noop_for_a_ready_matching_endpoint() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        let (url, _) = start_mock_backend().await;
+        let endpoint = endpoint(&url);
+        supervisor
+            .start(endpoint.clone(), noop_emitter())
+            .await
+            .unwrap();
+        let revision = supervisor.endpoint_revision.load(Ordering::Acquire);
+        let generation = supervisor.client.runtime.lock().await.generation;
+
+        supervisor
+            .ensure_started(endpoint, noop_emitter())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            supervisor.endpoint_revision.load(Ordering::Acquire),
+            revision
+        );
+        assert_eq!(
+            supervisor.client.runtime.lock().await.generation,
+            generation
+        );
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn ensure_started_updates_a_ready_runtime_when_endpoint_changes() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        let (first_url, _) = start_mock_backend().await;
+        let (second_url, _) = start_mock_backend().await;
+        supervisor
+            .start(endpoint(&first_url), noop_emitter())
+            .await
+            .unwrap();
+
+        supervisor
+            .ensure_started(endpoint(&second_url), noop_emitter())
+            .await
+            .unwrap();
+
+        assert_eq!(supervisor.endpoint_revision.load(Ordering::Acquire), 2);
+        assert_eq!(
+            supervisor.client.endpoint.read().await.identity(),
+            endpoint(&second_url).identity
+        );
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
     async fn reconnect_enters_reconnecting_state() {
         let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
         assert!(supervisor
@@ -878,6 +1062,43 @@ mod tests {
         supervisor.stop().await;
     }
 
+    #[tokio::test]
+    async fn concurrent_stop_and_start_cannot_end_stopped_with_live_socket() {
+        let supervisor = Arc::new(RuntimeSupervisor::new(
+            RuntimeKey::Remote("test".into()),
+            None,
+        ));
+        let (url, _) = start_mock_backend().await;
+        supervisor
+            .start(endpoint(&url), noop_emitter())
+            .await
+            .unwrap();
+        if let Some(task) = supervisor.background_task.lock().unwrap().take() {
+            task.abort();
+        }
+        *supervisor.background_task.lock().unwrap() = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }));
+
+        let stopping = tokio::spawn({
+            let supervisor = Arc::clone(&supervisor);
+            async move { supervisor.stop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        supervisor
+            .start(endpoint(&url), noop_emitter())
+            .await
+            .unwrap();
+        stopping.await.unwrap();
+
+        assert!(!matches!(supervisor.state(), RuntimeState::Stopped));
+        assert!(matches!(
+            supervisor.health_check().await,
+            HealthStatus::Connected { .. } | HealthStatus::Degraded { .. }
+        ));
+        supervisor.stop().await;
+    }
+
     fn short_lived_child() -> Child {
         #[cfg(windows)]
         let mut command = tokio::process::Command::new("cmd");
@@ -936,6 +1157,94 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn gateway_crash_factory_respawns_and_returns_ready() {
+        let supervisor = Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None));
+        let (url, _) = start_mock_backend().await;
+        let factory_url = url.clone();
+        let factory_calls = Arc::new(AtomicU32::new(0));
+        let factory_supervisor = Arc::downgrade(&supervisor);
+        let factory_calls_clone = Arc::clone(&factory_calls);
+        supervisor.set_resource_factory(Arc::new(move || {
+            let supervisor = factory_supervisor.clone();
+            let url = factory_url.clone();
+            let factory_calls = Arc::clone(&factory_calls_clone);
+            Box::pin(async move {
+                factory_calls.fetch_add(1, Ordering::AcqRel);
+                let supervisor = supervisor.upgrade().ok_or_else(|| {
+                    RuntimeError::GatewayStartFailed("supervisor dropped".to_string())
+                })?;
+                supervisor.set_local_gateway(long_lived_child()).await;
+                Ok(endpoint_for(&url, RuntimeKey::Local))
+            })
+        }));
+        supervisor.set_local_gateway(short_lived_child()).await;
+        supervisor
+            .start(endpoint_for(&url, RuntimeKey::Local), noop_emitter())
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while factory_calls.load(Ordering::Acquire) == 0
+                || !matches!(supervisor.state(), RuntimeState::Ready)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("gateway factory did not restore the runtime");
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn tunnel_crash_factory_respawns_and_returns_ready() {
+        let supervisor = Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("test".into()), None));
+        let (url, _) = start_mock_backend().await;
+        let factory_url = url.clone();
+        let factory_calls = Arc::new(AtomicU32::new(0));
+        let factory_supervisor = Arc::downgrade(&supervisor);
+        let factory_calls_clone = Arc::clone(&factory_calls);
+        supervisor.set_resource_factory(Arc::new(move || {
+            let supervisor = factory_supervisor.clone();
+            let url = factory_url.clone();
+            let factory_calls = Arc::clone(&factory_calls_clone);
+            Box::pin(async move {
+                factory_calls.fetch_add(1, Ordering::AcqRel);
+                let supervisor = supervisor
+                    .upgrade()
+                    .ok_or_else(|| RuntimeError::TunnelFailed("supervisor dropped".to_string()))?;
+                supervisor
+                    .set_ssh_tunnel(
+                        12345,
+                        tokio::spawn(async { futures::future::pending::<()>().await }),
+                    )
+                    .await;
+                Ok(endpoint_for(&url, RuntimeKey::Ssh("test".into())))
+            })
+        }));
+        supervisor
+            .set_ssh_tunnel(12345, tokio::spawn(async {}))
+            .await;
+        supervisor
+            .start(
+                endpoint_for(&url, RuntimeKey::Ssh("test".into())),
+                noop_emitter(),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while factory_calls.load(Ordering::Acquire) == 0
+                || !matches!(supervisor.state(), RuntimeState::Ready)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("tunnel factory did not restore the runtime");
+        supervisor.stop().await;
     }
 
     #[tokio::test]

@@ -606,7 +606,7 @@ async fn send_via_ws_persistent(
     };
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
     supervisor
-        .start(endpoint, emit_fn)
+        .ensure_started(endpoint, emit_fn)
         .await
         .map_err(|e| e.to_string())?;
     let remote_ws_state = supervisor.client();

@@ -64,6 +64,10 @@ impl SshState {
     pub fn tunnel_generation(&self) -> u64 {
         self.tunnel_generation.load(Ordering::Acquire)
     }
+
+    pub fn active_config(&self) -> Option<SshConfig> {
+        self.active_config.lock().unwrap().clone()
+    }
 }
 
 // ── Shell-path safety ─────────────────────────────────────────────────────

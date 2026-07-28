@@ -65,12 +65,12 @@ pub use ws_transport::{
 // ── App State ─────────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub gateway: GatewayState,
-    pub ssh: SshState,
+    pub gateway: std::sync::Arc<GatewayState>,
+    pub ssh: std::sync::Arc<SshState>,
     /// Resolved HERMES_HOME. Set once during init_app, read by every command.
     /// Lock-free (ArcSwap) so reads never block the async runtime and there is
     /// no mutex to poison.
-    pub hermes_home: arc_swap::ArcSwapOption<PathBuf>,
+    pub hermes_home: std::sync::Arc<arc_swap::ArcSwapOption<PathBuf>>,
     pub auth: auth::AuthState,
     /// ADR-006: persistent WS connection to the local Hermes backend. One
     /// long-lived socket + reader task for the entire app lifetime, replacing
@@ -96,24 +96,32 @@ impl AppState {
         let ssh_tunnel_id = config::ssh_tunnel_id(&connection_config.ssh);
 
         let sessions = session_registry::SessionRegistry::new();
+        let gateway = std::sync::Arc::new(GatewayState::new());
+        let ssh = std::sync::Arc::new(SshState::new());
+        let hermes_home = std::sync::Arc::new(arc_swap::ArcSwapOption::from(None));
+        let local_ws = std::sync::Arc::new(RuntimeSupervisor::new(
+            session_registry::RuntimeKey::Local,
+            Some(sessions.clone()),
+        ));
+        let ssh_ws = std::sync::Arc::new(RuntimeSupervisor::new(
+            session_registry::RuntimeKey::Ssh(ssh_tunnel_id),
+            Some(sessions.clone()),
+        ));
+
+        configure_local_resource_factory(&local_ws, &gateway, &hermes_home);
+        configure_ssh_resource_factory(&ssh_ws, &ssh, &hermes_home);
         Self {
-            gateway: GatewayState::new(),
-            ssh: SshState::new(),
-            hermes_home: arc_swap::ArcSwapOption::from(None),
+            gateway,
+            ssh,
+            hermes_home,
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
-            local_ws: std::sync::Arc::new(RuntimeSupervisor::new(
-                session_registry::RuntimeKey::Local,
-                Some(sessions.clone()),
-            )),
+            local_ws,
             remote_ws: std::sync::Arc::new(RuntimeSupervisor::new(
                 session_registry::RuntimeKey::Remote(remote_instance_id),
                 Some(sessions.clone()),
             )),
-            ssh_ws: std::sync::Arc::new(RuntimeSupervisor::new(
-                session_registry::RuntimeKey::Ssh(ssh_tunnel_id),
-                Some(sessions.clone()),
-            )),
+            ssh_ws,
             sessions,
         }
     }
@@ -129,6 +137,143 @@ impl AppState {
             .map(|guard| guard.as_ref().to_path_buf())
             .ok_or_else(|| "App not initialized".to_string())
     }
+}
+
+fn local_endpoint(port: u16, token: &str) -> Result<ws_transport::EndpointSnapshot, RuntimeError> {
+    let (ws_url, auth) = build_ws_url(&format!("ws://127.0.0.1:{port}"), token)
+        .map_err(|error| RuntimeError::GatewayStartFailed(error.to_string()))?;
+    Ok(ws_transport::EndpointSnapshot {
+        identity: EndpointIdentity::from_ws_url(&ws_url, Some(&auth), None),
+        ws_url,
+        runtime_key: session_registry::RuntimeKey::Local,
+    })
+}
+
+fn ssh_endpoint(
+    ssh: &SshState,
+    hermes_home: &PathBuf,
+) -> Result<ws_transport::EndpointSnapshot, RuntimeError> {
+    let tunnel_url = ssh::get_tunnel_url(ssh)
+        .ok_or_else(|| RuntimeError::TunnelFailed("SSH tunnel is not available".to_string()))?;
+    let token = config::get_api_server_key(hermes_home, None)
+        .or_else(|| {
+            dirs::home_dir()
+                .and_then(|home| config::get_api_server_key(&home.join(".hermes"), None))
+        })
+        .or_else(|| {
+            std::env::var("API_SERVER_KEY")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default();
+    let (ws_url, auth) = build_ws_url(&tunnel_url, &token)
+        .map_err(|error| RuntimeError::TunnelFailed(error.to_string()))?;
+    let config = ssh.active_config().ok_or_else(|| {
+        RuntimeError::TunnelFailed("SSH tunnel has no active configuration".to_string())
+    })?;
+    Ok(ws_transport::EndpointSnapshot {
+        identity: EndpointIdentity::from_ws_url(
+            &ws_url,
+            Some(&auth),
+            Some(ssh.tunnel_generation()),
+        ),
+        ws_url,
+        runtime_key: session_registry::RuntimeKey::Ssh(config::ssh_tunnel_id(&config)),
+    })
+}
+
+fn configure_local_resource_factory(
+    supervisor: &std::sync::Arc<RuntimeSupervisor>,
+    gateway_state: &std::sync::Arc<GatewayState>,
+    hermes_home: &std::sync::Arc<arc_swap::ArcSwapOption<PathBuf>>,
+) {
+    let supervisor = std::sync::Arc::downgrade(supervisor);
+    let gateway_state = std::sync::Arc::clone(gateway_state);
+    let hermes_home = std::sync::Arc::clone(hermes_home);
+    supervisor
+        .upgrade()
+        .unwrap()
+        .set_resource_factory(std::sync::Arc::new(move || {
+            let supervisor = supervisor.clone();
+            let gateway_state = std::sync::Arc::clone(&gateway_state);
+            let hermes_home = std::sync::Arc::clone(&hermes_home);
+            Box::pin(async move {
+                let home = hermes_home
+                    .load_full()
+                    .map(|path| path.as_ref().to_path_buf())
+                    .unwrap_or_else(config::resolve_hermes_home);
+                let result = gateway::start_gateway(&gateway_state, &home, None).await;
+                if !result.success {
+                    return Err(RuntimeError::GatewayStartFailed(
+                        result
+                            .error
+                            .unwrap_or_else(|| "failed to start Hermes".to_string()),
+                    ));
+                }
+                let process = gateway::take_gateway_process(&gateway_state, None)
+                    .await
+                    .ok_or_else(|| {
+                        RuntimeError::GatewayStartFailed("missing Hermes process".to_string())
+                    })?;
+                let endpoint = local_endpoint(process.port, &process.session_token)?;
+                let supervisor = supervisor.upgrade().ok_or_else(|| {
+                    RuntimeError::GatewayStartFailed(
+                        "local runtime supervisor was dropped".to_string(),
+                    )
+                })?;
+                supervisor.set_local_gateway_process(process).await;
+                Ok(endpoint)
+            })
+        }));
+}
+
+fn configure_ssh_resource_factory(
+    supervisor: &std::sync::Arc<RuntimeSupervisor>,
+    ssh_state: &std::sync::Arc<SshState>,
+    hermes_home: &std::sync::Arc<arc_swap::ArcSwapOption<PathBuf>>,
+) {
+    let supervisor = std::sync::Arc::downgrade(supervisor);
+    let ssh_state = std::sync::Arc::clone(ssh_state);
+    let hermes_home = std::sync::Arc::clone(hermes_home);
+    supervisor
+        .upgrade()
+        .unwrap()
+        .set_resource_factory(std::sync::Arc::new(move || {
+            let supervisor = supervisor.clone();
+            let ssh_state = std::sync::Arc::clone(&ssh_state);
+            let hermes_home = std::sync::Arc::clone(&hermes_home);
+            Box::pin(async move {
+                let ssh_config = ssh_state.active_config().ok_or_else(|| {
+                    RuntimeError::TunnelFailed(
+                        "SSH tunnel has no configuration to restart".to_string(),
+                    )
+                })?;
+                let home = hermes_home
+                    .load_full()
+                    .map(|path| path.as_ref().to_path_buf())
+                    .unwrap_or_else(config::resolve_hermes_home);
+                let port = ssh::start_ssh_tunnel(&ssh_state, ssh_config, home.clone())
+                    .map_err(RuntimeError::TunnelFailed)?;
+                let supervisor = supervisor.upgrade().ok_or_else(|| {
+                    RuntimeError::TunnelFailed("SSH runtime supervisor was dropped".to_string())
+                })?;
+                supervisor
+                    .set_ssh_tunnel_with_cleanup(
+                        port,
+                        ssh::monitor_tunnel(&ssh_state),
+                        ssh::tunnel_cleanup(&ssh_state),
+                    )
+                    .await;
+                ssh_endpoint(&ssh_state, &home)
+            })
+        }));
+}
+
+async fn supervisor_is_running(supervisor: &RuntimeSupervisor) -> bool {
+    matches!(
+        supervisor.health_check().await,
+        HealthStatus::Connected { .. } | HealthStatus::Degraded { .. }
+    )
 }
 
 // ── Connection Info ───────────────────────────────────────────────────────
@@ -893,8 +1038,22 @@ async fn start_gateway_cmd(
     profile: Option<String>,
 ) -> Result<GatewayStartResult, String> {
     let hermes_home = state.hermes_home()?;
-
-    Ok(gateway::start_gateway(&state.gateway, &hermes_home, profile.as_deref()).await)
+    let result = gateway::start_gateway(&state.gateway, &hermes_home, profile.as_deref()).await;
+    if !result.success {
+        return Ok(result);
+    }
+    let process = gateway::take_gateway_process(&state.gateway, profile.as_deref())
+        .await
+        .ok_or("Gateway started but no process handle was available")?;
+    let endpoint = local_endpoint(process.port, &process.session_token)
+        .map_err(|error| format!("{error:?}"))?;
+    state.local_ws.set_local_gateway_process(process).await;
+    state
+        .local_ws
+        .start(endpoint, std::sync::Arc::new(|_| {}))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result)
 }
 
 /// Stop gateway
@@ -903,7 +1062,8 @@ async fn stop_gateway_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    gateway::stop_gateway(&state.gateway, profile.as_deref()).await?;
+    let _ = profile;
+    state.local_ws.stop().await;
     Ok(true)
 }
 
@@ -913,7 +1073,8 @@ async fn gateway_status_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<bool, String> {
-    Ok(gateway::is_gateway_running(&state.gateway, profile.as_deref()).await)
+    let _ = profile;
+    Ok(supervisor_is_running(&state.local_ws).await)
 }
 
 /// Fetch available models from the gateway's /v1/models endpoint.
@@ -1880,20 +2041,34 @@ async fn start_ssh_tunnel_cmd(
     ssh_config: SshConfig,
 ) -> Result<(), String> {
     let hermes_home = state.hermes_home()?;
-    ssh::start_ssh_tunnel(&state.ssh, ssh_config, hermes_home).map(|_| ())
+    let port = ssh::start_ssh_tunnel(&state.ssh, ssh_config, hermes_home.clone())?;
+    state
+        .ssh_ws
+        .set_ssh_tunnel_with_cleanup(
+            port,
+            ssh::monitor_tunnel(&state.ssh),
+            ssh::tunnel_cleanup(&state.ssh),
+        )
+        .await;
+    let endpoint = ssh_endpoint(&state.ssh, &hermes_home).map_err(|error| format!("{error:?}"))?;
+    state
+        .ssh_ws
+        .start(endpoint, std::sync::Arc::new(|_| {}))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Stop SSH tunnel
 #[tauri::command]
 async fn stop_ssh_tunnel_cmd(state: State<'_, AppState>) -> Result<(), String> {
-    ssh::stop_ssh_tunnel(&state.ssh)?;
+    state.ssh_ws.stop().await;
     Ok(())
 }
 
 /// Check SSH tunnel status
 #[tauri::command]
 async fn ssh_tunnel_status_cmd(state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(ssh::is_tunnel_active(&state.ssh))
+    Ok(supervisor_is_running(&state.ssh_ws).await)
 }
 
 // ── Telegram Commands ─────────────────────────────────────────────────────
@@ -3659,6 +3834,36 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn local_tauri_command_status_reflects_supervisor_not_legacy_gateway_map() {
+        let app = AppState::new();
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 60 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", "sleep 60"]);
+        let process = gateway::GatewayProcess {
+            child: command.spawn().unwrap(),
+            port: 1,
+            profile_key: "default".to_string(),
+            started_at: Instant::now(),
+            session_token: "test".to_string(),
+        };
+        app.gateway
+            .processes
+            .lock()
+            .await
+            .insert("default".to_string(), process);
+
+        assert!(gateway::is_gateway_running(&app.gateway, None).await);
+        assert!(!supervisor_is_running(&app.local_ws).await);
+        gateway::stop_gateway(&app.gateway, None).await.unwrap();
+    }
 
     /// Verify credential pool sync: add a Groq key (as the UI would) → it lands
     /// in auth.json credential_pool → STT can resolve it.
