@@ -871,6 +871,7 @@ pub async fn send_via_ws_persistent_local(
 /// A chat message has no profile input. Preserve the launch profile captured
 /// by start_gateway_cmd so that supervisor recovery can recreate the same
 /// local runtime.
+#[allow(clippy::ptr_arg)]
 pub(crate) async fn ensure_local_runtime_spec(
     supervisor: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     hermes_home: &PathBuf,
