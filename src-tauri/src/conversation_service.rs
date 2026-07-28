@@ -641,7 +641,7 @@ mod tests {
         // Simulate a disconnected generation: the durable binding is kept,
         // but its live ID is stale until the action resolves it.
         sessions
-            .mark_stale_for_generation(2, RuntimeKey::Local)
+            .mark_stale_for_generation(3, RuntimeKey::Local)
             .await;
         assert_eq!(
             service.abort_conversation(&id).await.unwrap(),
