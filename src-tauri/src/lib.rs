@@ -2361,11 +2361,7 @@ async fn remove_bitrix_source_cmd(
 /// Helper: write source env vars to Hermes .env. Called automatically after
 /// every source add/update/remove so the user never has to click a separate
 /// "Apply" button — sources propagate to Hermes immediately.
-fn apply_sources_env(
-    hermes_home: &Path,
-    profile: Option<&str>,
-    config: &sources::SourcesConfig,
-) {
+fn apply_sources_env(hermes_home: &Path, profile: Option<&str>, config: &sources::SourcesConfig) {
     let env_vars = config.to_env_vars();
     for (key, value) in env_vars {
         if let Err(e) = config::write_env_value(hermes_home, profile, &key, &value) {
