@@ -95,10 +95,20 @@ pub struct AppState {
     /// session_id that was on WsState.
     pub sessions: std::sync::Arc<session_registry::SessionRegistry>,
     pub conversations: std::sync::Arc<InMemoryConversationRepository>,
+    pub product_ctx: ProductContext,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(app_handle: AppHandle) -> Self {
+        Self::new_with_app_handle(Some(app_handle))
+    }
+
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        Self::new_with_app_handle(None)
+    }
+
+    fn new_with_app_handle(app_handle: Option<AppHandle>) -> Self {
         let connection_config = config::read_desktop_config(&config::resolve_hermes_home());
         let remote_instance_id = config::remote_instance_id(&connection_config.remote_url);
         let ssh_tunnel_id = config::ssh_tunnel_id(&connection_config.ssh);
@@ -118,6 +128,28 @@ impl AppState {
 
         configure_local_resource_factory(&local_ws, &gateway, &hermes_home);
         configure_ssh_resource_factory(&ssh_ws, &ssh, &hermes_home);
+        let remote_ws = std::sync::Arc::new(RuntimeSupervisor::new(
+            session_registry::RuntimeKey::Remote(remote_instance_id),
+            Some(sessions.clone()),
+        ));
+        let conversations = InMemoryConversationRepository::new();
+        let product_ctx = match app_handle {
+            Some(app_handle) => ProductContext::new(
+                app_handle,
+                sessions.clone(),
+                local_ws.clone(),
+                remote_ws.clone(),
+                ssh_ws.clone(),
+                conversations.clone() as std::sync::Arc<dyn ConversationRepository>,
+            ),
+            None => ProductContext::new_for_test(
+                sessions.clone(),
+                local_ws.clone(),
+                remote_ws.clone(),
+                ssh_ws.clone(),
+                conversations.clone() as std::sync::Arc<dyn ConversationRepository>,
+            ),
+        };
         Self {
             gateway,
             ssh,
@@ -125,13 +157,11 @@ impl AppState {
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
             local_ws,
-            remote_ws: std::sync::Arc::new(RuntimeSupervisor::new(
-                session_registry::RuntimeKey::Remote(remote_instance_id),
-                Some(sessions.clone()),
-            )),
+            remote_ws,
             ssh_ws,
             sessions,
-            conversations: InMemoryConversationRepository::new(),
+            conversations,
+            product_ctx,
         }
     }
 
@@ -1232,6 +1262,85 @@ async fn send_message_cmd(
         &state.conversations,
     )
     .await
+}
+
+/// Create a product conversation backed by the selected runtime.
+#[tauri::command]
+async fn create_conversation_cmd(
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<String, String> {
+    create_conversation_for_context(&state.product_ctx, &mode).await
+}
+
+async fn create_conversation_for_context(
+    ctx: &ProductContext,
+    mode: &str,
+) -> Result<String, String> {
+    let mode = match mode {
+        "local" => ConnectionMode::Local,
+        "remote" => ConnectionMode::Remote,
+        "ssh" => ConnectionMode::Ssh,
+        _ => return Err(format!("unsupported connection mode: {mode}")),
+    };
+    ctx.conversation_service()
+        .create_conversation(mode)
+        .await
+        .map(|id| id.0)
+        .map_err(|error| error.to_string())
+}
+
+/// Product API v2 message command. The legacy `send_message_cmd` remains for
+/// compatibility while callers migrate to conversation IDs.
+#[tauri::command]
+async fn send_message_cmd_v2(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    text: String,
+) -> Result<(), String> {
+    send_message_for_context(&state.product_ctx, conversation_id, text).await
+}
+
+async fn send_message_for_context(
+    ctx: &ProductContext,
+    conversation_id: String,
+    text: String,
+) -> Result<(), String> {
+    ctx.conversation_service()
+        .send_message(&ConversationId(conversation_id), &text)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_conversations_cmd(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProductConversation>, String> {
+    get_conversations_for_context(&state.product_ctx).await
+}
+
+async fn get_conversations_for_context(
+    ctx: &ProductContext,
+) -> Result<Vec<ProductConversation>, String> {
+    Ok(ctx.conversation_service().list_conversations().await)
+}
+
+#[tauri::command]
+async fn get_conversation_status_cmd(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<ConversationStatus, String> {
+    get_conversation_status_for_context(&state.product_ctx, conversation_id).await
+}
+
+async fn get_conversation_status_for_context(
+    ctx: &ProductContext,
+    conversation_id: String,
+) -> Result<ConversationStatus, String> {
+    ctx.conversation_service()
+        .get_status(&ConversationId(conversation_id))
+        .await
+        .ok_or_else(|| "conversation not found".to_string())
 }
 
 /// Abort the current chat generation. Emits a `chat-abort` event that the
@@ -3532,7 +3641,6 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .manage(AppState::new())
         .manage(install::InstallState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -3541,6 +3649,7 @@ pub fn run() {
             Some(vec!["--minimized"]),
         ))
         .setup(|app| {
+            app.manage(AppState::new(app.handle().clone()));
             // ── Tray icon (best-effort) ───────────────────────────────
             // On some Linux DEs (notably Astra Linux / older libayatana-
             // appindicator), building the tray icon fails with a raw-data
@@ -3679,6 +3788,10 @@ pub fn run() {
             get_gateway_port_cmd,
             // Chat
             send_message_cmd,
+            create_conversation_cmd,
+            send_message_cmd_v2,
+            get_conversations_cmd,
+            get_conversation_status_cmd,
             abort_message_cmd,
             get_remote_health,
             get_ssh_health,
@@ -3861,12 +3974,130 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Instant;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    async fn start_product_command_backend() -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_for_task = Arc::clone(&received);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                received_for_task.lock().await.push(request.clone());
+                let id = request["id"].as_u64().unwrap();
+                let response = match request["method"].as_str() {
+                    Some("session.create") => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {"session_id": "mock-session", "stored_session_id": "mock-session",
+                            "message_count": 0, "messages": [], "info": {"desktop_contract": 4}}
+                    }),
+                    Some("prompt.submit") => json!({
+                        "jsonrpc": "2.0", "id": id, "result": {"status": "streaming"}
+                    }),
+                    _ => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                };
+                socket
+                    .send(Message::Text(response.to_string()))
+                    .await
+                    .unwrap();
+            }
+        });
+        (format!("ws://127.0.0.1:{port}/api/ws?token=test"), received)
+    }
+
+    async fn product_command_test_context(url: String) -> ProductContext {
+        let sessions = SessionRegistry::new();
+        let local_ws = Arc::new(RuntimeSupervisor::new(
+            session_registry::RuntimeKey::Local,
+            Some(Arc::clone(&sessions)),
+        ));
+        local_ws
+            .start(
+                ws_transport::EndpointSnapshot {
+                    identity: EndpointIdentity::from_ws_url(&url, None, None),
+                    ws_url: url,
+                    runtime_key: session_registry::RuntimeKey::Local,
+                },
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        ProductContext::new_for_test(
+            sessions,
+            local_ws,
+            Arc::new(RuntimeSupervisor::new(
+                session_registry::RuntimeKey::Remote("test".into()),
+                None,
+            )),
+            Arc::new(RuntimeSupervisor::new(
+                session_registry::RuntimeKey::Ssh("test".into()),
+                None,
+            )),
+            InMemoryConversationRepository::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn create_conversation_cmd_integration_test() {
+        let (url, _) = start_product_command_backend().await;
+        let ctx = product_command_test_context(url).await;
+
+        let conversation_id = create_conversation_for_context(&ctx, "local")
+            .await
+            .unwrap();
+
+        assert!(!conversation_id.is_empty());
+        assert_eq!(
+            get_conversation_status_for_context(&ctx, conversation_id)
+                .await
+                .unwrap(),
+            ConversationStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_cmd_v2_integration_test() {
+        let (url, received) = start_product_command_backend().await;
+        let ctx = product_command_test_context(url).await;
+
+        let conversation_id = create_conversation_for_context(&ctx, "local")
+            .await
+            .unwrap();
+        send_message_for_context(&ctx, conversation_id, "hello from v2".into())
+            .await
+            .unwrap();
+
+        assert!(received.lock().await.iter().any(|request| {
+            request["method"] == "prompt.submit" && request["params"]["text"] == "hello from v2"
+        }));
+    }
+
+    #[tokio::test]
+    async fn get_conversations_cmd_returns_persisted_conversations() {
+        let (url, _) = start_product_command_backend().await;
+        let ctx = product_command_test_context(url).await;
+        let conversation_id = create_conversation_for_context(&ctx, "local")
+            .await
+            .unwrap();
+
+        let conversations = get_conversations_for_context(&ctx).await.unwrap();
+        assert!(conversations
+            .iter()
+            .any(|conversation| conversation.id.0 == conversation_id));
+    }
 
     #[tokio::test]
     async fn local_tauri_command_status_reflects_supervisor_not_legacy_gateway_map() {
-        let app = AppState::new();
+        let app = AppState::new_for_test();
         #[cfg(windows)]
         let mut command = tokio::process::Command::new("cmd");
         #[cfg(windows)]

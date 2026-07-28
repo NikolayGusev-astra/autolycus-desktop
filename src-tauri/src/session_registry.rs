@@ -41,7 +41,7 @@ pub struct ProfileId(pub String);
 pub type RemoteInstanceId = String;
 pub type SshTunnelId = String;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum RuntimeKey {
     Local,
     Remote(RemoteInstanceId),

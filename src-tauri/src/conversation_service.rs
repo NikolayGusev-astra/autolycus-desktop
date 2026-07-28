@@ -143,6 +143,10 @@ impl ConversationService {
             .map(|conversation| conversation.status)
     }
 
+    pub async fn list_conversations(&self) -> Vec<ProductConversation> {
+        self.conversations.list().await
+    }
+
     pub async fn migrate_conversations(
         &self,
         old_runtime_key: RuntimeKey,
@@ -324,6 +328,34 @@ mod tests {
                 && request["params"]["text"] == "hello"
         }));
         local.stop().await;
+    }
+
+    #[tokio::test]
+    async fn list_conversations_returns_persisted_conversations() {
+        let repository = crate::InMemoryConversationRepository::new();
+        repository
+            .create(ProductConversation {
+                id: ConversationId("persisted-conversation".into()),
+                status: ConversationStatus::Active,
+                title: Some("Persisted".into()),
+                runtime_key: RuntimeKey::Local,
+            })
+            .await
+            .unwrap();
+        let service = ConversationService::new(
+            SessionRegistry::new(),
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None)),
+            Arc::new(RuntimeSupervisor::new(
+                RuntimeKey::Remote("test".into()),
+                None,
+            )),
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("test".into()), None)),
+            repository,
+        );
+
+        let conversations = service.list_conversations().await;
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].id.0, "persisted-conversation");
     }
 
     #[tokio::test]

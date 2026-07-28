@@ -14,7 +14,7 @@ use crate::{ConversationService, ProductEvent, RuntimeSupervisor, SessionRegistr
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ConversationId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ConversationStatus {
     Active,
     Suspended,
@@ -22,7 +22,7 @@ pub enum ConversationStatus {
     Failed(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductConversation {
     pub id: ConversationId,
     pub status: ConversationStatus,
@@ -113,7 +113,7 @@ impl ConversationRepository for InMemoryConversationRepository {
 /// the app's infrastructure layer.
 #[derive(Clone)]
 pub struct ProductContext {
-    app_handle: AppHandle,
+    app_handle: Option<AppHandle>,
     sessions: Arc<SessionRegistry>,
     local_supervisor: Arc<RuntimeSupervisor>,
     remote_supervisor: Arc<RuntimeSupervisor>,
@@ -131,7 +131,26 @@ impl ProductContext {
         conversations: Arc<dyn ConversationRepository>,
     ) -> Self {
         Self {
-            app_handle,
+            app_handle: Some(app_handle),
+            sessions,
+            local_supervisor,
+            remote_supervisor,
+            ssh_supervisor,
+            conversations,
+        }
+    }
+
+    /// Test-only product context. Product events are deliberately disabled
+    /// because Tauri's mock runtime has a different `AppHandle` type.
+    pub fn new_for_test(
+        sessions: Arc<SessionRegistry>,
+        local_supervisor: Arc<RuntimeSupervisor>,
+        remote_supervisor: Arc<RuntimeSupervisor>,
+        ssh_supervisor: Arc<RuntimeSupervisor>,
+        conversations: Arc<dyn ConversationRepository>,
+    ) -> Self {
+        Self {
+            app_handle: None,
             sessions,
             local_supervisor,
             remote_supervisor,
@@ -153,7 +172,9 @@ impl ProductContext {
     pub fn emit_product_event(&self, event: &ProductEvent) {
         use tauri::Emitter;
 
-        let _ = self.app_handle.emit("product-event", event);
+        if let Some(app_handle) = &self.app_handle {
+            let _ = app_handle.emit("product-event", event);
+        }
     }
 }
 
