@@ -40,7 +40,7 @@ mod terminal;
 mod validation;
 mod ws_transport;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -151,7 +151,7 @@ fn local_endpoint(port: u16, token: &str) -> Result<ws_transport::EndpointSnapsh
 
 fn ssh_endpoint(
     ssh: &SshState,
-    hermes_home: &PathBuf,
+    hermes_home: &Path,
 ) -> Result<ws_transport::EndpointSnapshot, RuntimeError> {
     let tunnel_url = ssh::get_tunnel_url(ssh)
         .ok_or_else(|| RuntimeError::TunnelFailed("SSH tunnel is not available".to_string()))?;
@@ -2362,7 +2362,7 @@ async fn remove_bitrix_source_cmd(
 /// every source add/update/remove so the user never has to click a separate
 /// "Apply" button — sources propagate to Hermes immediately.
 fn apply_sources_env(
-    hermes_home: &PathBuf,
+    hermes_home: &Path,
     profile: Option<&str>,
     config: &sources::SourcesConfig,
 ) {

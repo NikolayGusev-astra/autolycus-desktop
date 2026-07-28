@@ -371,6 +371,7 @@ async fn await_gateway_port(
 
 // ── Gateway stop (async) ───────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result<(), String> {
     let profile_key = profile.unwrap_or("default").to_string();
 
@@ -421,6 +422,7 @@ pub async fn stop_gateway(state: &GatewayState, profile: Option<&str>) -> Result
 
 // ── Gateway status ────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub async fn is_gateway_running(state: &GatewayState, profile: Option<&str>) -> bool {
     let profile_key = profile.unwrap_or("default").to_string();
 

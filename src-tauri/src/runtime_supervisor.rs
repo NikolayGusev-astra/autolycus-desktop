@@ -37,6 +37,7 @@ pub type ResourceFactory = Arc<
 >;
 
 /// Named alias for callers that describe the factory by its supervisor role.
+#[allow(dead_code)]
 pub type RuntimeResourceFactory = ResourceFactory;
 
 /// Full lifecycle of a gateway runtime, including process ownership and the
