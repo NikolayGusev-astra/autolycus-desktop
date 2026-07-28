@@ -331,6 +331,17 @@ impl RuntimeSupervisor {
         }
     }
 
+    /// Reuse this supervisor's configured endpoint and event sink. Product
+    /// services use this when connection configuration remains owned by the
+    /// infrastructure layer.
+    pub async fn ensure_started_configured(&self) -> Result<(), RuntimeError> {
+        let endpoint = self.endpoint.lock().await.clone().ok_or_else(|| {
+            RuntimeError::GatewayStartFailed("runtime endpoint is not configured".into())
+        })?;
+        let emit_fn = self.emit_fn.lock().await.clone();
+        self.ensure_started(endpoint, emit_fn).await
+    }
+
     pub fn set_resource_factory(&self, factory: ResourceFactory) {
         *self
             .resource_factory
