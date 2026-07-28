@@ -609,8 +609,6 @@ async fn send_via_ws_persistent(
         .start(endpoint, emit_fn)
         .await
         .map_err(|e| e.to_string())?;
-    supervisor
-        .spawn_background_reconnect(crate::ws_transport::make_tauri_emitter(app_handle.clone()));
     let remote_ws_state = supervisor.client();
 
     // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.

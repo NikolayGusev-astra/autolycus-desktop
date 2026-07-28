@@ -1054,19 +1054,22 @@ async fn get_ssh_health(state: State<'_, AppState>) -> Result<HealthStatus, Stri
 }
 
 #[tauri::command]
-async fn reconnect_remote(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
+async fn reconnect_remote(
+    state: State<'_, AppState>,
+    _app_handle: AppHandle,
+) -> Result<(), String> {
     state
         .remote_ws
-        .reconnect(ws_transport::make_tauri_emitter(app_handle))
+        .force_reconnect()
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn reconnect_ssh(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
+async fn reconnect_ssh(state: State<'_, AppState>, _app_handle: AppHandle) -> Result<(), String> {
     state
         .ssh_ws
-        .reconnect(ws_transport::make_tauri_emitter(app_handle))
+        .force_reconnect()
         .await
         .map_err(|e| e.to_string())
 }
