@@ -3988,27 +3988,34 @@ mod tests {
         let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let received_for_task = Arc::clone(&received);
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            while let Some(Ok(Message::Text(text))) = socket.next().await {
-                let request: Value = serde_json::from_str(&text).unwrap();
-                received_for_task.lock().await.push(request.clone());
-                let id = request["id"].as_u64().unwrap();
-                let response = match request["method"].as_str() {
-                    Some("session.create") => json!({
-                        "jsonrpc": "2.0", "id": id,
-                        "result": {"session_id": "mock-session", "stored_session_id": "mock-session",
-                            "message_count": 0, "messages": [], "info": {"desktop_contract": 4}}
-                    }),
-                    Some("prompt.submit") => json!({
-                        "jsonrpc": "2.0", "id": id, "result": {"status": "streaming"}
-                    }),
-                    _ => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-                };
-                socket
-                    .send(Message::Text(response.to_string()))
-                    .await
-                    .unwrap();
+            while let Ok((stream, _)) = listener.accept().await {
+                let received_for_connection = Arc::clone(&received_for_task);
+                tokio::spawn(async move {
+                    let mut socket = accept_async(stream).await.unwrap();
+                    while let Some(Ok(Message::Text(text))) = socket.next().await {
+                        let request: Value = serde_json::from_str(&text).unwrap();
+                        received_for_connection.lock().await.push(request.clone());
+                        let id = request["id"].as_u64().unwrap();
+                        let response = match request["method"].as_str() {
+                            Some("gateway.ready") => json!({
+                                "jsonrpc": "2.0", "id": id, "result": {"status": "ready"}
+                            }),
+                            Some("session.create") => json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {"session_id": "mock-session", "stored_session_id": "mock-session",
+                                    "message_count": 0, "messages": [], "info": {"desktop_contract": 4}}
+                            }),
+                            Some("prompt.submit") => json!({
+                                "jsonrpc": "2.0", "id": id, "result": {"status": "streaming"}
+                            }),
+                            _ => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                        };
+                        socket
+                            .send(Message::Text(response.to_string()))
+                            .await
+                            .unwrap();
+                    }
+                });
             }
         });
         (format!("ws://127.0.0.1:{port}/api/ws?token=test"), received)
