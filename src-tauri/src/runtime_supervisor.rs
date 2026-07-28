@@ -529,10 +529,16 @@ impl RuntimeSupervisor {
         *self.runtime_key.lock().expect("runtime key mutex poisoned") = new_key.clone();
         *self.client.lock().expect("gateway client mutex poisoned") =
             Arc::new(GatewayClient::new(new_key, "", None));
-        *self
-            .resource_factory
-            .lock()
-            .expect("resource factory mutex poisoned") = factory;
+        // Callers that only rotate the runtime identity (such as chat's
+        // InstanceMismatch path) pass None. Keep the startup-installed
+        // resource factory in that case so a later tunnel/process failure can
+        // still be recovered.
+        if let Some(factory) = factory {
+            *self
+                .resource_factory
+                .lock()
+                .expect("resource factory mutex poisoned") = Some(factory);
+        }
         self.resource_recovery_delay.store(1, Ordering::Release);
         *self.endpoint.lock().await = None;
         self.endpoint_revision.fetch_add(1, Ordering::AcqRel);
@@ -1091,6 +1097,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_instance_without_factory_preserves_ssh_recovery_factory() {
+        let supervisor = Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("a".into()), None));
+        let (url, _) = start_mock_backend().await;
+        let factory_url = url.clone();
+        let factory_calls = Arc::new(AtomicU32::new(0));
+        let factory_supervisor = Arc::downgrade(&supervisor);
+        let factory_calls_clone = Arc::clone(&factory_calls);
+        supervisor.set_resource_factory(Arc::new(move || {
+            let supervisor = factory_supervisor.clone();
+            let url = factory_url.clone();
+            let factory_calls = Arc::clone(&factory_calls_clone);
+            Box::pin(async move {
+                factory_calls.fetch_add(1, Ordering::AcqRel);
+                let supervisor = supervisor
+                    .upgrade()
+                    .ok_or_else(|| RuntimeError::TunnelFailed("supervisor dropped".into()))?;
+                supervisor
+                    .set_ssh_tunnel(
+                        12345,
+                        tokio::spawn(async { futures::future::pending::<()>().await }),
+                    )
+                    .await;
+                Ok(endpoint_for(&url, RuntimeKey::Ssh("b".into())))
+            })
+        }));
+        supervisor
+            .set_ssh_tunnel(
+                12345,
+                tokio::spawn(async { futures::future::pending::<()>().await }),
+            )
+            .await;
+        supervisor
+            .start(
+                endpoint_for(&url, RuntimeKey::Ssh("a".into())),
+                noop_emitter(),
+            )
+            .await
+            .unwrap();
+        supervisor
+            .replace_instance(
+                RuntimeKey::Ssh("b".into()),
+                endpoint_for(&url, RuntimeKey::Ssh("b".into())),
+                None,
+            )
+            .await
+            .unwrap();
+        supervisor
+            .set_ssh_tunnel(12345, tokio::spawn(async {}))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while factory_calls.load(Ordering::Acquire) == 0
+                || !matches!(supervisor.state(), RuntimeState::Ready)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("preserved SSH factory did not restore runtime B");
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
     async fn ensure_started_returns_typed_instance_mismatch() {
         let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("expected".into()), None);
         let error = supervisor
@@ -1123,13 +1192,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_profile_is_preserved_for_resource_recovery() {
+    async fn local_runtime_profile_survives_message_setup_and_child_crash() {
         let supervisor = Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None));
         supervisor
             .set_local_runtime_spec(LocalRuntimeSpec {
                 hermes_home: PathBuf::from("C:/hermes"),
-                profile: Some("non-default".into()),
+                profile: Some("work".into()),
             })
+            .await;
+        // This is the Local send_message branch after start_gateway_cmd has
+        // already captured the selected profile.
+        crate::chat::ensure_local_runtime_spec(&supervisor, &PathBuf::from("C:/other-hermes"))
             .await;
         let (url, _) = start_mock_backend().await;
         let factory_url = url.clone();
@@ -1158,7 +1231,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(4), async {
-            while seen_profile.lock().unwrap().as_deref() != Some("non-default") {
+            while seen_profile.lock().unwrap().as_deref() != Some("work") {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })

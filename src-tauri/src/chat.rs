@@ -868,6 +868,23 @@ pub async fn send_via_ws_persistent_local(
     Ok(session_id)
 }
 
+/// A chat message has no profile input. Preserve the launch profile captured
+/// by start_gateway_cmd so that supervisor recovery can recreate the same
+/// local runtime.
+pub(crate) async fn ensure_local_runtime_spec(
+    supervisor: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
+    hermes_home: &PathBuf,
+) {
+    if supervisor.local_runtime_spec().await.is_none() {
+        supervisor
+            .set_local_runtime_spec(crate::runtime_supervisor::LocalRuntimeSpec {
+                hermes_home: hermes_home.clone(),
+                profile: None,
+            })
+            .await;
+    }
+}
+
 /// Tauri command boundary: inherent parameter fan-out across the three
 /// connection modes. Collapse into a context struct in Phase 3 product API.
 #[allow(clippy::too_many_arguments)]
@@ -892,12 +909,7 @@ pub async fn send_message(
     // backend's config.yaml, not the per-request body (ADR-004).
     match connection_mode {
         ConnectionMode::Local => {
-            local_ws_state
-                .set_local_runtime_spec(crate::runtime_supervisor::LocalRuntimeSpec {
-                    hermes_home: hermes_home.clone(),
-                    profile: None,
-                })
-                .await;
+            ensure_local_runtime_spec(local_ws_state, hermes_home).await;
             // Start through the compatibility launcher, then transfer the
             // ready child into the Local supervisor for all later lifecycle
             // decisions (health, stop, and reconnect).
@@ -1021,6 +1033,31 @@ pub async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn send_message_path_preserves_started_local_profile() {
+        let supervisor = std::sync::Arc::new(crate::runtime_supervisor::RuntimeSupervisor::new(
+            crate::session_registry::RuntimeKey::Local,
+            None,
+        ));
+        supervisor
+            .set_local_runtime_spec(crate::runtime_supervisor::LocalRuntimeSpec {
+                hermes_home: PathBuf::from("C:/hermes"),
+                profile: Some("work".into()),
+            })
+            .await;
+
+        // This is the Local branch's setup step before it sends a message.
+        ensure_local_runtime_spec(&supervisor, &PathBuf::from("C:/other-hermes")).await;
+
+        assert_eq!(
+            supervisor.local_runtime_spec().await,
+            Some(crate::runtime_supervisor::LocalRuntimeSpec {
+                hermes_home: PathBuf::from("C:/hermes"),
+                profile: Some("work".into()),
+            })
+        );
+    }
 
     // ── ADR-004: WebSocket transport — parser tests (TDD) ──────────────────
     // Fixtures mirror the real events emitted by the upstream tui_gateway
