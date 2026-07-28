@@ -721,6 +721,7 @@ async fn send_via_ws_persistent(
 /// Builds the WS URL from the spawned gateway's port and reads the auth token
 /// from `HERMES_DASHBOARD_SESSION_TOKEN`. Returns the URL + None if the gateway
 /// is not yet running.
+#[allow(dead_code)]
 async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, String> {
     let port = gateway::get_gateway_port(gateway_state, None)
         .await
@@ -750,6 +751,7 @@ async fn build_local_ws_url(gateway_state: &GatewayState) -> Result<String, Stri
 /// session_id (creating a session if the frontend didn't pass one), and
 /// submits the prompt via the reader task's mpsc channel. Streaming events
 /// flow back as `chat_event` Tauri events — the frontend contract is unchanged.
+#[allow(dead_code)]
 pub async fn send_via_ws_persistent_local(
     gateway_state: &GatewayState,
     ws_state: &std::sync::Arc<crate::ws_transport::WsState>,

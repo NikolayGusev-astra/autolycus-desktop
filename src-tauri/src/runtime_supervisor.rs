@@ -120,7 +120,9 @@ impl Drop for ChildGuard {
 /// Ownership token for an SSH tunnel.  The actual SSH process remains owned
 /// by the SSH layer; its monitor completes when that tunnel is no longer
 /// usable.  Dropping the guard aborts the monitor.
+#[allow(dead_code)]
 pub struct SshTunnelGuard {
+    #[allow(dead_code)]
     port: u16,
     monitor: Option<JoinHandle<()>>,
     close: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -150,6 +152,7 @@ impl SshTunnelGuard {
         }
     }
 
+    #[allow(dead_code)]
     pub fn port(&self) -> u16 {
         self.port
     }
