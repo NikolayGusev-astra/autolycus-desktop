@@ -2217,6 +2217,14 @@ where
 {
     Arc::new(move |event: &RoutedChatEvent| {
         let _ = app_handle.emit("chat_event", event);
+        if let Some(conversation_id) = event.conversation_id.as_ref() {
+            if let Some(product_event) = crate::translate_hermes_to_product(
+                event.event.clone(),
+                crate::ConversationId(conversation_id.clone()),
+            ) {
+                let _ = app_handle.emit("product-event", product_event);
+            }
+        }
     })
 }
 

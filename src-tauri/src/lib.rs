@@ -94,6 +94,7 @@ pub struct AppState {
     /// to Hermes live/durable session IDs. Replaces the single global
     /// session_id that was on WsState.
     pub sessions: std::sync::Arc<session_registry::SessionRegistry>,
+    pub conversations: std::sync::Arc<InMemoryConversationRepository>,
 }
 
 impl AppState {
@@ -130,6 +131,7 @@ impl AppState {
             )),
             ssh_ws,
             sessions,
+            conversations: InMemoryConversationRepository::new(),
         }
     }
 
@@ -1227,6 +1229,7 @@ async fn send_message_cmd(
         &state.remote_ws,
         &state.ssh_ws,
         &state.sessions,
+        &state.conversations,
     )
     .await
 }

@@ -574,6 +574,7 @@ pub fn to_ws_url(url: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn send_via_ws_persistent(
     supervisor: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
+    conversation_service: &crate::ConversationService,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
     runtime_key: crate::session_registry::RuntimeKey,
     remote_url: &str,
@@ -601,10 +602,17 @@ async fn send_via_ws_persistent(
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
     match supervisor.ensure_started(endpoint.clone(), emit_fn).await {
         Ok(()) => {}
-        Err(crate::runtime_supervisor::RuntimeError::InstanceMismatch { .. }) => supervisor
-            .replace_instance(runtime_key, endpoint, None)
-            .await
-            .map_err(|error| error.to_string())?,
+        Err(crate::runtime_supervisor::RuntimeError::InstanceMismatch { .. }) => {
+            let old_runtime_key = supervisor.runtime_key();
+            conversation_service
+                .migrate_conversations(old_runtime_key, runtime_key.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            supervisor
+                .replace_instance(runtime_key.clone(), endpoint, None)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         Err(error) => return Err(error.to_string()),
     }
     let remote_ws_state = supervisor.client();
@@ -904,7 +912,15 @@ pub async fn send_message(
     remote_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     ssh_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
+    conversations: &std::sync::Arc<crate::InMemoryConversationRepository>,
 ) -> Result<String, String> {
+    let conversation_service = crate::ConversationService::new(
+        std::sync::Arc::clone(sessions),
+        std::sync::Arc::clone(local_ws_state),
+        std::sync::Arc::clone(remote_ws_state),
+        std::sync::Arc::clone(ssh_ws_state),
+        std::sync::Arc::clone(conversations) as std::sync::Arc<dyn crate::ConversationRepository>,
+    );
     // Note: model_config is no longer fetched here — the WS transport sends
     // only {session_id, text}; reasoning_effort/verbosity/etc. live in the
     // backend's config.yaml, not the per-request body (ADR-004).
@@ -943,6 +959,7 @@ pub async fn send_message(
                     .map_err(|e| e.to_string())?;
             send_via_ws_persistent(
                 local_ws_state,
+                &conversation_service,
                 sessions,
                 crate::session_registry::RuntimeKey::Local,
                 &ws_url,
@@ -962,6 +979,7 @@ pub async fn send_message(
             // backend's session token (UI label rename is a separate task).
             send_via_ws_persistent(
                 &std::sync::Arc::clone(remote_ws_state),
+                &conversation_service,
                 &std::sync::Arc::clone(sessions),
                 crate::session_registry::RuntimeKey::Remote(config::remote_instance_id(remote_url)),
                 remote_url,
@@ -1012,6 +1030,7 @@ pub async fn send_message(
 
             send_via_ws_persistent(
                 &std::sync::Arc::clone(ssh_ws_state),
+                &conversation_service,
                 &std::sync::Arc::clone(sessions),
                 crate::session_registry::RuntimeKey::Ssh(config::ssh_tunnel_id(ssh)),
                 &tunnel_url,

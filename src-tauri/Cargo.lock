@@ -4202,6 +4202,7 @@ name = "steersman-desktop"
 version = "3.3.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",

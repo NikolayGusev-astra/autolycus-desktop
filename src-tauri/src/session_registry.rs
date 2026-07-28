@@ -441,6 +441,35 @@ impl SessionRegistry {
             None
         }
     }
+
+    /// Move a binding to a replacement runtime. The live ID belongs to the
+    /// retired connection, so reconciliation must resume it on the new one.
+    pub async fn migrate_runtime(
+        &self,
+        conversation_id: &ConversationId,
+        old_runtime_key: RuntimeKey,
+        new_runtime_key: RuntimeKey,
+    ) -> bool {
+        let mut inner = self.inner.lock().await;
+        let Some(mut binding) = inner
+            .by_conversation
+            .remove(&(old_runtime_key.clone(), conversation_id.clone()))
+        else {
+            return false;
+        };
+        if let Some(live_session_id) = binding.live_session_id.take() {
+            inner
+                .by_live_session
+                .remove(&(old_runtime_key, live_session_id));
+        }
+        binding.runtime_key = new_runtime_key.clone();
+        binding.state = SessionState::Suspended;
+        binding.connection_generation = 0;
+        inner
+            .by_conversation
+            .insert((new_runtime_key, conversation_id.clone()), binding);
+        true
+    }
 }
 
 #[cfg(test)]

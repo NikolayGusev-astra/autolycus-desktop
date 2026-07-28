@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use crate::chat::ConnectionMode;
-use crate::product_domain::{ConversationId, ConversationStatus, ProductError};
-use crate::session_registry::{
-    ConversationId as RegistryConversationId, ProfileId, RuntimeKey, SessionState,
+use crate::product_domain::{
+    ConversationId, ConversationRepository, ConversationStatus, ProductConversation, ProductError,
 };
+use crate::session_registry::{ConversationId as RegistryConversationId, ProfileId, RuntimeKey};
 use crate::ws_transport::{create_session_on_connection, submit_prompt_on_connection, WsError};
 use crate::{RuntimeError, RuntimeSupervisor, SessionRegistry};
 
@@ -16,6 +16,7 @@ pub struct ConversationService {
     local_supervisor: Arc<RuntimeSupervisor>,
     remote_supervisor: Arc<RuntimeSupervisor>,
     ssh_supervisor: Arc<RuntimeSupervisor>,
+    conversations: Arc<dyn ConversationRepository>,
 }
 
 impl ConversationService {
@@ -24,12 +25,14 @@ impl ConversationService {
         local_supervisor: Arc<RuntimeSupervisor>,
         remote_supervisor: Arc<RuntimeSupervisor>,
         ssh_supervisor: Arc<RuntimeSupervisor>,
+        conversations: Arc<dyn ConversationRepository>,
     ) -> Self {
         Self {
             sessions,
             local_supervisor,
             remote_supervisor,
             ssh_supervisor,
+            conversations,
         }
     }
 
@@ -65,9 +68,18 @@ impl ConversationService {
                 Some(result.stored_session_id),
                 profile,
                 generation,
-                runtime_key,
+                runtime_key.clone(),
             )
             .await;
+
+        self.conversations
+            .create(ProductConversation {
+                id: product_id.clone(),
+                status: ConversationStatus::Active,
+                title: None,
+                runtime_key,
+            })
+            .await?;
 
         Ok(product_id)
     }
@@ -77,14 +89,46 @@ impl ConversationService {
         conv_id: &ConversationId,
         text: &str,
     ) -> Result<(), ProductError> {
-        let (supervisor, runtime_key, live_session_id) = self
-            .lookup_conversation(conv_id)
+        let conversation = self
+            .conversations
+            .get(conv_id)
             .await
             .ok_or(ProductError::ConversationNotFound)?;
-        supervisor
-            .ensure_started_configured()
+        let supervisor = self.supervisor_for_runtime_key(&conversation.runtime_key)?;
+        let runtime_key = conversation.runtime_key;
+        let registry_id = registry_id(conv_id);
+        let binding = self.sessions.get(&registry_id, runtime_key.clone()).await;
+        if binding
+            .as_ref()
+            .and_then(|binding| binding.live_session_id.as_ref())
+            .is_none()
+        {
+            supervisor
+                .ensure_started_configured()
+                .await
+                .map_err(runtime_error)?;
+            // A ready socket normally stays open. Rotate it when this
+            // particular binding is suspended so its durable session enters
+            // the reconnect reconciliation pass.
+            if self
+                .sessions
+                .get_live(&registry_id, runtime_key.clone())
+                .await
+                .is_none()
+            {
+                supervisor
+                    .force_reconnect()
+                    .await
+                    .map_err(|error| ProductError::RuntimeUnavailable(error.to_string()))?;
+            }
+        }
+        let live_session_id = self
+            .sessions
+            .get_live(&registry_id, runtime_key.clone())
             .await
-            .map_err(runtime_error)?;
+            .ok_or_else(|| {
+                ProductError::RuntimeUnavailable("conversation has no live session".into())
+            })?;
         submit_prompt_on_connection(&supervisor.client(), &live_session_id, text)
             .await
             .map_err(send_error)?;
@@ -93,24 +137,33 @@ impl ConversationService {
     }
 
     pub async fn get_status(&self, conv_id: &ConversationId) -> Option<ConversationStatus> {
-        let registry_id = registry_id(conv_id);
-        for supervisor in self.supervisors() {
-            if let Some(binding) = self
-                .sessions
-                .get(&registry_id, supervisor.runtime_key())
-                .await
-            {
-                return Some(match binding.state {
-                    SessionState::Active => ConversationStatus::Active,
-                    SessionState::Suspended => ConversationStatus::Suspended,
-                    SessionState::Resuming { .. } => ConversationStatus::Resuming,
-                    SessionState::ResumeFailed => {
-                        ConversationStatus::Failed("session resume failed".into())
-                    }
-                });
+        self.conversations
+            .get(conv_id)
+            .await
+            .map(|conversation| conversation.status)
+    }
+
+    pub async fn migrate_conversations(
+        &self,
+        old_runtime_key: RuntimeKey,
+        new_runtime_key: RuntimeKey,
+    ) -> Result<(), ProductError> {
+        for mut conversation in self.conversations.list().await {
+            if conversation.runtime_key != old_runtime_key {
+                continue;
             }
+            self.sessions
+                .migrate_runtime(
+                    &registry_id(&conversation.id),
+                    old_runtime_key.clone(),
+                    new_runtime_key.clone(),
+                )
+                .await;
+            conversation.runtime_key = new_runtime_key.clone();
+            conversation.status = ConversationStatus::Suspended;
+            self.conversations.create(conversation).await?;
         }
-        None
+        Ok(())
     }
 
     fn supervisor_for_mode(&self, mode: &ConnectionMode) -> Arc<RuntimeSupervisor> {
@@ -129,22 +182,17 @@ impl ConversationService {
         ]
     }
 
-    async fn lookup_conversation(
+    fn supervisor_for_runtime_key(
         &self,
-        conv_id: &ConversationId,
-    ) -> Option<(Arc<RuntimeSupervisor>, RuntimeKey, String)> {
-        let registry_id = registry_id(conv_id);
-        for supervisor in self.supervisors() {
-            let runtime_key = supervisor.runtime_key();
-            if let Some(live_session_id) = self
-                .sessions
-                .get_live(&registry_id, runtime_key.clone())
-                .await
-            {
-                return Some((Arc::clone(supervisor), runtime_key, live_session_id));
-            }
-        }
-        None
+        runtime_key: &RuntimeKey,
+    ) -> Result<Arc<RuntimeSupervisor>, ProductError> {
+        self.supervisors()
+            .into_iter()
+            .find(|supervisor| supervisor.runtime_key() == *runtime_key)
+            .cloned()
+            .ok_or_else(|| {
+                ProductError::RuntimeUnavailable("conversation runtime is unavailable".into())
+            })
     }
 }
 
@@ -249,7 +297,13 @@ mod tests {
             None,
         ));
         let ssh = Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("test".into()), None));
-        let service = ConversationService::new(sessions, local.clone(), remote, ssh);
+        let service = ConversationService::new(
+            sessions,
+            local.clone(),
+            remote,
+            ssh,
+            crate::InMemoryConversationRepository::new(),
+        );
 
         let conversation_id = service
             .create_conversation(ConnectionMode::Local)
@@ -270,5 +324,92 @@ mod tests {
                 && request["params"]["text"] == "hello"
         }));
         local.stop().await;
+    }
+
+    #[tokio::test]
+    async fn migration_moves_product_and_session_bindings_to_new_runtime() {
+        let sessions = SessionRegistry::new();
+        let repository = crate::InMemoryConversationRepository::new();
+        let local = Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None));
+        let remote = Arc::new(RuntimeSupervisor::new(
+            RuntimeKey::Remote("old".into()),
+            None,
+        ));
+        let ssh = Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("ssh".into()), None));
+        let service = ConversationService::new(
+            Arc::clone(&sessions),
+            local,
+            remote,
+            ssh,
+            Arc::clone(&repository) as Arc<dyn ConversationRepository>,
+        );
+        let id = ConversationId("conversation-1".into());
+        repository
+            .create(ProductConversation {
+                id: id.clone(),
+                status: ConversationStatus::Active,
+                title: None,
+                runtime_key: RuntimeKey::Remote("old".into()),
+            })
+            .await
+            .unwrap();
+        sessions
+            .set_live(
+                registry_id(&id),
+                "live-1".into(),
+                Some("stored-1".into()),
+                ProfileId::default(),
+                1,
+                RuntimeKey::Remote("old".into()),
+            )
+            .await;
+
+        service
+            .migrate_conversations(
+                RuntimeKey::Remote("old".into()),
+                RuntimeKey::Remote("new".into()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository.get(&id).await.unwrap().runtime_key,
+            RuntimeKey::Remote("new".into())
+        );
+        assert!(sessions
+            .get_live(&registry_id(&id), RuntimeKey::Remote("new".into()))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn suspended_persisted_conversation_is_not_reported_as_missing() {
+        let sessions = SessionRegistry::new();
+        let repository = crate::InMemoryConversationRepository::new();
+        let service = ConversationService::new(
+            sessions,
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None)),
+            Arc::new(RuntimeSupervisor::new(
+                RuntimeKey::Remote("remote".into()),
+                None,
+            )),
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("ssh".into()), None)),
+            Arc::clone(&repository) as Arc<dyn ConversationRepository>,
+        );
+        let id = ConversationId("suspended-conversation".into());
+        repository
+            .create(ProductConversation {
+                id: id.clone(),
+                status: ConversationStatus::Suspended,
+                title: None,
+                runtime_key: RuntimeKey::Local,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            service.send_message(&id, "hello").await,
+            Err(ProductError::RuntimeUnavailable(_))
+        ));
     }
 }
