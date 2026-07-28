@@ -425,11 +425,16 @@ mod tests {
                                 "result": {"session_id":"mock-session", "stored_session_id":"mock-session",
                                     "message_count":0, "messages":[], "info":{"desktop_contract":4}}
                             }),
-                            Some("session.resume") => json!({
-                                "jsonrpc":"2.0", "id": id,
-                                "result": {"session_id":"resumed-session", "resumed":"mock-session",
-                                    "message_count":0, "messages":[], "info":{}}
-                            }),
+                            Some("session.resume") => {
+                                let stored_session_id = request["params"]["session_id"]
+                                    .as_str()
+                                    .expect("session.resume must include the durable session ID");
+                                json!({
+                                    "jsonrpc":"2.0", "id": id,
+                                    "result": {"session_id":"resumed-session", "resumed": stored_session_id,
+                                        "message_count":0, "messages":[], "info":{}}
+                                })
+                            }
                             Some("prompt.submit") => json!({
                                 "jsonrpc":"2.0", "id": id,
                                 "result": {"status":"streaming"}
@@ -635,9 +640,10 @@ mod tests {
         );
 
         let requests = received.lock().await;
-        assert!(requests
-            .iter()
-            .any(|request| request["method"] == "session.resume"));
+        assert!(requests.iter().any(|request| {
+            request["method"] == "session.resume"
+                && request["params"]["session_id"] == "mock-session"
+        }));
         assert!(requests.iter().any(|request| {
             request["method"] == "session.interrupt"
                 && request["params"]["session_id"] == "resumed-session"
