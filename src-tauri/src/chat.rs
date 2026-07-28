@@ -582,12 +582,6 @@ async fn send_via_ws_persistent(
     request: &SendMessageRequest,
     app_handle: &AppHandle,
 ) -> Result<String, String> {
-    if supervisor.runtime_key() != runtime_key {
-        return Err(
-            "Connection settings changed. Restart the app before sending a message.".into(),
-        );
-    }
-
     if token.is_empty() {
         return Err("Remote session token is empty. Set it in Settings → Connection.".to_string());
     }
@@ -605,10 +599,14 @@ async fn send_via_ws_persistent(
         runtime_key: runtime_key.clone(),
     };
     let emit_fn = crate::ws_transport::make_tauri_emitter(app_handle.clone());
-    supervisor
-        .ensure_started(endpoint, emit_fn)
-        .await
-        .map_err(|e| e.to_string())?;
+    match supervisor.ensure_started(endpoint.clone(), emit_fn).await {
+        Ok(()) => {}
+        Err(crate::runtime_supervisor::RuntimeError::InstanceMismatch { .. }) => supervisor
+            .replace_instance(runtime_key, endpoint, None)
+            .await
+            .map_err(|error| error.to_string())?,
+        Err(error) => return Err(error.to_string()),
+    }
     let remote_ws_state = supervisor.client();
 
     // Phase 1C.4: resolve the Hermes live session ID via the SessionRegistry.
@@ -633,7 +631,7 @@ async fn send_via_ws_persistent(
                 None => {
                     // No live ID for this conversation yet — create one and register.
                     let result = crate::ws_transport::create_session_on_connection(
-                        remote_ws_state,
+                        &remote_ws_state,
                         "desktop",
                         request.profile.as_deref(),
                     )
@@ -685,7 +683,7 @@ async fn send_via_ws_persistent(
             // register it under a synthetic conversation_id so it participates in
             // reconnect reconciliation.
             let result = crate::ws_transport::create_session_on_connection(
-                remote_ws_state,
+                &remote_ws_state,
                 "desktop",
                 request.profile.as_deref(),
             )
@@ -709,7 +707,7 @@ async fn send_via_ws_persistent(
         };
 
     // Submit the prompt — events stream back via chat_event.
-    crate::ws_transport::submit_prompt_on_connection(remote_ws_state, &session_id, &request.text)
+    crate::ws_transport::submit_prompt_on_connection(&remote_ws_state, &session_id, &request.text)
         .await
         .map_err(|e| format!("{:?}", e))?;
 
@@ -894,6 +892,12 @@ pub async fn send_message(
     // backend's config.yaml, not the per-request body (ADR-004).
     match connection_mode {
         ConnectionMode::Local => {
+            local_ws_state
+                .set_local_runtime_spec(crate::runtime_supervisor::LocalRuntimeSpec {
+                    hermes_home: hermes_home.clone(),
+                    profile: None,
+                })
+                .await;
             // Start through the compatibility launcher, then transfer the
             // ready child into the Local supervisor for all later lifecycle
             // decisions (health, stop, and reconnect).

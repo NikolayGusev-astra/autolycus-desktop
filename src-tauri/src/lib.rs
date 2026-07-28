@@ -53,7 +53,7 @@ pub use gateway::{GatewayStartResult, GatewayState};
 pub use mcp::{McpCatalogEntry, McpServer, McpServerInput};
 pub use models::SavedModel;
 pub use profiles::ProfileInfo;
-pub use runtime_supervisor::{RuntimeError, RuntimeState, RuntimeSupervisor};
+pub use runtime_supervisor::{LocalRuntimeSpec, RuntimeError, RuntimeState, RuntimeSupervisor};
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
@@ -198,11 +198,27 @@ fn configure_local_resource_factory(
             let gateway_state = std::sync::Arc::clone(&gateway_state);
             let hermes_home = std::sync::Arc::clone(&hermes_home);
             Box::pin(async move {
-                let home = hermes_home
-                    .load_full()
-                    .map(|path| path.as_ref().to_path_buf())
-                    .unwrap_or_else(config::resolve_hermes_home);
-                let result = gateway::start_gateway(&gateway_state, &home, None).await;
+                let supervisor = supervisor.upgrade().ok_or_else(|| {
+                    RuntimeError::GatewayStartFailed(
+                        "local runtime supervisor was dropped".to_string(),
+                    )
+                })?;
+                let spec = supervisor.local_runtime_spec().await;
+                let home = spec
+                    .as_ref()
+                    .map(|spec| spec.hermes_home.clone())
+                    .unwrap_or_else(|| {
+                        hermes_home
+                            .load_full()
+                            .map(|path| path.as_ref().to_path_buf())
+                            .unwrap_or_else(config::resolve_hermes_home)
+                    });
+                let result = gateway::start_gateway(
+                    &gateway_state,
+                    &home,
+                    spec.as_ref().and_then(|spec| spec.profile.as_deref()),
+                )
+                .await;
                 if !result.success {
                     return Err(RuntimeError::GatewayStartFailed(
                         result
@@ -210,17 +226,15 @@ fn configure_local_resource_factory(
                             .unwrap_or_else(|| "failed to start Hermes".to_string()),
                     ));
                 }
-                let process = gateway::take_gateway_process(&gateway_state, None)
-                    .await
-                    .ok_or_else(|| {
-                        RuntimeError::GatewayStartFailed("missing Hermes process".to_string())
-                    })?;
-                let endpoint = local_endpoint(process.port, &process.session_token)?;
-                let supervisor = supervisor.upgrade().ok_or_else(|| {
-                    RuntimeError::GatewayStartFailed(
-                        "local runtime supervisor was dropped".to_string(),
-                    )
+                let process = gateway::take_gateway_process(
+                    &gateway_state,
+                    spec.as_ref().and_then(|spec| spec.profile.as_deref()),
+                )
+                .await
+                .ok_or_else(|| {
+                    RuntimeError::GatewayStartFailed("missing Hermes process".to_string())
                 })?;
+                let endpoint = local_endpoint(process.port, &process.session_token)?;
                 supervisor.set_local_gateway_process(process).await;
                 Ok(endpoint)
             })
@@ -1047,6 +1061,13 @@ async fn start_gateway_cmd(
         .ok_or("Gateway started but no process handle was available")?;
     let endpoint = local_endpoint(process.port, &process.session_token)
         .map_err(|error| format!("{error:?}"))?;
+    state
+        .local_ws
+        .set_local_runtime_spec(runtime_supervisor::LocalRuntimeSpec {
+            hermes_home: state.hermes_home()?,
+            profile: profile.clone(),
+        })
+        .await;
     state.local_ws.set_local_gateway_process(process).await;
     state
         .local_ws
@@ -1102,7 +1123,8 @@ async fn get_gateway_port_cmd(
     state: State<'_, AppState>,
     profile: Option<String>,
 ) -> Result<Option<u16>, String> {
-    Ok(gateway::get_gateway_port(&state.gateway, profile.as_deref()).await)
+    let _ = profile;
+    Ok(state.local_ws.local_gateway_port().await)
 }
 
 /// Start gateway on remote machine via SSH

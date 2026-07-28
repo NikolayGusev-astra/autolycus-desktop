@@ -2,6 +2,7 @@
 
 use std::{
     future::Future,
+    path::PathBuf,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -40,6 +41,13 @@ pub type ResourceFactory = Arc<
 #[allow(dead_code)]
 pub type RuntimeResourceFactory = ResourceFactory;
 
+/// The immutable launch inputs needed to recreate a local Hermes process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalRuntimeSpec {
+    pub hermes_home: PathBuf,
+    pub profile: Option<String>,
+}
+
 /// Full lifecycle of a gateway runtime, including process ownership and the
 /// connection phases hidden beneath the WebSocket transport.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -72,6 +80,7 @@ pub enum RuntimeState {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "error", rename_all = "snake_case")]
 pub enum RuntimeError {
+    InstanceMismatch { expected: String, actual: String },
     GatewayStartFailed(String),
     GatewayCrashed(String),
     TunnelFailed(String),
@@ -82,6 +91,14 @@ pub enum RuntimeError {
     Shutdown,
     Timeout,
 }
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for RuntimeError {}
 
 /// A child process owned by a runtime.  Dropping the guard asks Tokio to kill
 /// the child; callers that need deterministic cleanup should use `kill`.
@@ -186,8 +203,8 @@ impl Drop for SshTunnelGuard {
 /// can never intentionally use a snapshot superseded while it was preparing.
 #[derive(Clone)]
 pub struct RuntimeSupervisor {
-    client: Arc<GatewayClient>,
-    runtime_key: RuntimeKey,
+    client: Arc<StdMutex<Arc<GatewayClient>>>,
+    runtime_key: Arc<StdMutex<RuntimeKey>>,
     endpoint: Arc<Mutex<Option<EndpointSnapshot>>>,
     endpoint_revision: Arc<AtomicU64>,
     sessions: Option<Arc<SessionRegistry>>,
@@ -201,10 +218,12 @@ pub struct RuntimeSupervisor {
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     lifecycle_lock: Arc<Mutex<()>>,
-    lifecycle_epoch: Arc<AtomicU64>,
+    /// Changes only when a supervisor is started, stopped, or replaced.
+    supervisor_epoch: Arc<AtomicU64>,
     background_task: Arc<StdMutex<Option<JoinHandle<()>>>>,
     resource_factory: Arc<StdMutex<Option<ResourceFactory>>>,
-    resource_recovery_failed: Arc<AtomicBool>,
+    resource_recovery_delay: Arc<AtomicU64>,
+    local_spec: Arc<Mutex<Option<LocalRuntimeSpec>>>,
     /// Optional local Hermes process owned by this runtime.
     local_gateway_handle: Arc<Mutex<Option<ChildGuard>>>,
     /// Optional SSH tunnel monitor owned by this runtime.
@@ -215,8 +234,12 @@ impl RuntimeSupervisor {
     pub fn new(runtime_key: RuntimeKey, sessions: Option<Arc<SessionRegistry>>) -> Self {
         let (state_tx, current_state) = watch::channel(RuntimeState::Stopped);
         Self {
-            client: Arc::new(GatewayClient::new(runtime_key.clone(), "", None)),
-            runtime_key,
+            client: Arc::new(StdMutex::new(Arc::new(GatewayClient::new(
+                runtime_key.clone(),
+                "",
+                None,
+            )))),
+            runtime_key: Arc::new(StdMutex::new(runtime_key)),
             endpoint: Arc::new(Mutex::new(None)),
             endpoint_revision: Arc::new(AtomicU64::new(0)),
             sessions,
@@ -231,10 +254,11 @@ impl RuntimeSupervisor {
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
             lifecycle_lock: Arc::new(Mutex::new(())),
-            lifecycle_epoch: Arc::new(AtomicU64::new(0)),
+            supervisor_epoch: Arc::new(AtomicU64::new(0)),
             background_task: Arc::new(StdMutex::new(None)),
             resource_factory: Arc::new(StdMutex::new(None)),
-            resource_recovery_failed: Arc::new(AtomicBool::new(false)),
+            resource_recovery_delay: Arc::new(AtomicU64::new(1)),
+            local_spec: Arc::new(Mutex::new(None)),
             local_gateway_handle: Arc::new(Mutex::new(None)),
             ssh_tunnel_handle: Arc::new(Mutex::new(None)),
         }
@@ -243,9 +267,13 @@ impl RuntimeSupervisor {
     /// Configure the runtime and make one immediate connection attempt.
     /// The reconnect loop has already been started when this returns, including
     /// when the immediate attempt fails.
-    pub async fn start(&self, endpoint: EndpointSnapshot, emit_fn: EmitFn) -> Result<(), WsError> {
+    pub async fn start(
+        &self,
+        endpoint: EndpointSnapshot,
+        emit_fn: EmitFn,
+    ) -> Result<(), RuntimeError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
-        self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+        self.supervisor_epoch.fetch_add(1, Ordering::AcqRel);
         self.start_locked(endpoint, emit_fn).await
     }
 
@@ -253,26 +281,24 @@ impl RuntimeSupervisor {
         &self,
         endpoint: EndpointSnapshot,
         emit_fn: EmitFn,
-    ) -> Result<(), WsError> {
+    ) -> Result<(), RuntimeError> {
         self.transition(RuntimeState::Starting);
         self.shutdown.store(false, Ordering::Release);
-        self.resource_recovery_failed
-            .store(false, Ordering::Release);
+        self.resource_recovery_delay.store(1, Ordering::Release);
         *self.emit_fn.lock().await = emit_fn.clone();
-        self.store_endpoint(endpoint).await;
+        self.store_endpoint(endpoint).await?;
         self.spawn_background_reconnect();
         self.transition(RuntimeState::AwaitingGateway);
         self.connect_current().await
     }
 
-    pub async fn update_endpoint(&self, endpoint: EndpointSnapshot) -> Result<(), WsError> {
+    pub async fn update_endpoint(&self, endpoint: EndpointSnapshot) -> Result<(), RuntimeError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
-        self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.update_endpoint_locked(endpoint).await
     }
 
-    async fn update_endpoint_locked(&self, endpoint: EndpointSnapshot) -> Result<(), WsError> {
-        self.store_endpoint(endpoint).await;
+    async fn update_endpoint_locked(&self, endpoint: EndpointSnapshot) -> Result<(), RuntimeError> {
+        self.store_endpoint(endpoint).await?;
         // Endpoint changes deliberately rotate a healthy socket too.
         self.shutdown_current_connection().await;
         self.connect_current().await
@@ -284,7 +310,7 @@ impl RuntimeSupervisor {
         &self,
         endpoint: EndpointSnapshot,
         emit_fn: EmitFn,
-    ) -> Result<(), WsError> {
+    ) -> Result<(), RuntimeError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
         *self.emit_fn.lock().await = emit_fn.clone();
         let same_endpoint = self
@@ -296,11 +322,10 @@ impl RuntimeSupervisor {
         match self.state() {
             RuntimeState::Ready | RuntimeState::Degraded { .. } if same_endpoint => Ok(()),
             RuntimeState::Ready | RuntimeState::Degraded { .. } => {
-                self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
                 self.update_endpoint_locked(endpoint).await
             }
             _ => {
-                self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+                self.supervisor_epoch.fetch_add(1, Ordering::AcqRel);
                 self.start_locked(endpoint, emit_fn).await
             }
         }
@@ -323,7 +348,7 @@ impl RuntimeSupervisor {
             self.mark_disconnected().await;
             self.transition(RuntimeState::Failed { error });
         } else {
-            let connection_state = self.client.runtime.lock().await.state.clone();
+            let connection_state = self.client().runtime.lock().await.state.clone();
             if connection_state == ConnectionState::Disconnected
                 && matches!(
                     self.current_state.borrow().clone(),
@@ -364,7 +389,9 @@ impl RuntimeSupervisor {
             return Err(WsError::Protocol("runtime supervisor is stopped".into()));
         }
         let _lifecycle = self.lifecycle_lock.lock().await;
-        self.connect_current().await
+        self.connect_current()
+            .await
+            .map_err(|error| WsError::Protocol(error.to_string()))
     }
 
     /// Tear down even a healthy connection and reconnect immediately.
@@ -377,7 +404,9 @@ impl RuntimeSupervisor {
             reason: "reconnect requested".to_string(),
         });
         self.shutdown_current_connection().await;
-        self.connect_current().await
+        self.connect_current()
+            .await
+            .map_err(|error| WsError::Protocol(error.to_string()))
     }
 
     /// Stop the reader and the supervisor loop, then leave the instance ready
@@ -385,7 +414,7 @@ impl RuntimeSupervisor {
     pub async fn stop(&self) {
         let (epoch, task) = {
             let _lifecycle = self.lifecycle_lock.lock().await;
-            let epoch = self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            let epoch = self.supervisor_epoch.fetch_add(1, Ordering::AcqRel) + 1;
             self.transition(RuntimeState::Stopping);
             self.shutdown.store(true, Ordering::Release);
             self.shutdown_notify.notify_waiters();
@@ -401,18 +430,17 @@ impl RuntimeSupervisor {
 
         if let Some(task) = task {
             if let Err(error) = task.await {
-                tracing::warn!(runtime = ?self.runtime_key, %error, "runtime reconnect task failed");
+                tracing::warn!(runtime = ?self.runtime_key(), %error, "runtime reconnect task failed");
             }
         }
 
         let _lifecycle = self.lifecycle_lock.lock().await;
-        if self.lifecycle_epoch.load(Ordering::Acquire) == epoch {
+        if self.supervisor_epoch.load(Ordering::Acquire) == epoch {
             *self.reconnect_delay.lock().await = INITIAL_RECONNECT_DELAY;
             self.reconnect_attempt.store(0, Ordering::Release);
             *self.last_connected.lock().await = None;
             self.shutdown.store(false, Ordering::Release);
-            self.resource_recovery_failed
-                .store(false, Ordering::Release);
+            self.resource_recovery_delay.store(1, Ordering::Release);
             self.transition(RuntimeState::Stopped);
         }
     }
@@ -428,7 +456,7 @@ impl RuntimeSupervisor {
         }
 
         let supervisor = self.clone();
-        let epoch = self.lifecycle_epoch.load(Ordering::Acquire);
+        let epoch = self.supervisor_epoch.load(Ordering::Acquire);
         *task = Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -436,11 +464,15 @@ impl RuntimeSupervisor {
                     _ = supervisor.shutdown_notify.notified() => break,
                 }
                 if supervisor.shutdown.load(Ordering::Acquire)
-                    || supervisor.lifecycle_epoch.load(Ordering::Acquire) != epoch
+                    || supervisor.supervisor_epoch.load(Ordering::Acquire) != epoch
                 {
                     break;
                 }
                 if !supervisor.process_health().await {
+                    let delay = supervisor.resource_recovery_delay.load(Ordering::Acquire);
+                    if delay > 1 {
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                    }
                     supervisor.recover_resource(epoch).await;
                     continue;
                 }
@@ -451,11 +483,11 @@ impl RuntimeSupervisor {
                         ..
                     }
                 ) {
-                    tracing::info!(runtime = ?supervisor.runtime_key, "attempting runtime reconnect");
+                    tracing::info!(runtime = ?supervisor.runtime_key(), "attempting runtime reconnect");
                     let emit_fn = supervisor.emit_fn.lock().await.clone();
                     if let Err(error) = supervisor.reconnect(emit_fn).await {
                         if !supervisor.shutdown.load(Ordering::Acquire) {
-                            tracing::warn!(runtime = ?supervisor.runtime_key, %error, "runtime reconnect failed");
+                            tracing::warn!(runtime = ?supervisor.runtime_key(), %error, "runtime reconnect failed");
                         }
                     }
                 }
@@ -469,11 +501,61 @@ impl RuntimeSupervisor {
         self.shutdown_notify.notify_waiters();
     }
 
-    pub fn client(&self) -> &Arc<GatewayClient> {
-        &self.client
+    /// Replace a runtime whose identity or owned resource configuration has
+    /// changed. This is intentionally a full lifecycle transition: sessions
+    /// and the WebSocket client must never retain the previous runtime key.
+    pub async fn replace_instance(
+        &self,
+        new_key: RuntimeKey,
+        endpoint: EndpointSnapshot,
+        factory: Option<ResourceFactory>,
+    ) -> Result<(), RuntimeError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let epoch = self.supervisor_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.transition(RuntimeState::Stopping);
+        self.shutdown.store(true, Ordering::Release);
+        self.shutdown_notify.notify_waiters();
+        if let Some(task) = self
+            .background_task
+            .lock()
+            .expect("background task mutex poisoned")
+            .take()
+        {
+            task.abort();
+        }
+        self.stop_owned_resources().await;
+        self.shutdown_current_connection().await;
+
+        *self.runtime_key.lock().expect("runtime key mutex poisoned") = new_key.clone();
+        *self.client.lock().expect("gateway client mutex poisoned") =
+            Arc::new(GatewayClient::new(new_key, "", None));
+        *self
+            .resource_factory
+            .lock()
+            .expect("resource factory mutex poisoned") = factory;
+        self.resource_recovery_delay.store(1, Ordering::Release);
+        *self.endpoint.lock().await = None;
+        self.endpoint_revision.fetch_add(1, Ordering::AcqRel);
+        self.shutdown.store(false, Ordering::Release);
+        self.transition(RuntimeState::Starting);
+        self.store_endpoint(endpoint).await?;
+        self.spawn_background_reconnect();
+        debug_assert_eq!(self.supervisor_epoch.load(Ordering::Acquire), epoch);
+        self.transition(RuntimeState::AwaitingGateway);
+        self.connect_current().await
+    }
+
+    pub fn client(&self) -> Arc<GatewayClient> {
+        self.client
+            .lock()
+            .expect("gateway client mutex poisoned")
+            .clone()
     }
     pub fn runtime_key(&self) -> RuntimeKey {
-        self.runtime_key.clone()
+        self.runtime_key
+            .lock()
+            .expect("runtime key mutex poisoned")
+            .clone()
     }
 
     /// Subscribe before an operation to receive every lifecycle transition.
@@ -491,8 +573,7 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(ChildGuard::new(child)) {
             previous.kill().await;
         }
-        self.resource_recovery_failed
-            .store(false, Ordering::Release);
+        self.resource_recovery_delay.store(1, Ordering::Release);
     }
 
     /// Adopt a ready Hermes process that was spawned by the compatibility
@@ -502,8 +583,7 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(ChildGuard::from_gateway(process)) {
             previous.kill().await;
         }
-        self.resource_recovery_failed
-            .store(false, Ordering::Release);
+        self.resource_recovery_delay.store(1, Ordering::Release);
     }
 
     pub async fn local_gateway_endpoint(&self) -> Option<(u16, String)> {
@@ -513,6 +593,19 @@ impl RuntimeSupervisor {
             .as_ref()
             .and_then(|guard| guard.local_endpoint.as_ref())
             .map(|endpoint| (endpoint.port, endpoint.session_token.clone()))
+    }
+
+    pub async fn local_gateway_port(&self) -> Option<u16> {
+        let endpoint = self.endpoint.lock().await.clone()?;
+        url::Url::parse(&endpoint.ws_url).ok()?.port()
+    }
+
+    pub async fn set_local_runtime_spec(&self, spec: LocalRuntimeSpec) {
+        *self.local_spec.lock().await = Some(spec);
+    }
+
+    pub async fn local_runtime_spec(&self) -> Option<LocalRuntimeSpec> {
+        self.local_spec.lock().await.clone()
     }
 
     pub async fn has_ssh_tunnel(&self) -> bool {
@@ -533,8 +626,7 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(SshTunnelGuard::new(port, monitor)) {
             previous.close();
         }
-        self.resource_recovery_failed
-            .store(false, Ordering::Release);
+        self.resource_recovery_delay.store(1, Ordering::Release);
     }
 
     /// Like `set_ssh_tunnel`, with the SSH-layer close operation invoked when
@@ -554,8 +646,7 @@ impl RuntimeSupervisor {
         if let Some(mut previous) = handle.replace(guard) {
             previous.close();
         }
-        self.resource_recovery_failed
-            .store(false, Ordering::Release);
+        self.resource_recovery_delay.store(1, Ordering::Release);
     }
 
     /// Whether every resource owned by this supervisor is still alive.
@@ -583,9 +674,6 @@ impl RuntimeSupervisor {
     }
 
     async fn recover_resource(&self, expected_epoch: u64) {
-        if self.resource_recovery_failed.load(Ordering::Acquire) {
-            return;
-        }
         let Some(factory) = self
             .resource_factory
             .lock()
@@ -598,33 +686,45 @@ impl RuntimeSupervisor {
         let result = factory().await;
         let _lifecycle = self.lifecycle_lock.lock().await;
         if self.shutdown.load(Ordering::Acquire)
-            || self.lifecycle_epoch.load(Ordering::Acquire) != expected_epoch
+            || self.supervisor_epoch.load(Ordering::Acquire) != expected_epoch
         {
             return;
         }
         match result {
             Ok(endpoint) => {
-                self.resource_recovery_failed
-                    .store(false, Ordering::Release);
+                self.resource_recovery_delay.store(1, Ordering::Release);
                 if let Err(error) = self.update_endpoint_locked(endpoint).await {
-                    tracing::warn!(runtime = ?self.runtime_key, %error, "resource recovered but WebSocket reconnect failed");
+                    tracing::warn!(runtime = ?self.runtime_key(), %error, "resource recovered but WebSocket reconnect failed");
                 }
             }
             Err(error) => {
-                self.resource_recovery_failed.store(true, Ordering::Release);
+                if matches!(
+                    error,
+                    RuntimeError::CompatibilityRejected(_) | RuntimeError::Shutdown
+                ) {
+                    self.shutdown.store(true, Ordering::Release);
+                    self.shutdown_notify.notify_waiters();
+                } else {
+                    self.resource_recovery_delay
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |delay| {
+                            Some((delay.saturating_mul(2)).min(30))
+                        })
+                        .ok();
+                }
                 self.transition(RuntimeState::Failed { error });
             }
         }
     }
 
     async fn mark_disconnected(&self) {
-        let mut runtime = self.client.runtime.lock().await;
+        let client = self.client();
+        let mut runtime = client.runtime.lock().await;
         runtime.state = ConnectionState::Disconnected;
     }
 
     fn transition(&self, new_state: RuntimeState) {
         let previous = self.current_state.borrow().clone();
-        tracing::info!(runtime = ?self.runtime_key, from = ?previous, to = ?new_state, "runtime state transition");
+        tracing::info!(runtime = ?self.runtime_key(), from = ?previous, to = ?new_state, "runtime state transition");
         self.state_tx.send_replace(new_state);
     }
 
@@ -657,24 +757,35 @@ impl RuntimeSupervisor {
         }
     }
 
-    async fn store_endpoint(&self, endpoint: EndpointSnapshot) {
-        assert_eq!(
-            endpoint.runtime_key, self.runtime_key,
-            "endpoint belongs to another runtime"
-        );
+    async fn store_endpoint(&self, endpoint: EndpointSnapshot) -> Result<(), RuntimeError> {
+        let expected = self.runtime_key();
+        if endpoint.runtime_key != expected {
+            return Err(RuntimeError::InstanceMismatch {
+                expected: format!("{expected:?}"),
+                actual: format!("{:?}", endpoint.runtime_key),
+            });
+        }
         *self.endpoint.lock().await = Some(endpoint);
         self.endpoint_revision.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     /// Connect the current endpoint.  If an endpoint update wins the race with
     /// preparation, discard the old snapshot and restart from the new one.
-    async fn connect_current(&self) -> Result<(), WsError> {
+    async fn connect_current(&self) -> Result<(), RuntimeError> {
         loop {
             let revision = self.endpoint_revision.load(Ordering::Acquire);
-            let endpoint = self.endpoint.lock().await.clone().ok_or_else(|| {
-                WsError::Protocol("cannot reconnect before an endpoint is configured".into())
-            })?;
-            self.client.configure_snapshot(endpoint).await;
+            let endpoint = self
+                .endpoint
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| {
+                    WsError::Protocol("cannot reconnect before an endpoint is configured".into())
+                })
+                .map_err(|error| RuntimeError::WebSocket(error.to_string()))?;
+            let client = self.client();
+            client.configure_snapshot(endpoint).await;
             if self.endpoint_revision.load(Ordering::Acquire) != revision {
                 continue;
             }
@@ -683,14 +794,17 @@ impl RuntimeSupervisor {
             self.transition(RuntimeState::CheckingCompatibility);
             self.transition(RuntimeState::Reconciling);
             let result = self
-                .client
+                .client()
                 .ensure_connected(emit_fn, self.sessions.clone())
                 .await;
             if self.endpoint_revision.load(Ordering::Acquire) != revision {
                 self.shutdown_current_connection().await;
                 continue;
             }
-            return self.record_connect_result(result).await;
+            return self
+                .record_connect_result(result)
+                .await
+                .map_err(|error| RuntimeError::WebSocket(error.to_string()));
         }
     }
 
@@ -700,7 +814,7 @@ impl RuntimeSupervisor {
                 *self.reconnect_delay.lock().await = INITIAL_RECONNECT_DELAY;
                 self.reconnect_attempt.store(0, Ordering::Release);
                 *self.last_connected.lock().await = Some(Instant::now());
-                let connection_state = self.client.runtime.lock().await.state.clone();
+                let connection_state = self.client().runtime.lock().await.state.clone();
                 match connection_state {
                     ConnectionState::Degraded => self.transition(RuntimeState::Degraded {
                         reason: "connection reconciliation is degraded".to_string(),
@@ -734,9 +848,10 @@ impl RuntimeSupervisor {
 
     async fn shutdown_current_connection(&self) {
         let shutdown_tx = {
-            let mut runtime = self.client.runtime.lock().await;
+            let client = self.client();
+            let mut runtime = client.runtime.lock().await;
             runtime.state = ConnectionState::Disconnected;
-            runtime.generation = self.client.generation.fetch_add(1, Ordering::Release) + 1;
+            runtime.generation = client.generation.fetch_add(1, Ordering::Release) + 1;
             runtime.cmd_tx.take()
         };
         if let Some(tx) = shutdown_tx {
@@ -889,7 +1004,8 @@ mod tests {
         let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
         let updated = endpoint("ws://127.0.0.1:1/updated");
         assert!(supervisor.update_endpoint(updated.clone()).await.is_err());
-        let configured = supervisor.client.endpoint.read().await;
+        let client = supervisor.client();
+        let configured = client.endpoint.read().await;
         assert_eq!(configured.identity(), updated.identity);
         assert_eq!(configured.ws_url(), updated.ws_url);
     }
@@ -912,6 +1028,156 @@ mod tests {
         wait_for_connected(&supervisor).await;
         retry.await.unwrap().unwrap();
         supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_rotation_keeps_background_loop_alive_for_a_later_disconnect() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        let (first_url, _) = start_mock_backend().await;
+        let (second_url, _) = start_mock_backend().await;
+        supervisor
+            .start(endpoint(&first_url), noop_emitter())
+            .await
+            .unwrap();
+        supervisor
+            .update_endpoint(endpoint(&second_url))
+            .await
+            .unwrap();
+        let before = supervisor.client().runtime.lock().await.generation;
+        supervisor.shutdown_current_connection().await;
+
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let client = supervisor.client();
+                if matches!(supervisor.state(), RuntimeState::Ready)
+                    && client.runtime.lock().await.generation > before
+                    && client.endpoint.read().await.identity() == endpoint(&second_url).identity
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("background loop did not reconnect after endpoint rotation");
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn replace_instance_installs_new_runtime_key_and_client() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("old".into()), None);
+        let (url, _) = start_mock_backend().await;
+        supervisor
+            .start(
+                endpoint_for(&url, RuntimeKey::Remote("old".into())),
+                noop_emitter(),
+            )
+            .await
+            .unwrap();
+        supervisor
+            .replace_instance(
+                RuntimeKey::Remote("new".into()),
+                endpoint_for(&url, RuntimeKey::Remote("new".into())),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(supervisor.runtime_key(), RuntimeKey::Remote("new".into()));
+        assert_eq!(
+            supervisor.client().runtime_key,
+            RuntimeKey::Remote("new".into())
+        );
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn ensure_started_returns_typed_instance_mismatch() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("expected".into()), None);
+        let error = supervisor
+            .ensure_started(
+                endpoint_for(
+                    "ws://127.0.0.1:1/api/ws",
+                    RuntimeKey::Remote("actual".into()),
+                ),
+                noop_emitter(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::InstanceMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn resource_recovery_failure_uses_backoff_instead_of_disabling_recovery() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Local, None);
+        supervisor.set_resource_factory(Arc::new(|| {
+            Box::pin(async { Err(RuntimeError::GatewayStartFailed("temporary".into())) })
+        }));
+        supervisor
+            .recover_resource(supervisor.supervisor_epoch.load(Ordering::Acquire))
+            .await;
+        assert_eq!(
+            supervisor.resource_recovery_delay.load(Ordering::Acquire),
+            2
+        );
+        assert!(!supervisor.shutdown.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn local_profile_is_preserved_for_resource_recovery() {
+        let supervisor = Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None));
+        supervisor
+            .set_local_runtime_spec(LocalRuntimeSpec {
+                hermes_home: PathBuf::from("C:/hermes"),
+                profile: Some("non-default".into()),
+            })
+            .await;
+        let (url, _) = start_mock_backend().await;
+        let factory_url = url.clone();
+        let seen_profile = Arc::new(StdMutex::new(None));
+        let factory_supervisor = Arc::downgrade(&supervisor);
+        let profile_sink = Arc::clone(&seen_profile);
+        supervisor.set_resource_factory(Arc::new(move || {
+            let supervisor = factory_supervisor.clone();
+            let url = factory_url.clone();
+            let profile_sink = Arc::clone(&profile_sink);
+            Box::pin(async move {
+                let supervisor = supervisor
+                    .upgrade()
+                    .ok_or_else(|| RuntimeError::GatewayStartFailed("supervisor dropped".into()))?;
+                *profile_sink.lock().unwrap() = supervisor
+                    .local_runtime_spec()
+                    .await
+                    .and_then(|spec| spec.profile);
+                supervisor.set_local_gateway(long_lived_child()).await;
+                Ok(endpoint_for(&url, RuntimeKey::Local))
+            })
+        }));
+        supervisor.set_local_gateway(short_lived_child()).await;
+        supervisor
+            .start(endpoint_for(&url, RuntimeKey::Local), noop_emitter())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while seen_profile.lock().unwrap().as_deref() != Some("non-default") {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("local factory did not retain profile");
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn local_gateway_port_comes_from_endpoint_snapshot() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Local, None);
+        supervisor
+            .store_endpoint(endpoint_for(
+                "ws://127.0.0.1:9421/api/ws?token=x",
+                RuntimeKey::Local,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(supervisor.local_gateway_port().await, Some(9421));
     }
 
     #[tokio::test]
@@ -952,7 +1218,7 @@ mod tests {
             .await
             .unwrap();
         let revision = supervisor.endpoint_revision.load(Ordering::Acquire);
-        let generation = supervisor.client.runtime.lock().await.generation;
+        let generation = supervisor.client().runtime.lock().await.generation;
 
         supervisor
             .ensure_started(endpoint, noop_emitter())
@@ -964,7 +1230,7 @@ mod tests {
             revision
         );
         assert_eq!(
-            supervisor.client.runtime.lock().await.generation,
+            supervisor.client().runtime.lock().await.generation,
             generation
         );
         supervisor.stop().await;
@@ -987,7 +1253,7 @@ mod tests {
 
         assert_eq!(supervisor.endpoint_revision.load(Ordering::Acquire), 2);
         assert_eq!(
-            supervisor.client.endpoint.read().await.identity(),
+            supervisor.client().endpoint.read().await.identity(),
             endpoint(&second_url).identity
         );
         supervisor.stop().await;
