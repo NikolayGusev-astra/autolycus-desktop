@@ -30,6 +30,31 @@ pub struct ProductConversation {
     pub runtime_key: RuntimeKey,
 }
 
+/// Conversation representation safe to expose through the product API.
+#[derive(serde::Serialize)]
+pub struct ProductConversationDto {
+    pub id: String,
+    pub title: Option<String>,
+    pub status: ConversationStatus,
+    pub connection_mode: String,
+}
+
+impl From<&ProductConversation> for ProductConversationDto {
+    fn from(conversation: &ProductConversation) -> Self {
+        Self {
+            id: conversation.id.0.clone(),
+            title: conversation.title.clone(),
+            status: conversation.status.clone(),
+            connection_mode: match &conversation.runtime_key {
+                RuntimeKey::Local => "local",
+                RuntimeKey::Remote(_) => "remote",
+                RuntimeKey::Ssh(_) => "ssh",
+            }
+            .to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductError {
     ConversationNotFound,
@@ -37,6 +62,28 @@ pub enum ProductError {
     SendFailed(String),
     Timeout,
     Internal(String),
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "code", content = "details")]
+pub enum ProductCommandError {
+    ConversationNotFound,
+    RuntimeUnavailable { message: String },
+    SendFailed { message: String },
+    Timeout,
+    Internal { message: String },
+}
+
+impl From<ProductError> for ProductCommandError {
+    fn from(error: ProductError) -> Self {
+        match error {
+            ProductError::ConversationNotFound => Self::ConversationNotFound,
+            ProductError::RuntimeUnavailable(message) => Self::RuntimeUnavailable { message },
+            ProductError::SendFailed(message) => Self::SendFailed { message },
+            ProductError::Timeout => Self::Timeout,
+            ProductError::Internal(message) => Self::Internal { message },
+        }
+    }
 }
 
 impl fmt::Display for ProductError {
@@ -205,6 +252,23 @@ mod tests {
         assert_eq!(
             repository.get(&id).await.unwrap().status,
             ConversationStatus::Suspended
+        );
+    }
+
+    #[test]
+    fn conversation_dto_hides_runtime_key_details() {
+        let dto = ProductConversationDto::from(&ProductConversation {
+            id: ConversationId("conversation-1".into()),
+            status: ConversationStatus::Active,
+            title: Some("Test".into()),
+            runtime_key: RuntimeKey::Remote("private-instance-id".into()),
+        });
+
+        assert_eq!(dto.id, "conversation-1");
+        assert_eq!(dto.connection_mode, "remote");
+        assert_eq!(
+            serde_json::to_value(dto).unwrap()["connection_mode"],
+            "remote"
         );
     }
 }

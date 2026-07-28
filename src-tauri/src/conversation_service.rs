@@ -1,12 +1,18 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::chat::ConnectionMode;
 use crate::product_domain::{
-    ConversationId, ConversationRepository, ConversationStatus, ProductConversation, ProductError,
+    ConversationId, ConversationRepository, ConversationStatus, ProductCommandError,
+    ProductConversation, ProductError,
 };
-use crate::session_registry::{ConversationId as RegistryConversationId, ProfileId, RuntimeKey};
-use crate::ws_transport::{create_session_on_connection, submit_prompt_on_connection, WsError};
-use crate::{RuntimeError, RuntimeSupervisor, SessionRegistry};
+use crate::session_registry::{
+    ConversationId as RegistryConversationId, ProfileId, RuntimeKey, SessionState,
+};
+use crate::ws_transport::{
+    call_rpc, create_session_on_connection, submit_prompt_on_connection, WsError,
+};
+use crate::{RuntimeError, RuntimeState, RuntimeSupervisor, SessionRegistry};
 
 /// Product API for creating and using conversations. Session IDs remain an
 /// infrastructure concern and are resolved through `SessionRegistry`.
@@ -136,15 +142,130 @@ impl ConversationService {
         Ok(())
     }
 
-    pub async fn get_status(&self, conv_id: &ConversationId) -> Option<ConversationStatus> {
-        self.conversations
+    pub async fn refresh_status(
+        &self,
+        conv_id: &ConversationId,
+    ) -> Result<ConversationStatus, ProductError> {
+        let conversation = self
+            .conversations
             .get(conv_id)
             .await
-            .map(|conversation| conversation.status)
+            .ok_or(ProductError::ConversationNotFound)?;
+        let runtime_state = self
+            .supervisor_for_runtime_key(&conversation.runtime_key)?
+            .state();
+        let binding = self
+            .sessions
+            .get(&registry_id(conv_id), conversation.runtime_key)
+            .await;
+        let status = project_status(
+            binding.as_ref().map(|binding| &binding.state),
+            runtime_state,
+        );
+        if conversation.status != status {
+            self.conversations
+                .update_status(conv_id, status.clone())
+                .await?;
+        }
+        Ok(status)
     }
 
     pub async fn list_conversations(&self) -> Vec<ProductConversation> {
         self.conversations.list().await
+    }
+
+    pub async fn abort_conversation(
+        &self,
+        conv_id: &ConversationId,
+    ) -> Result<(), ProductCommandError> {
+        self.call_action(conv_id, "prompt.abort", serde_json::json!({}))
+            .await
+    }
+
+    pub async fn respond_approval(
+        &self,
+        conv_id: &ConversationId,
+        request_id: &str,
+        approved: bool,
+        permanent: bool,
+    ) -> Result<(), ProductCommandError> {
+        self.call_action(conv_id, "approval.respond", serde_json::json!({"request_id": request_id, "approved": approved, "permanent": permanent})).await
+    }
+
+    pub async fn respond_clarification(
+        &self,
+        conv_id: &ConversationId,
+        request_id: &str,
+        answer: &str,
+    ) -> Result<(), ProductCommandError> {
+        self.call_action(
+            conv_id,
+            "clarify.respond",
+            serde_json::json!({"request_id": request_id, "answer": answer}),
+        )
+        .await
+    }
+
+    pub async fn respond_secret(
+        &self,
+        conv_id: &ConversationId,
+        request_id: &str,
+        secret: &str,
+    ) -> Result<(), ProductCommandError> {
+        self.call_action(
+            conv_id,
+            "secret.respond",
+            serde_json::json!({"request_id": request_id, "secret": secret}),
+        )
+        .await
+    }
+
+    pub async fn respond_sudo(
+        &self,
+        conv_id: &ConversationId,
+        request_id: &str,
+        password: &str,
+    ) -> Result<(), ProductCommandError> {
+        self.call_action(
+            conv_id,
+            "sudo.respond",
+            serde_json::json!({"request_id": request_id, "password": password}),
+        )
+        .await
+    }
+
+    async fn call_action(
+        &self,
+        conv_id: &ConversationId,
+        method: &'static str,
+        mut params: serde_json::Value,
+    ) -> Result<(), ProductCommandError> {
+        let conversation = self
+            .conversations
+            .get(conv_id)
+            .await
+            .ok_or(ProductCommandError::ConversationNotFound)?;
+        let supervisor = self
+            .supervisor_for_runtime_key(&conversation.runtime_key)
+            .map_err(ProductCommandError::from)?;
+        let live_session_id = self
+            .sessions
+            .get_live(&registry_id(conv_id), conversation.runtime_key)
+            .await
+            .ok_or_else(|| ProductCommandError::RuntimeUnavailable {
+                message: "conversation has no live session".into(),
+            })?;
+        params["session_id"] = serde_json::Value::String(live_session_id);
+        call_rpc::<serde_json::Value, serde_json::Value, _>(
+            &*supervisor.client(),
+            method,
+            params,
+            Duration::from_secs(30),
+        )
+        .await
+        .map(|_| ())
+        .map_err(send_error)
+        .map_err(ProductCommandError::from)
     }
 
     pub async fn migrate_conversations(
@@ -197,6 +318,25 @@ impl ConversationService {
             .ok_or_else(|| {
                 ProductError::RuntimeUnavailable("conversation runtime is unavailable".into())
             })
+    }
+}
+
+fn project_status(
+    session_state: Option<&SessionState>,
+    runtime_state: RuntimeState,
+) -> ConversationStatus {
+    match runtime_state {
+        RuntimeState::Failed { error } => ConversationStatus::Failed(error.to_string()),
+        RuntimeState::Incompatible { reason } => ConversationStatus::Failed(reason),
+        RuntimeState::Stopped | RuntimeState::Stopping => ConversationStatus::Suspended,
+        _ => match session_state {
+            Some(SessionState::Active) => ConversationStatus::Active,
+            Some(SessionState::Resuming { .. }) => ConversationStatus::Resuming,
+            Some(SessionState::ResumeFailed) => {
+                ConversationStatus::Failed("session resume failed".into())
+            }
+            Some(SessionState::Suspended) | None => ConversationStatus::Suspended,
+        },
     }
 }
 
@@ -314,8 +454,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            service.get_status(&conversation_id).await,
-            Some(ConversationStatus::Active)
+            service.refresh_status(&conversation_id).await.unwrap(),
+            ConversationStatus::Active
         );
         service
             .send_message(&conversation_id, "hello")
@@ -328,6 +468,121 @@ mod tests {
                 && request["params"]["text"] == "hello"
         }));
         local.stop().await;
+    }
+
+    #[tokio::test]
+    async fn action_commands_send_their_rpc_with_the_live_session() {
+        let (url, received) = start_mock_backend().await;
+        let sessions = SessionRegistry::new();
+        let local = Arc::new(RuntimeSupervisor::new(
+            RuntimeKey::Local,
+            Some(Arc::clone(&sessions)),
+        ));
+        local
+            .start(
+                EndpointSnapshot {
+                    identity: EndpointIdentity::from_ws_url(&url, None, None),
+                    ws_url: url,
+                    runtime_key: RuntimeKey::Local,
+                },
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        let service = ConversationService::new(
+            sessions,
+            Arc::clone(&local),
+            Arc::new(RuntimeSupervisor::new(
+                RuntimeKey::Remote("test".into()),
+                None,
+            )),
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("test".into()), None)),
+            crate::InMemoryConversationRepository::new(),
+        );
+        let id = service
+            .create_conversation(ConnectionMode::Local)
+            .await
+            .unwrap();
+
+        service.abort_conversation(&id).await.unwrap();
+        service
+            .respond_approval(&id, "approval-1", true, false)
+            .await
+            .unwrap();
+        service
+            .respond_clarification(&id, "clarify-1", "yes")
+            .await
+            .unwrap();
+        service
+            .respond_secret(&id, "secret-1", "token")
+            .await
+            .unwrap();
+        service
+            .respond_sudo(&id, "sudo-1", "password")
+            .await
+            .unwrap();
+
+        let requests = received.lock().await;
+        for method in [
+            "prompt.abort",
+            "approval.respond",
+            "clarify.respond",
+            "secret.respond",
+            "sudo.respond",
+        ] {
+            let request = requests
+                .iter()
+                .find(|request| request["method"] == method)
+                .unwrap();
+            assert_eq!(request["params"]["session_id"], "mock-session");
+        }
+        local.stop().await;
+    }
+
+    #[tokio::test]
+    async fn refresh_status_projects_a_suspended_binding() {
+        let sessions = SessionRegistry::new();
+        let repository = crate::InMemoryConversationRepository::new();
+        let id = ConversationId("suspended-conversation".into());
+        repository
+            .create(ProductConversation {
+                id: id.clone(),
+                status: ConversationStatus::Active,
+                title: None,
+                runtime_key: RuntimeKey::Local,
+            })
+            .await
+            .unwrap();
+        sessions
+            .set_live(
+                registry_id(&id),
+                "live-session".into(),
+                Some("stored-session".into()),
+                ProfileId::empty(),
+                1,
+                RuntimeKey::Local,
+            )
+            .await;
+        sessions.suspend_all(RuntimeKey::Local).await;
+        let service = ConversationService::new(
+            sessions,
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Local, None)),
+            Arc::new(RuntimeSupervisor::new(
+                RuntimeKey::Remote("test".into()),
+                None,
+            )),
+            Arc::new(RuntimeSupervisor::new(RuntimeKey::Ssh("test".into()), None)),
+            Arc::clone(&repository) as Arc<dyn ConversationRepository>,
+        );
+
+        assert_eq!(
+            service.refresh_status(&id).await.unwrap(),
+            ConversationStatus::Suspended
+        );
+        assert_eq!(
+            repository.get(&id).await.unwrap().status,
+            ConversationStatus::Suspended
+        );
     }
 
     #[tokio::test]

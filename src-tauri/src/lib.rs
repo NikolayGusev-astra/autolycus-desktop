@@ -1269,25 +1269,29 @@ async fn send_message_cmd(
 async fn create_conversation_cmd(
     state: State<'_, AppState>,
     mode: String,
-) -> Result<String, String> {
+) -> Result<String, ProductCommandError> {
     create_conversation_for_context(&state.product_ctx, &mode).await
 }
 
 async fn create_conversation_for_context(
     ctx: &ProductContext,
     mode: &str,
-) -> Result<String, String> {
+) -> Result<String, ProductCommandError> {
     let mode = match mode {
         "local" => ConnectionMode::Local,
         "remote" => ConnectionMode::Remote,
         "ssh" => ConnectionMode::Ssh,
-        _ => return Err(format!("unsupported connection mode: {mode}")),
+        _ => {
+            return Err(ProductCommandError::Internal {
+                message: format!("unsupported connection mode: {mode}"),
+            })
+        }
     };
     ctx.conversation_service()
         .create_conversation(mode)
         .await
         .map(|id| id.0)
-        .map_err(|error| error.to_string())
+        .map_err(ProductCommandError::from)
 }
 
 /// Product API v2 message command. The legacy `send_message_cmd` remains for
@@ -1297,7 +1301,7 @@ async fn send_message_cmd_v2(
     state: State<'_, AppState>,
     conversation_id: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<(), ProductCommandError> {
     send_message_for_context(&state.product_ctx, conversation_id, text).await
 }
 
@@ -1305,42 +1309,122 @@ async fn send_message_for_context(
     ctx: &ProductContext,
     conversation_id: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<(), ProductCommandError> {
     ctx.conversation_service()
         .send_message(&ConversationId(conversation_id), &text)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(ProductCommandError::from)
 }
 
 #[tauri::command]
 async fn get_conversations_cmd(
     state: State<'_, AppState>,
-) -> Result<Vec<ProductConversation>, String> {
+) -> Result<Vec<ProductConversationDto>, ProductCommandError> {
     get_conversations_for_context(&state.product_ctx).await
 }
 
 async fn get_conversations_for_context(
     ctx: &ProductContext,
-) -> Result<Vec<ProductConversation>, String> {
-    Ok(ctx.conversation_service().list_conversations().await)
+) -> Result<Vec<ProductConversationDto>, ProductCommandError> {
+    Ok(ctx
+        .conversation_service()
+        .list_conversations()
+        .await
+        .iter()
+        .map(ProductConversationDto::from)
+        .collect())
 }
 
 #[tauri::command]
 async fn get_conversation_status_cmd(
     state: State<'_, AppState>,
     conversation_id: String,
-) -> Result<ConversationStatus, String> {
+) -> Result<ConversationStatus, ProductCommandError> {
     get_conversation_status_for_context(&state.product_ctx, conversation_id).await
 }
 
 async fn get_conversation_status_for_context(
     ctx: &ProductContext,
     conversation_id: String,
-) -> Result<ConversationStatus, String> {
+) -> Result<ConversationStatus, ProductCommandError> {
     ctx.conversation_service()
-        .get_status(&ConversationId(conversation_id))
+        .refresh_status(&ConversationId(conversation_id))
         .await
-        .ok_or_else(|| "conversation not found".to_string())
+        .map_err(ProductCommandError::from)
+}
+
+#[tauri::command]
+async fn abort_conversation_cmd(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<(), ProductCommandError> {
+    state
+        .product_ctx
+        .conversation_service()
+        .abort_conversation(&ConversationId(conversation_id))
+        .await
+}
+
+#[tauri::command]
+async fn respond_approval_cmd(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    request_id: String,
+    approved: bool,
+    permanent: bool,
+) -> Result<(), ProductCommandError> {
+    state
+        .product_ctx
+        .conversation_service()
+        .respond_approval(
+            &ConversationId(conversation_id),
+            &request_id,
+            approved,
+            permanent,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn respond_clarification_cmd(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    request_id: String,
+    answer: String,
+) -> Result<(), ProductCommandError> {
+    state
+        .product_ctx
+        .conversation_service()
+        .respond_clarification(&ConversationId(conversation_id), &request_id, &answer)
+        .await
+}
+
+#[tauri::command]
+async fn respond_secret_cmd(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    request_id: String,
+    secret: String,
+) -> Result<(), ProductCommandError> {
+    state
+        .product_ctx
+        .conversation_service()
+        .respond_secret(&ConversationId(conversation_id), &request_id, &secret)
+        .await
+}
+
+#[tauri::command]
+async fn respond_sudo_cmd(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    request_id: String,
+    password: String,
+) -> Result<(), ProductCommandError> {
+    state
+        .product_ctx
+        .conversation_service()
+        .respond_sudo(&ConversationId(conversation_id), &request_id, &password)
+        .await
 }
 
 /// Abort the current chat generation. Emits a `chat-abort` event that the
@@ -3792,6 +3876,11 @@ pub fn run() {
             send_message_cmd_v2,
             get_conversations_cmd,
             get_conversation_status_cmd,
+            abort_conversation_cmd,
+            respond_approval_cmd,
+            respond_clarification_cmd,
+            respond_secret_cmd,
+            respond_sudo_cmd,
             abort_message_cmd,
             get_remote_health,
             get_ssh_health,
@@ -4103,7 +4192,7 @@ mod tests {
         let conversations = get_conversations_for_context(&ctx).await.unwrap();
         assert!(conversations
             .iter()
-            .any(|conversation| conversation.id.0 == conversation_id));
+            .any(|conversation| conversation.id == conversation_id));
     }
 
     #[tokio::test]
