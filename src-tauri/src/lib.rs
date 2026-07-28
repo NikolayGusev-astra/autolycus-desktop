@@ -53,7 +53,7 @@ pub use gateway::{GatewayStartResult, GatewayState};
 pub use mcp::{McpCatalogEntry, McpServer, McpServerInput};
 pub use models::SavedModel;
 pub use profiles::ProfileInfo;
-pub use runtime_supervisor::RuntimeSupervisor;
+pub use runtime_supervisor::{RuntimeError, RuntimeState, RuntimeSupervisor};
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
@@ -76,6 +76,9 @@ pub struct AppState {
     /// long-lived socket + reader task for the entire app lifetime, replacing
     /// connect-per-message. Remote/SSH modes use their own persistent states.
     pub ws: std::sync::Arc<ws_transport::WsState>,
+    /// Local runtime supervision. `ws` remains available for compatibility
+    /// while local callers migrate to this supervisor.
+    pub local_ws: std::sync::Arc<RuntimeSupervisor>,
     /// Persistent WS connection to a remote `hermes serve` backend.
     pub remote_ws: std::sync::Arc<RuntimeSupervisor>,
     /// Persistent WS connection to a remote backend via SSH tunnel.
@@ -99,6 +102,10 @@ impl AppState {
             hermes_home: arc_swap::ArcSwapOption::from(None),
             auth: auth::AuthState::new(),
             ws: std::sync::Arc::new(ws_transport::WsState::new()),
+            local_ws: std::sync::Arc::new(RuntimeSupervisor::new(
+                session_registry::RuntimeKey::Local,
+                Some(sessions.clone()),
+            )),
             remote_ws: std::sync::Arc::new(RuntimeSupervisor::new(
                 session_registry::RuntimeKey::Remote(remote_instance_id),
                 Some(sessions.clone()),
@@ -1026,6 +1033,7 @@ async fn send_message_cmd(
         request,
         &app_handle,
         &state.ws,
+        &state.local_ws,
         &state.remote_ws,
         &state.ssh_ws,
         &state.sessions,

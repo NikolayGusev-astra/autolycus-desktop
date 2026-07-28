@@ -99,7 +99,51 @@ pub fn get_tunnel_url(state: &SshState) -> Option<String> {
 }
 
 pub fn is_tunnel_active(state: &SshState) -> bool {
-    *state.tunnel_running.lock().unwrap()
+    let mut process = state.tunnel_process.lock().unwrap();
+    let alive = process
+        .as_mut()
+        .is_some_and(|child| child.try_wait().ok().flatten().is_none());
+    if !alive {
+        process.take();
+        *state.tunnel_running.lock().unwrap() = false;
+    }
+    alive
+}
+
+/// Monitor the tunnel process until it exits.  RuntimeSupervisor owns this
+/// task and uses its completion as the tunnel-health signal.
+pub fn monitor_tunnel(state: &SshState) -> tokio::task::JoinHandle<()> {
+    let process = Arc::clone(&state.tunnel_process);
+    let running = Arc::clone(&state.tunnel_running);
+    tokio::spawn(async move {
+        loop {
+            let alive = process
+                .lock()
+                .unwrap()
+                .as_mut()
+                .is_some_and(|child| child.try_wait().ok().flatten().is_none());
+            if !alive {
+                *running.lock().unwrap() = false;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+}
+
+/// A synchronous closer suitable for RuntimeSupervisor's drop-safe guard.
+pub fn tunnel_cleanup(state: &SshState) -> Arc<dyn Fn() + Send + Sync> {
+    let process = Arc::clone(&state.tunnel_process);
+    let running = Arc::clone(&state.tunnel_running);
+    let config = Arc::clone(&state.active_config);
+    Arc::new(move || {
+        if let Some(mut child) = process.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *running.lock().unwrap() = false;
+        *config.lock().unwrap() = None;
+    })
 }
 
 // ── SSH tunnel management (uses std::process) ──────────────────────────────
@@ -107,7 +151,7 @@ pub fn is_tunnel_active(state: &SshState) -> bool {
 /// Start SSH tunnel in background thread. Returns local port on success.
 pub fn start_ssh_tunnel(
     state: &SshState,
-    config: SshConfig,
+    mut config: SshConfig,
     _hermes_home: PathBuf,
 ) -> Result<u16, String> {
     // Stop existing tunnel if any
@@ -182,6 +226,9 @@ pub fn start_ssh_tunnel(
         }
     }
 
+    // The OS-selected local port, not the configured preference, is the
+    // endpoint the supervisor and WebSocket client must monitor.
+    config.local_port = local_port;
     *state.tunnel_running.lock().unwrap() = true;
     *state.active_config.lock().unwrap() = Some(config);
     *state.tunnel_process.lock().unwrap() = Some(child);

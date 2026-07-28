@@ -2,18 +2,20 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant},
 };
 
 use tokio::{
-    sync::{Mutex, Notify},
+    process::Child,
+    sync::{watch, Mutex, Notify},
     task::JoinHandle,
 };
 
 use crate::{
+    gateway::GatewayProcess,
     session_registry::{RuntimeKey, SessionRegistry},
     ws_transport::{
         ConnectionState, EmitFn, EndpointSnapshot, GatewayClient, HealthStatus, WsCommand, WsError,
@@ -22,6 +24,142 @@ use crate::{
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+
+/// Full lifecycle of a gateway runtime, including process ownership and the
+/// connection phases hidden beneath the WebSocket transport.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RuntimeState {
+    Stopped,
+    Starting,
+    AwaitingGateway,
+    CheckingCompatibility,
+    Reconciling,
+    Ready,
+    Degraded {
+        reason: String,
+    },
+    Reconnecting {
+        attempt: u32,
+        #[serde(skip_serializing)]
+        next_retry_at: Instant,
+        reason: String,
+    },
+    Stopping,
+    Failed {
+        error: RuntimeError,
+    },
+    Incompatible {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+pub enum RuntimeError {
+    GatewayStartFailed(String),
+    GatewayCrashed(String),
+    TunnelFailed(String),
+    TunnelCrashed(String),
+    CompatibilityRejected(String),
+    WebSocket(String),
+    ConnectionLost,
+    Shutdown,
+    Timeout,
+}
+
+/// A child process owned by a runtime.  Dropping the guard asks Tokio to kill
+/// the child; callers that need deterministic cleanup should use `kill`.
+pub struct ChildGuard {
+    child: Child,
+    local_endpoint: Option<LocalGatewayEndpoint>,
+}
+
+#[derive(Clone)]
+struct LocalGatewayEndpoint {
+    port: u16,
+    session_token: String,
+}
+
+impl ChildGuard {
+    pub fn new(child: Child) -> Self {
+        Self {
+            child,
+            local_endpoint: None,
+        }
+    }
+
+    fn from_gateway(process: GatewayProcess) -> Self {
+        Self {
+            child: process.child,
+            local_endpoint: Some(LocalGatewayEndpoint {
+                port: process.port,
+                session_token: process.session_token,
+            }),
+        }
+    }
+
+    async fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    async fn kill(&mut self) {
+        if self.is_alive().await {
+            let _ = self.child.start_kill();
+            let _ = self.child.wait().await;
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Ownership token for an SSH tunnel.  The actual SSH process remains owned
+/// by the SSH layer; its monitor completes when that tunnel is no longer
+/// usable.  Dropping the guard aborts the monitor.
+pub struct SshTunnelGuard {
+    port: u16,
+    monitor: Option<JoinHandle<()>>,
+    close: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl SshTunnelGuard {
+    pub fn new(port: u16, monitor: JoinHandle<()>) -> Self {
+        Self {
+            port,
+            monitor: Some(monitor),
+            close: None,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.monitor
+            .as_ref()
+            .is_some_and(|monitor| !monitor.is_finished())
+    }
+
+    fn close(&mut self) {
+        if let Some(monitor) = self.monitor.take() {
+            monitor.abort();
+        }
+        if let Some(close) = self.close.take() {
+            close();
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for SshTunnelGuard {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
 
 /// Owns one runtime connection and the task that keeps it alive.
 ///
@@ -36,18 +174,25 @@ pub struct RuntimeSupervisor {
     endpoint_revision: Arc<AtomicU64>,
     sessions: Option<Arc<SessionRegistry>>,
     reconnect_delay: Arc<Mutex<Duration>>,
+    reconnect_attempt: Arc<AtomicU32>,
     max_reconnect_delay: Duration,
     last_connected: Arc<Mutex<Option<Instant>>>,
-    degraded_count: Arc<Mutex<u64>>,
     emit_fn: Arc<Mutex<EmitFn>>,
+    current_state: watch::Receiver<RuntimeState>,
+    state_tx: watch::Sender<RuntimeState>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     lifecycle_lock: Arc<Mutex<()>>,
     background_task: Arc<StdMutex<Option<JoinHandle<()>>>>,
+    /// Optional local Hermes process owned by this runtime.
+    local_gateway_handle: Arc<Mutex<Option<ChildGuard>>>,
+    /// Optional SSH tunnel monitor owned by this runtime.
+    ssh_tunnel_handle: Arc<Mutex<Option<SshTunnelGuard>>>,
 }
 
 impl RuntimeSupervisor {
     pub fn new(runtime_key: RuntimeKey, sessions: Option<Arc<SessionRegistry>>) -> Self {
+        let (state_tx, current_state) = watch::channel(RuntimeState::Stopped);
         Self {
             client: Arc::new(GatewayClient::new(runtime_key.clone(), "", None)),
             runtime_key,
@@ -55,15 +200,19 @@ impl RuntimeSupervisor {
             endpoint_revision: Arc::new(AtomicU64::new(0)),
             sessions,
             reconnect_delay: Arc::new(Mutex::new(INITIAL_RECONNECT_DELAY)),
+            reconnect_attempt: Arc::new(AtomicU32::new(0)),
             max_reconnect_delay: MAX_RECONNECT_DELAY,
             last_connected: Arc::new(Mutex::new(None)),
-            degraded_count: Arc::new(Mutex::new(0)),
             // The loop is allowed to exist before the first UI emitter arrives.
             emit_fn: Arc::new(Mutex::new(noop_emitter())),
+            current_state,
+            state_tx,
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
             lifecycle_lock: Arc::new(Mutex::new(())),
             background_task: Arc::new(StdMutex::new(None)),
+            local_gateway_handle: Arc::new(Mutex::new(None)),
+            ssh_tunnel_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -72,10 +221,12 @@ impl RuntimeSupervisor {
     /// when the immediate attempt fails.
     pub async fn start(&self, endpoint: EndpointSnapshot, emit_fn: EmitFn) -> Result<(), WsError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
+        self.transition(RuntimeState::Starting);
         self.shutdown.store(false, Ordering::Release);
         *self.emit_fn.lock().await = emit_fn;
         self.store_endpoint(endpoint).await;
         self.spawn_background_reconnect();
+        self.transition(RuntimeState::AwaitingGateway);
         self.connect_current().await
     }
 
@@ -88,22 +239,28 @@ impl RuntimeSupervisor {
     }
 
     pub async fn health_check(&self) -> HealthStatus {
-        let runtime = self.client.runtime.lock().await;
-        match runtime.state {
-            ConnectionState::Connected => HealthStatus::Connected,
-            ConnectionState::Degraded => {
-                let reason = "connection reconciliation is degraded".to_string();
-                drop(runtime);
-                *self.degraded_count.lock().await += 1;
-                HealthStatus::Degraded { reason }
+        if !self.process_health().await {
+            let error = if self.local_gateway_handle.lock().await.is_some() {
+                RuntimeError::GatewayCrashed("owned gateway process stopped".to_string())
+            } else {
+                RuntimeError::TunnelCrashed("owned SSH tunnel stopped".to_string())
+            };
+            self.mark_disconnected().await;
+            self.transition(RuntimeState::Failed { error });
+        } else {
+            let connection_state = self.client.runtime.lock().await.state.clone();
+            if connection_state == ConnectionState::Disconnected
+                && matches!(
+                    self.current_state.borrow().clone(),
+                    RuntimeState::Ready | RuntimeState::Degraded { .. }
+                )
+            {
+                self.transition(RuntimeState::Failed {
+                    error: RuntimeError::ConnectionLost,
+                });
             }
-            ConnectionState::Connecting => HealthStatus::Degraded {
-                reason: "connection is in progress".to_string(),
-            },
-            ConnectionState::Disconnected => HealthStatus::Disconnected {
-                reason: "connection is disconnected".to_string(),
-            },
         }
+        self.health_from_state(self.current_state.borrow().clone())
     }
 
     /// Retry using the normal reconnect backoff.
@@ -116,6 +273,12 @@ impl RuntimeSupervisor {
         // able to supersede this attempt. The lock is reacquired for the actual
         // connection transition below.
         let delay = *self.reconnect_delay.lock().await;
+        let attempt = self.reconnect_attempt.fetch_add(1, Ordering::AcqRel) + 1;
+        self.transition(RuntimeState::Reconnecting {
+            attempt,
+            next_retry_at: Instant::now() + delay,
+            reason: "connection is disconnected".to_string(),
+        });
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = self.shutdown_notify.notified() => {
@@ -132,6 +295,12 @@ impl RuntimeSupervisor {
     /// Tear down even a healthy connection and reconnect immediately.
     pub async fn force_reconnect(&self) -> Result<(), WsError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
+        let attempt = self.reconnect_attempt.fetch_add(1, Ordering::AcqRel) + 1;
+        self.transition(RuntimeState::Reconnecting {
+            attempt,
+            next_retry_at: Instant::now(),
+            reason: "reconnect requested".to_string(),
+        });
         self.shutdown_current_connection().await;
         self.connect_current().await
     }
@@ -141,8 +310,10 @@ impl RuntimeSupervisor {
     pub async fn stop(&self) {
         let task = {
             let _lifecycle = self.lifecycle_lock.lock().await;
+            self.transition(RuntimeState::Stopping);
             self.shutdown.store(true, Ordering::Release);
             self.shutdown_notify.notify_waiters();
+            self.stop_owned_resources().await;
             self.shutdown_current_connection().await;
             self.background_task
                 .lock()
@@ -157,8 +328,10 @@ impl RuntimeSupervisor {
         }
 
         *self.reconnect_delay.lock().await = INITIAL_RECONNECT_DELAY;
+        self.reconnect_attempt.store(0, Ordering::Release);
         *self.last_connected.lock().await = None;
         self.shutdown.store(false, Ordering::Release);
+        self.transition(RuntimeState::Stopped);
     }
 
     /// Compatibility shim for existing callers. `start` starts this itself.
@@ -183,7 +356,10 @@ impl RuntimeSupervisor {
                 }
                 if matches!(
                     supervisor.health_check().await,
-                    HealthStatus::Disconnected { .. }
+                    HealthStatus::Disconnected {
+                        state: RuntimeState::Failed { .. },
+                        ..
+                    }
                 ) {
                     tracing::info!(runtime = ?supervisor.runtime_key, "attempting runtime reconnect");
                     let emit_fn = supervisor.emit_fn.lock().await.clone();
@@ -198,6 +374,7 @@ impl RuntimeSupervisor {
     }
 
     pub fn shutdown(&self) {
+        self.transition(RuntimeState::Stopping);
         self.shutdown.store(true, Ordering::Release);
         self.shutdown_notify.notify_waiters();
     }
@@ -207,6 +384,144 @@ impl RuntimeSupervisor {
     }
     pub fn runtime_key(&self) -> RuntimeKey {
         self.runtime_key.clone()
+    }
+
+    /// Subscribe before an operation to receive every lifecycle transition.
+    pub fn subscribe_state(&self) -> watch::Receiver<RuntimeState> {
+        self.current_state.clone()
+    }
+
+    pub fn state(&self) -> RuntimeState {
+        self.current_state.borrow().clone()
+    }
+
+    /// Transfer ownership of a local Hermes child to this supervisor.
+    pub async fn set_local_gateway(&self, child: Child) {
+        let mut handle = self.local_gateway_handle.lock().await;
+        if let Some(mut previous) = handle.replace(ChildGuard::new(child)) {
+            previous.kill().await;
+        }
+    }
+
+    /// Adopt a ready Hermes process that was spawned by the compatibility
+    /// gateway launcher, including the endpoint data needed to reconnect.
+    pub async fn set_local_gateway_process(&self, process: GatewayProcess) {
+        let mut handle = self.local_gateway_handle.lock().await;
+        if let Some(mut previous) = handle.replace(ChildGuard::from_gateway(process)) {
+            previous.kill().await;
+        }
+    }
+
+    pub async fn local_gateway_endpoint(&self) -> Option<(u16, String)> {
+        self.local_gateway_handle
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|guard| guard.local_endpoint.as_ref())
+            .map(|endpoint| (endpoint.port, endpoint.session_token.clone()))
+    }
+
+    pub async fn has_ssh_tunnel(&self) -> bool {
+        self.ssh_tunnel_handle.lock().await.is_some()
+    }
+
+    pub async fn ssh_tunnel_healthy(&self) -> bool {
+        self.ssh_tunnel_handle
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(SshTunnelGuard::is_alive)
+    }
+
+    /// Transfer ownership of an SSH-tunnel monitor to this supervisor.
+    pub async fn set_ssh_tunnel(&self, port: u16, monitor: JoinHandle<()>) {
+        let mut handle = self.ssh_tunnel_handle.lock().await;
+        if let Some(mut previous) = handle.replace(SshTunnelGuard::new(port, monitor)) {
+            previous.close();
+        }
+    }
+
+    /// Like `set_ssh_tunnel`, with the SSH-layer close operation invoked when
+    /// the supervisor is stopped or the guard is replaced.
+    pub async fn set_ssh_tunnel_with_cleanup(
+        &self,
+        port: u16,
+        monitor: JoinHandle<()>,
+        close: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        let mut handle = self.ssh_tunnel_handle.lock().await;
+        let guard = SshTunnelGuard {
+            port,
+            monitor: Some(monitor),
+            close: Some(close),
+        };
+        if let Some(mut previous) = handle.replace(guard) {
+            previous.close();
+        }
+    }
+
+    /// Whether every resource owned by this supervisor is still alive.
+    pub async fn process_health(&self) -> bool {
+        if let Some(child) = self.local_gateway_handle.lock().await.as_mut() {
+            if !child.is_alive().await {
+                return false;
+            }
+        }
+        if let Some(tunnel) = self.ssh_tunnel_handle.lock().await.as_ref() {
+            if !tunnel.is_alive() {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn stop_owned_resources(&self) {
+        if let Some(mut child) = self.local_gateway_handle.lock().await.take() {
+            child.kill().await;
+        }
+        if let Some(mut tunnel) = self.ssh_tunnel_handle.lock().await.take() {
+            tunnel.close();
+        }
+    }
+
+    async fn mark_disconnected(&self) {
+        let mut runtime = self.client.runtime.lock().await;
+        runtime.state = ConnectionState::Disconnected;
+    }
+
+    fn transition(&self, new_state: RuntimeState) {
+        let previous = self.current_state.borrow().clone();
+        tracing::info!(runtime = ?self.runtime_key, from = ?previous, to = ?new_state, "runtime state transition");
+        self.state_tx.send_replace(new_state);
+    }
+
+    fn health_from_state(&self, state: RuntimeState) -> HealthStatus {
+        match state.clone() {
+            RuntimeState::Ready => HealthStatus::Connected { state },
+            RuntimeState::Degraded { reason } => HealthStatus::Degraded { reason, state },
+            RuntimeState::Reconnecting {
+                attempt, reason, ..
+            } => HealthStatus::Disconnected {
+                reason,
+                state,
+                attempt,
+            },
+            RuntimeState::Failed { error } => HealthStatus::Disconnected {
+                reason: format!("{error:?}"),
+                state,
+                attempt: self.reconnect_attempt.load(Ordering::Acquire),
+            },
+            RuntimeState::Incompatible { reason } => HealthStatus::Disconnected {
+                reason,
+                state,
+                attempt: 0,
+            },
+            _ => HealthStatus::Disconnected {
+                reason: "runtime is not ready".to_string(),
+                state,
+                attempt: self.reconnect_attempt.load(Ordering::Acquire),
+            },
+        }
     }
 
     async fn store_endpoint(&self, endpoint: EndpointSnapshot) {
@@ -232,6 +547,8 @@ impl RuntimeSupervisor {
             }
 
             let emit_fn = self.emit_fn.lock().await.clone();
+            self.transition(RuntimeState::CheckingCompatibility);
+            self.transition(RuntimeState::Reconciling);
             let result = self
                 .client
                 .ensure_connected(emit_fn, self.sessions.clone())
@@ -248,12 +565,35 @@ impl RuntimeSupervisor {
         match result {
             Ok(()) => {
                 *self.reconnect_delay.lock().await = INITIAL_RECONNECT_DELAY;
+                self.reconnect_attempt.store(0, Ordering::Release);
                 *self.last_connected.lock().await = Some(Instant::now());
+                let connection_state = self.client.runtime.lock().await.state.clone();
+                match connection_state {
+                    ConnectionState::Degraded => self.transition(RuntimeState::Degraded {
+                        reason: "connection reconciliation is degraded".to_string(),
+                    }),
+                    _ => self.transition(RuntimeState::Ready),
+                }
                 Ok(())
             }
             Err(error) => {
                 let mut delay = self.reconnect_delay.lock().await;
                 *delay = (*delay * 2).min(self.max_reconnect_delay);
+                match &error {
+                    WsError::Incompatible(reason) => self.transition(RuntimeState::Incompatible {
+                        reason: format!("{reason:?}"),
+                    }),
+                    WsError::ConnectionLost => self.transition(RuntimeState::Failed {
+                        error: RuntimeError::ConnectionLost,
+                    }),
+                    WsError::Timeout | WsError::RpcTimeout | WsError::ReadyTimeout => self
+                        .transition(RuntimeState::Failed {
+                            error: RuntimeError::Timeout,
+                        }),
+                    _ => self.transition(RuntimeState::Failed {
+                        error: RuntimeError::WebSocket(error.to_string()),
+                    }),
+                }
                 Err(error)
             }
         }
@@ -294,6 +634,10 @@ mod tests {
     }
 
     async fn start_mock_backend() -> (String, oneshot::Receiver<()>) {
+        start_mock_backend_with_contract(4).await
+    }
+
+    async fn start_mock_backend_with_contract(contract: u32) -> (String, oneshot::Receiver<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
             "ws://127.0.0.1:{}/api/ws",
@@ -312,7 +656,7 @@ mod tests {
                         let id = request["id"].as_u64().unwrap_or_default();
                         let result = match request["method"].as_str() {
                             Some("session.create") => {
-                                json!({"session_id":"probe","stored_session_id":"probe","message_count":0,"messages":[],"info":{"desktop_contract":4}})
+                                json!({"session_id":"probe","stored_session_id":"probe","message_count":0,"messages":[],"info":{"desktop_contract":contract}})
                             }
                             Some("session.close") => json!({}),
                             _ => continue,
@@ -335,7 +679,10 @@ mod tests {
     async fn wait_for_connected(supervisor: &RuntimeSupervisor) {
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {
-                if supervisor.health_check().await == HealthStatus::Connected {
+                if matches!(
+                    supervisor.health_check().await,
+                    HealthStatus::Connected { .. }
+                ) {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -439,8 +786,67 @@ mod tests {
             .await
             .unwrap();
         supervisor.force_reconnect().await.unwrap();
-        assert_eq!(supervisor.health_check().await, HealthStatus::Connected);
+        assert!(matches!(
+            supervisor.health_check().await,
+            HealthStatus::Connected { .. }
+        ));
         supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn successful_start_reaches_ready() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        let (url, _) = start_mock_backend().await;
+        supervisor
+            .start(endpoint(&url), noop_emitter())
+            .await
+            .unwrap();
+        assert_eq!(supervisor.state(), RuntimeState::Ready);
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_enters_reconnecting_state() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        assert!(supervisor
+            .start(endpoint("ws://127.0.0.1:1/api/ws"), noop_emitter())
+            .await
+            .is_err());
+        let reconnect = tokio::spawn({
+            let supervisor = supervisor.clone();
+            async move { supervisor.reconnect(noop_emitter()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(matches!(
+            supervisor.state(),
+            RuntimeState::Reconnecting { .. }
+        ));
+        supervisor.stop().await;
+        assert!(reconnect.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn compatibility_rejection_sets_incompatible_state() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        let (url, _) = start_mock_backend_with_contract(999).await;
+        assert!(supervisor
+            .start(endpoint(&url), noop_emitter())
+            .await
+            .is_err());
+        assert!(matches!(
+            supervisor.state(),
+            RuntimeState::Incompatible { .. }
+        ));
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn watch_channel_delivers_transition_events() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Remote("test".into()), None);
+        let mut states = supervisor.subscribe_state();
+        supervisor.transition(RuntimeState::Starting);
+        states.changed().await.unwrap();
+        assert_eq!(*states.borrow(), RuntimeState::Starting);
     }
 
     #[tokio::test]
@@ -461,8 +867,93 @@ mod tests {
             .start(endpoint(&url), noop_emitter())
             .await
             .is_ok());
-        assert_eq!(supervisor.health_check().await, HealthStatus::Connected);
+        assert!(matches!(
+            supervisor.health_check().await,
+            HealthStatus::Connected { .. }
+        ));
         assert!(supervisor.background_task.lock().unwrap().is_some());
+        supervisor.stop().await;
+    }
+
+    fn short_lived_child() -> Child {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "exit 0"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", "exit 0"]);
+        command.spawn().unwrap()
+    }
+
+    fn long_lived_child() -> Child {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "ping -n 60 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let mut command = tokio::process::Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", "sleep 60"]);
+        command.spawn().unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_process_death_marks_runtime_failed() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Local, None);
+        supervisor.set_local_gateway(short_lived_child()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!supervisor.process_health().await);
+        assert!(matches!(
+            supervisor.health_check().await,
+            HealthStatus::Disconnected {
+                state: RuntimeState::Failed {
+                    error: RuntimeError::GatewayCrashed(_)
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_monitor_death_marks_runtime_failed() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Ssh("test".into()), None);
+        supervisor
+            .set_ssh_tunnel(12345, tokio::spawn(async {}))
+            .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!supervisor.process_health().await);
+        assert!(matches!(
+            supervisor.health_check().await,
+            HealthStatus::Disconnected {
+                state: RuntimeState::Failed {
+                    error: RuntimeError::TunnelCrashed(_)
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_kills_owned_process_and_tunnel() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Local, None);
+        supervisor.set_local_gateway(long_lived_child()).await;
+        let monitor = tokio::spawn(async { futures::future::pending::<()>().await });
+        supervisor.set_ssh_tunnel(12345, monitor).await;
+        supervisor.stop().await;
+        assert!(supervisor.local_gateway_handle.lock().await.is_none());
+        assert!(supervisor.ssh_tunnel_handle.lock().await.is_none());
+        assert_eq!(supervisor.state(), RuntimeState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn resources_can_be_reowned_after_stop() {
+        let supervisor = RuntimeSupervisor::new(RuntimeKey::Local, None);
+        supervisor.set_local_gateway(long_lived_child()).await;
+        supervisor.stop().await;
+        supervisor.set_local_gateway(long_lived_child()).await;
+        assert!(supervisor.process_health().await);
         supervisor.stop().await;
     }
 }

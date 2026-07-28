@@ -881,7 +881,8 @@ pub async fn send_message(
     ssh_config: &Option<SshConfig>,
     request: SendMessageRequest,
     app_handle: &AppHandle,
-    ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    _ws_state: &std::sync::Arc<crate::ws_transport::WsState>,
+    local_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     remote_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     ssh_ws_state: &std::sync::Arc<crate::runtime_supervisor::RuntimeSupervisor>,
     sessions: &std::sync::Arc<crate::session_registry::SessionRegistry>,
@@ -891,8 +892,10 @@ pub async fn send_message(
     // backend's config.yaml, not the per-request body (ADR-004).
     match connection_mode {
         ConnectionMode::Local => {
-            // Check if gateway is running
-            if !gateway::is_gateway_running(gateway_state, None).await {
+            // Start through the compatibility launcher, then transfer the
+            // ready child into the Local supervisor for all later lifecycle
+            // decisions (health, stop, and reconnect).
+            if local_ws_state.local_gateway_endpoint().await.is_none() {
                 // Try to start gateway
                 let result = gateway::start_gateway(gateway_state, hermes_home, None).await;
                 if !result.success {
@@ -900,13 +903,39 @@ pub async fn send_message(
                         .error
                         .unwrap_or("Failed to start gateway".to_string()));
                 }
+                let process = gateway::take_gateway_process(gateway_state, None)
+                    .await
+                    .ok_or("Gateway started but no process handle was available")?;
+                local_ws_state.set_local_gateway_process(process).await;
             }
 
             // ADR-006: Local mode uses the PERSISTENT WS connection (one
             // socket for the app lifetime). Remote/SSH still use connect-per-
             // message (separate migration, out of scope for ADR-006).
-            send_via_ws_persistent_local(gateway_state, ws_state, sessions, &request, app_handle)
+            // Keep WsState in the command boundary for compatibility with
+            // existing tests, but route new local traffic through the same
+            // lifecycle supervisor as Remote and SSH.
+            let (port, token) = local_ws_state
+                .local_gateway_endpoint()
                 .await
+                .ok_or("Gateway not available")?;
+            let (ws_url, _) =
+                crate::ws_transport::build_ws_url(&format!("ws://127.0.0.1:{port}"), &token)
+                    .map_err(|e| e.to_string())?;
+            send_via_ws_persistent(
+                local_ws_state,
+                sessions,
+                crate::session_registry::RuntimeKey::Local,
+                &ws_url,
+                // build_local_ws_url already put the token in the URL; the
+                // endpoint builder below requires an auth token, so use the
+                // gateway-owned token directly.
+                &token,
+                None,
+                &request,
+                app_handle,
+            )
+            .await
         }
         ConnectionMode::Remote => {
             // ADR-005: Remote talks to a remote `hermes serve` over the same
@@ -933,6 +962,16 @@ pub async fn send_message(
             if !crate::ssh::is_tunnel_active(ssh_state) {
                 crate::ssh::start_ssh_tunnel(ssh_state, ssh.clone(), hermes_home.clone())
                     .map_err(|e| format!("SSH tunnel failed: {}", e))?;
+            }
+
+            if !ssh_ws_state.ssh_tunnel_healthy().await {
+                ssh_ws_state
+                    .set_ssh_tunnel_with_cleanup(
+                        ssh.local_port,
+                        crate::ssh::monitor_tunnel(ssh_state),
+                        crate::ssh::tunnel_cleanup(ssh_state),
+                    )
+                    .await;
             }
 
             let tunnel_url =

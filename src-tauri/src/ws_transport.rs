@@ -28,6 +28,7 @@ use crate::hermes_protocol::{
     self, GatewayEvent, ParsedGatewayEvent, PromptSubmitParams, PromptSubmitResult,
     RoutedGatewayEvent, SessionCreateParams, SessionCreateResult,
 };
+use crate::runtime_supervisor::RuntimeState;
 
 /// Convert an HTTP(S) URL to a WebSocket URL (ADR-005).
 ///
@@ -128,9 +129,18 @@ pub struct EndpointSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum HealthStatus {
-    Connected,
-    Degraded { reason: String },
-    Disconnected { reason: String },
+    Connected {
+        state: RuntimeState,
+    },
+    Degraded {
+        reason: String,
+        state: RuntimeState,
+    },
+    Disconnected {
+        reason: String,
+        state: RuntimeState,
+        attempt: u32,
+    },
 }
 
 /// Build a gateway WebSocket URL without interpolating auth into the URL text.
@@ -2907,7 +2917,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(supervisor.health_check().await, HealthStatus::Connected);
+        assert!(matches!(
+            supervisor.health_check().await,
+            HealthStatus::Connected { .. }
+        ));
     }
 
     #[tokio::test]

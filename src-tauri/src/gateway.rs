@@ -459,6 +459,20 @@ pub async fn get_gateway_session_token(
         .map(|gw| gw.session_token.clone())
 }
 
+/// Transfer an already-ready local gateway process to RuntimeSupervisor.
+/// Once taken, lifecycle ownership belongs to the supervisor rather than this
+/// compatibility process map.
+pub async fn take_gateway_process(
+    state: &GatewayState,
+    profile: Option<&str>,
+) -> Option<GatewayProcess> {
+    state
+        .processes
+        .lock()
+        .await
+        .remove(profile.unwrap_or("default"))
+}
+
 // ── Gateway restart ───────────────────────────────────────────────────────
 
 pub async fn restart_gateway(
