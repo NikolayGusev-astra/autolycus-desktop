@@ -397,26 +397,21 @@ mod tests {
     use crate::ws_transport::{EmitFn, EndpointIdentity, EndpointSnapshot};
 
     async fn start_mock_backend() -> (String, Arc<Mutex<Vec<Value>>>) {
-        start_mock_backend_with_connections(1).await
+        start_mock_backend_with_connections().await
     }
 
     async fn start_reconnect_mock_backend() -> (String, Arc<Mutex<Vec<Value>>>) {
-        start_mock_backend_with_connections(2).await
+        start_mock_backend_with_connections().await
     }
 
-    async fn start_mock_backend_with_connections(
-        connection_count: usize,
-    ) -> (String, Arc<Mutex<Vec<Value>>>) {
+    async fn start_mock_backend_with_connections() -> (String, Arc<Mutex<Vec<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let received = Arc::new(Mutex::new(Vec::new()));
         let received_for_task = Arc::clone(&received);
 
         tokio::spawn(async move {
-            for _ in 0..connection_count {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
+            while let Ok((stream, _)) = listener.accept().await {
                 let received_for_connection = Arc::clone(&received_for_task);
                 tokio::spawn(async move {
                     let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -445,6 +440,7 @@ mod tests {
                                 json!({
                                     "jsonrpc":"2.0", "id": id,
                                     "result": {"session_id":"resumed-session", "resumed": stored_session_id,
+                                        "session_key": stored_session_id,
                                         "message_count":0, "messages":[], "info":{}}
                                 })
                             }
