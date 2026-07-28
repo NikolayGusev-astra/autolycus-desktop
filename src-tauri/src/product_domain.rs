@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::Mutex;
 
@@ -20,6 +20,47 @@ pub enum ConversationStatus {
     Suspended,
     Resuming,
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalChoice {
+    Once,
+    Session,
+    Always,
+    Deny,
+}
+
+impl ApprovalChoice {
+    pub fn as_wire_value(&self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Session => "session",
+            Self::Always => "always",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionOutcome {
+    Applied,
+    Expired,
+    AlreadyResolved,
+}
+
+impl ActionOutcome {
+    pub(crate) fn from_rpc_result(result: &serde_json::Value) -> Self {
+        match result.get("status").and_then(serde_json::Value::as_str) {
+            Some("expired") => Self::Expired,
+            Some("already_resolved" | "already-resolved") => Self::AlreadyResolved,
+            _ if result.get("resolved") == Some(&serde_json::Value::Bool(false)) => {
+                Self::AlreadyResolved
+            }
+            _ => Self::Applied,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -270,5 +311,33 @@ mod tests {
             serde_json::to_value(dto).unwrap()["connection_mode"],
             "remote"
         );
+    }
+
+    #[test]
+    fn action_outcomes_are_derived_from_the_hermes_result_contract() {
+        assert_eq!(
+            ActionOutcome::from_rpc_result(&serde_json::json!({"resolved": true})),
+            ActionOutcome::Applied
+        );
+        assert_eq!(
+            ActionOutcome::from_rpc_result(&serde_json::json!({"resolved": false})),
+            ActionOutcome::AlreadyResolved
+        );
+        assert_eq!(
+            ActionOutcome::from_rpc_result(&serde_json::json!({"status": "expired"})),
+            ActionOutcome::Expired
+        );
+        assert_eq!(
+            ActionOutcome::from_rpc_result(&serde_json::json!({"status": "already_resolved"})),
+            ActionOutcome::AlreadyResolved
+        );
+    }
+
+    #[test]
+    fn approval_choices_match_hermes_wire_values() {
+        assert_eq!(ApprovalChoice::Once.as_wire_value(), "once");
+        assert_eq!(ApprovalChoice::Session.as_wire_value(), "session");
+        assert_eq!(ApprovalChoice::Always.as_wire_value(), "always");
+        assert_eq!(ApprovalChoice::Deny.as_wire_value(), "deny");
     }
 }

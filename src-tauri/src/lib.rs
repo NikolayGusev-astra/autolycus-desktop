@@ -1357,7 +1357,7 @@ async fn get_conversation_status_for_context(
 async fn abort_conversation_cmd(
     state: State<'_, AppState>,
     conversation_id: String,
-) -> Result<(), ProductCommandError> {
+) -> Result<ActionOutcome, ProductCommandError> {
     state
         .product_ctx
         .conversation_service()
@@ -1370,18 +1370,13 @@ async fn respond_approval_cmd(
     state: State<'_, AppState>,
     conversation_id: String,
     request_id: String,
-    approved: bool,
-    permanent: bool,
-) -> Result<(), ProductCommandError> {
+    choice: ApprovalChoice,
+    all: bool,
+) -> Result<ActionOutcome, ProductCommandError> {
     state
         .product_ctx
         .conversation_service()
-        .respond_approval(
-            &ConversationId(conversation_id),
-            &request_id,
-            approved,
-            permanent,
-        )
+        .respond_approval(&ConversationId(conversation_id), &request_id, choice, all)
         .await
 }
 
@@ -1391,7 +1386,7 @@ async fn respond_clarification_cmd(
     conversation_id: String,
     request_id: String,
     answer: String,
-) -> Result<(), ProductCommandError> {
+) -> Result<ActionOutcome, ProductCommandError> {
     state
         .product_ctx
         .conversation_service()
@@ -1405,7 +1400,7 @@ async fn respond_secret_cmd(
     conversation_id: String,
     request_id: String,
     secret: String,
-) -> Result<(), ProductCommandError> {
+) -> Result<ActionOutcome, ProductCommandError> {
     state
         .product_ctx
         .conversation_service()
@@ -1419,7 +1414,7 @@ async fn respond_sudo_cmd(
     conversation_id: String,
     request_id: String,
     password: String,
-) -> Result<(), ProductCommandError> {
+) -> Result<ActionOutcome, ProductCommandError> {
     state
         .product_ctx
         .conversation_service()
