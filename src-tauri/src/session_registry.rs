@@ -415,6 +415,11 @@ impl SessionRegistry {
         inner.by_conversation.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        let inner = self.inner.lock().await;
+        inner.by_conversation.is_empty()
+    }
+
     /// Remove a conversation entirely (e.g. user closes it).
     pub async fn remove(
         &self,
