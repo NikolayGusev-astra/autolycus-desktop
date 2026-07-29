@@ -44,7 +44,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
   // The legacy session/event path below stays mounted until its migration is complete.
   useEffect(() => {
     if (currentConversationId) return;
-    void createConversation("local").catch((error) => {
+    void createConversation().catch((error) => {
       console.error("Failed to create product conversation:", error);
     });
   }, [createConversation, currentConversationId]);
@@ -451,7 +451,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     setAgentStatus("idle");
     streamingMsgIdRef.current = null;
     runningToolRef.current = null;
-    void createConversation("local").catch((error) => {
+    void createConversation().catch((error) => {
       console.error("Failed to create product conversation:", error);
     });
   }, [createConversation, setAgentStatus]);

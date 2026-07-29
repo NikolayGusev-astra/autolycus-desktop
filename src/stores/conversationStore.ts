@@ -17,7 +17,7 @@ interface ConversationState {
   messages: Map<string, ConversationMessage[]>;
   loading: boolean;
   error: string | null;
-  createConversation: (mode: string) => Promise<string>;
+  createConversation: (mode?: string) => Promise<string>;
   sendMessage: (text: string) => Promise<void>;
   loadConversations: () => Promise<void>;
   setCurrentConversation: (id: string) => void;

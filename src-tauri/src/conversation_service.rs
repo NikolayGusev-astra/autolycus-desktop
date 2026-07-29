@@ -44,8 +44,12 @@ impl ConversationService {
 
     pub async fn create_conversation(
         &self,
-        mode: ConnectionMode,
+        mode: Option<ConnectionMode>,
     ) -> Result<ConversationId, ProductError> {
+        let mode = match mode {
+            Some(mode) => mode,
+            None => self.active_connection_mode()?,
+        };
         let supervisor = self.supervisor_for_mode(&mode);
         supervisor
             .ensure_started_configured()
@@ -88,6 +92,19 @@ impl ConversationService {
             .await?;
 
         Ok(product_id)
+    }
+
+    /// Returns the ready runtime in product preference order: local, remote,
+    /// then SSH. Only a ready runtime may be selected implicitly.
+    pub fn active_connection_mode(&self) -> Result<ConnectionMode, ProductError> {
+        [
+            (ConnectionMode::Local, &self.local_supervisor),
+            (ConnectionMode::Remote, &self.remote_supervisor),
+            (ConnectionMode::Ssh, &self.ssh_supervisor),
+        ]
+        .into_iter()
+        .find_map(|(mode, supervisor)| (supervisor.state() == RuntimeState::Ready).then_some(mode))
+        .ok_or_else(|| ProductError::RuntimeUnavailable("no ready runtime is available".into()))
     }
 
     pub async fn send_message(
@@ -490,8 +507,12 @@ mod tests {
             crate::InMemoryConversationRepository::new(),
         );
 
+        assert!(matches!(
+            service.active_connection_mode().unwrap(),
+            ConnectionMode::Local
+        ));
         let conversation_id = service
-            .create_conversation(ConnectionMode::Local)
+            .create_conversation(None)
             .await
             .unwrap();
         assert_eq!(
@@ -541,7 +562,7 @@ mod tests {
             crate::InMemoryConversationRepository::new(),
         );
         let id = service
-            .create_conversation(ConnectionMode::Local)
+            .create_conversation(Some(ConnectionMode::Local))
             .await
             .unwrap();
 
@@ -634,7 +655,7 @@ mod tests {
             crate::InMemoryConversationRepository::new(),
         );
         let id = service
-            .create_conversation(ConnectionMode::Local)
+            .create_conversation(Some(ConnectionMode::Local))
             .await
             .unwrap();
 

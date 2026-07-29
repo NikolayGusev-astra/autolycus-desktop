@@ -1268,29 +1268,53 @@ async fn send_message_cmd(
 #[tauri::command]
 async fn create_conversation_cmd(
     state: State<'_, AppState>,
-    mode: String,
+    mode: Option<String>,
 ) -> Result<String, ProductCommandError> {
-    create_conversation_for_context(&state.product_ctx, &mode).await
+    create_conversation_for_context(&state.product_ctx, mode.as_deref()).await
 }
 
 async fn create_conversation_for_context(
     ctx: &ProductContext,
-    mode: &str,
+    mode: Option<&str>,
 ) -> Result<String, ProductCommandError> {
-    let mode = match mode {
-        "local" => ConnectionMode::Local,
-        "remote" => ConnectionMode::Remote,
-        "ssh" => ConnectionMode::Ssh,
-        _ => {
-            return Err(ProductCommandError::Internal {
+    let mode = mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(|mode| match mode {
+            "local" => Ok(ConnectionMode::Local),
+            "remote" => Ok(ConnectionMode::Remote),
+            "ssh" => Ok(ConnectionMode::Ssh),
+            _ => Err(ProductCommandError::Internal {
                 message: format!("unsupported connection mode: {mode}"),
-            })
-        }
-    };
+            }),
+        })
+        .transpose()?;
     ctx.conversation_service()
         .create_conversation(mode)
         .await
         .map(|id| id.0)
+        .map_err(ProductCommandError::from)
+}
+
+/// Return the currently ready runtime using the product preference order.
+#[tauri::command]
+async fn get_active_connection_mode(
+    state: State<'_, AppState>,
+) -> Result<String, ProductCommandError> {
+    get_active_connection_mode_for_context(&state.product_ctx)
+}
+
+fn get_active_connection_mode_for_context(
+    ctx: &ProductContext,
+) -> Result<String, ProductCommandError> {
+    ctx.conversation_service()
+        .active_connection_mode()
+        .map(|mode| match mode {
+            ConnectionMode::Local => "local",
+            ConnectionMode::Remote => "remote",
+            ConnectionMode::Ssh => "ssh",
+        }
+        .to_string())
         .map_err(ProductCommandError::from)
 }
 
@@ -3868,6 +3892,7 @@ pub fn run() {
             // Chat
             send_message_cmd,
             create_conversation_cmd,
+            get_active_connection_mode,
             send_message_cmd_v2,
             get_conversations_cmd,
             get_conversation_status_cmd,
@@ -4146,7 +4171,8 @@ mod tests {
         let (url, _) = start_product_command_backend().await;
         let ctx = product_command_test_context(url).await;
 
-        let conversation_id = create_conversation_for_context(&ctx, "local")
+        assert_eq!(get_active_connection_mode_for_context(&ctx).unwrap(), "local");
+        let conversation_id = create_conversation_for_context(&ctx, None)
             .await
             .unwrap();
 
@@ -4164,7 +4190,7 @@ mod tests {
         let (url, received) = start_product_command_backend().await;
         let ctx = product_command_test_context(url).await;
 
-        let conversation_id = create_conversation_for_context(&ctx, "local")
+        let conversation_id = create_conversation_for_context(&ctx, Some("local"))
             .await
             .unwrap();
         send_message_for_context(&ctx, conversation_id, "hello from v2".into())
@@ -4180,7 +4206,7 @@ mod tests {
     async fn get_conversations_cmd_returns_persisted_conversations() {
         let (url, _) = start_product_command_backend().await;
         let ctx = product_command_test_context(url).await;
-        let conversation_id = create_conversation_for_context(&ctx, "local")
+        let conversation_id = create_conversation_for_context(&ctx, Some("local"))
             .await
             .unwrap();
 
