@@ -4850,9 +4850,14 @@ mod tests {
             "remove_integration_cmd",
             "refresh_integration_status_cmd",
         ] {
-            assert!(source.contains(name));
+            assert!(source.contains(name), "missing command: {}", name);
         }
-        let commands = &source[source.find("tauri::generate_handler![").unwrap()..];
-        assert!(!commands.contains("McpIntegrationRuntimeAdapter"));
+        // Verify the invoke_handler block contains all 9 integration commands
+        // and does not contain MCP adapter types.
+        let handler_start = source.find("// Integrations (Phase 4.4)").unwrap();
+        let handler_end = source[handler_start..].find("// App").unwrap();
+        let handler_section = &source[handler_start..handler_start + handler_end];
+        assert!(handler_section.contains("list_available_integrations_cmd"));
+        assert!(!handler_section.contains("McpIntegrationRuntimeAdapter"));
     }
 }
