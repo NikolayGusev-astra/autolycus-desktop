@@ -28,8 +28,8 @@ export interface ProductEvent {
 }
 
 export const productConversationService = {
-  async createConversation(mode?: string): Promise<string> {
-    return invoke("create_conversation_cmd", { mode });
+  async createConversation(): Promise<string> {
+    return invoke("create_conversation_cmd");
   },
 
   async sendMessage(conversationId: string, text: string): Promise<void> {

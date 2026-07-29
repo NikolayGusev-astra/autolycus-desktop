@@ -1,7 +1,7 @@
 // src/components/chat/ChatView.tsx
 // v0.6.0: pipeline status, approval flow, tool events, context window, gateway status
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { SquarePen, PanelRight } from "lucide-react";
@@ -9,7 +9,7 @@ import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useConversationStore } from "../../stores/conversationStore";
-import type { PipelineStatus, ApprovalRequest } from "../../lib/types";
+import type { PipelineStatus } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 
 export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boolean; onToggleHistory?: () => void }) {
@@ -22,14 +22,12 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     agentStatus,
     setAgentStatus,
     setPipelineStatus,
-    setPendingApproval,
     } = useGatewayStore();
   const {
     currentConversationId,
     createConversation,
     sendMessage: sendProductMessage,
     abort: abortConversation,
-    messages: productMessagesByConversation,
   } = useConversationStore();
 
   const { t } = useTranslation();
@@ -48,25 +46,6 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
       console.error("Failed to create product conversation:", error);
     });
   }, [createConversation, currentConversationId]);
-
-  // MessageList remains shared with the legacy chat UI. Mirror the Product API
-  // conversation into that presentation store while it is being migrated.
-  const productMessages = useMemo(() => {
-    return currentConversationId
-      ? productMessagesByConversation.get(currentConversationId) ?? []
-      : [];
-  }, [currentConversationId, productMessagesByConversation]);
-  useEffect(() => {
-    if (!currentConversationId) return;
-    useGatewayStore.setState({
-      messages: productMessages.map((message) => ({
-        id: message.id,
-        role: message.role === "user" ? "user" : "assistant",
-        content: message.content,
-        timestamp: Date.now(),
-      })),
-});
-	  }, [currentConversationId, productMessages]);
 
   // Fetch gateway status on mount (when connected).
   // gateway_status_cmd returns a bool (running?), not a struct. Pipeline
@@ -162,6 +141,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
       action?: string;
       command_class?: string;
     }>("chat_event", (event) => {
+      if (!currentSessionId) return;
       const payload = event.payload;
       const eventType = payload.type;
 
@@ -302,18 +282,6 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
           break;
         }
 
-        case "approval_request": {
-          const approval: ApprovalRequest = {
-            requestId: payload.request_id || payload.tool_call_id || `req-${Date.now()}`,
-            toolName: payload.tool_name || payload.name || "tool",
-            toolInput: payload.tool_input || payload.input || "",
-            action: payload.action || payload.message || payload.content || "",
-            commandClass: (payload.command_class as any) || "write",
-          };
-          setPendingApproval(approval);
-          break;
-        }
-
         default:
           break;
       }
@@ -322,7 +290,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [addMessage, setAgentStatus, setPipelineStatus, setPendingApproval]);
+  }, [addMessage, appendToken, currentSessionId, setAgentStatus, setCurrentSession, setPipelineStatus, updateMessage]);
 
   const handleSend = useCallback(
     async (text: string, attachments?: import("./ChatInput").Attachment[]) => {
@@ -370,21 +338,6 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
       // Reset the streaming target for the new turn.
       streamingMsgIdRef.current = null;
 
-      // Add user message to UI immediately (with attachment previews).
-      const userMsg = {
-        id: crypto.randomUUID(),
-        role: "user" as const,
-        content: messageText,
-        timestamp: Date.now(),
-        attachments: (attachments ?? []).map((a) => ({
-          kind: a.kind === "file" && a.mime?.startsWith("image/") ? "image" as const
-            : a.kind === "file" && a.mime?.startsWith("video/") ? "video" as const
-            : a.kind,
-          path: a.path,
-          name: a.name,
-          mime: a.mime,
-        })),
-      };
       // Snapshot history BEFORE adding the user message, so the agent doesn't
       // see the current turn duplicated (text + history entry).
       const prior = useGatewayStore.getState().messages;
@@ -396,14 +349,13 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
       // Retained for the legacy command path while Product API v2 owns sends.
       void history;
 
-      addMessage(userMsg);
-
+      if (!currentConversationId) return;
       try {
         // Fire the message and DON'T await the full response — streaming
         // arrives via chat_event events, which populate messages incrementally.
         // Awaiting here blocked the input clear (and the UI) until the agent
         // fully finished responding.
-        sendProductMessage(messageText).catch((err) => {
+        sendProductMessage(currentConversationId, messageText).catch((err) => {
           console.error("Failed to send message:", err);
           setAgentStatus("error");
         });
@@ -412,7 +364,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         setAgentStatus("error");
       }
     },
-    [addMessage, sendProductMessage, setAgentStatus]
+    [currentConversationId, sendProductMessage, setAgentStatus]
   );
 
   // Stop the current generation: tell the backend to emit chat-abort, then
@@ -480,7 +432,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         )}
       </div>
       <div className="flex-1 overflow-hidden">
-        <MessageList />
+        <MessageList conversationId={currentSessionId ? null : currentConversationId} />
       </div>
       <ChatInput
         onSend={handleSend}

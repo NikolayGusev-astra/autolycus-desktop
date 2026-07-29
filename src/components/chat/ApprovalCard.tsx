@@ -1,12 +1,11 @@
-import { Shield, X, Check, RefreshCw } from "lucide-react";
+import { Shield } from "lucide-react";
 import type { ApprovalRequest } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 
 interface ApprovalCardProps {
   request: ApprovalRequest;
-  onApprove: () => void;
-  onDeny: () => void;
-  onApproveAlways: () => void;
+  choices: string[];
+  onChoose: (choice: string) => void;
 }
 
 const CLASS_COLORS: Record<string, string> = {
@@ -31,9 +30,8 @@ const CLASS_LABELS: Record<string, string> = {
 
 export function ApprovalCard({
   request,
-  onApprove,
-  onDeny,
-  onApproveAlways,
+  choices,
+  onChoose,
 }: ApprovalCardProps) {
   const { t } = useTranslation();
   const colorClass =
@@ -74,27 +72,15 @@ export function ApprovalCard({
 
         {/* Actions */}
         <div className="flex gap-2 justify-end">
-          <button
-            onClick={onDeny}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-border text-ac-muted hover:text-ac-ink hover:border-ac-muted transition-colors"
-          >
-            <X className="w-3 h-3" />
-            {t("approval.deny")}
-          </button>
-          <button
-            onClick={onApprove}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs ac-btn"
-          >
-            <Check className="w-3 h-3" />
-            {t("approval.approve")}
-          </button>
-          <button
-            onClick={onApproveAlways}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ac-brand/30 text-ac-brand hover:bg-ac-brand/10 transition-colors"
-          >
-            <RefreshCw className="w-3 h-3" />
-            {t("approval.approveAlways")}
-          </button>
+          {choices.map((choice) => (
+            <button
+              key={choice}
+              onClick={() => onChoose(choice)}
+              className={choice === "always" ? "px-3 py-1.5 text-xs border border-ac-brand/30 text-ac-brand hover:bg-ac-brand/10 transition-colors" : "px-3 py-1.5 text-xs ac-btn"}
+            >
+              {choice === "always" ? t("approval.approveAlways") : choice === "deny" ? t("approval.deny") : choice}
+            </button>
+          ))}
         </div>
       </div>
     </div>

@@ -6,27 +6,30 @@ import {
 } from "@/services/productConversation";
 
 export interface ConversationMessage {
-  role: string;
-  content: string;
   id: string;
+  role: "user" | "assistant" | "tool" | "status";
+  content: string;
+  thinking?: string;
 }
 
 interface ConversationState {
   conversations: ProductConversationDto[];
   currentConversationId: string | null;
   messages: Map<string, ConversationMessage[]>;
+  activeStreamIds: Map<string, string>;
+  pendingInteractions: Map<string, ProductEvent>;
   loading: boolean;
   error: string | null;
-  createConversation: (mode?: string) => Promise<string>;
-  sendMessage: (text: string) => Promise<void>;
+  createConversation: () => Promise<string>;
+  sendMessage: (conversationId: string, text: string) => Promise<void>;
   loadConversations: () => Promise<void>;
   setCurrentConversation: (id: string) => void;
   handleProductEvent: (event: ProductEvent) => void;
   abort: () => Promise<void>;
-  respondApproval: (requestId: string, choice: string, all: boolean) => Promise<void>;
-  respondClarification: (requestId: string, answer: string) => Promise<void>;
-  respondSecret: (requestId: string, secret: string) => Promise<void>;
-  respondSudo: (requestId: string, password: string) => Promise<void>;
+  respondApproval: (conversationId: string, requestId: string, choice: string, all: boolean) => Promise<void>;
+  respondClarification: (conversationId: string, requestId: string, answer: string) => Promise<void>;
+  respondSecret: (conversationId: string, requestId: string, secret: string) => Promise<void>;
+  respondSudo: (conversationId: string, requestId: string, password: string) => Promise<void>;
 }
 
 function eventText(event: ProductEvent): string {
@@ -39,51 +42,57 @@ function eventText(event: ProductEvent): string {
         : "";
 }
 
-function appendMessage(
-  messages: Map<string, ConversationMessage[]>,
-  conversationId: string,
-  message: ConversationMessage,
-): Map<string, ConversationMessage[]> {
+function appendMessage(messages: Map<string, ConversationMessage[]>, conversationId: string, message: ConversationMessage) {
   const next = new Map(messages);
   next.set(conversationId, [...(next.get(conversationId) ?? []), message]);
   return next;
 }
 
-function appendAssistantText(
-  messages: Map<string, ConversationMessage[]>,
-  conversationId: string,
-  text: string,
-): Map<string, ConversationMessage[]> {
+function appendAssistantContent(messages: Map<string, ConversationMessage[]>, conversationId: string, streamId: string, content: string) {
   const existing = messages.get(conversationId) ?? [];
-  const lastMessage = existing[existing.length - 1];
-  const next = new Map(messages);
+  const messageIndex = existing.findIndex((message) => message.id === streamId);
+  if (messageIndex < 0) return appendMessage(messages, conversationId, { id: streamId, role: "assistant", content });
 
-  if (lastMessage?.role === "assistant" && lastMessage.id === `stream-${conversationId}`) {
-    next.set(conversationId, [
-      ...existing.slice(0, -1),
-      { ...lastMessage, content: lastMessage.content + text },
-    ]);
-    return next;
+  const next = new Map(messages);
+  next.set(conversationId, existing.map((message, index) =>
+    index === messageIndex ? { ...message, content: message.content + content } : message,
+  ));
+  return next;
+}
+
+function appendThinking(messages: Map<string, ConversationMessage[]>, conversationId: string, streamId: string, thinking: string) {
+  const existing = messages.get(conversationId) ?? [];
+  const messageIndex = existing.findIndex((message) => message.id === streamId);
+  if (messageIndex < 0) {
+    return appendMessage(messages, conversationId, { id: streamId, role: "assistant", content: "", thinking });
   }
 
-  next.set(conversationId, [
-    ...existing,
-    { id: `stream-${conversationId}`, role: "assistant", content: text },
-  ]);
+  const next = new Map(messages);
+  next.set(conversationId, existing.map((message, index) =>
+    index === messageIndex ? { ...message, thinking: (message.thinking ?? "") + thinking } : message,
+  ));
   return next;
+}
+
+function getOrCreateStreamId(activeStreamIds: Map<string, string>, conversationId: string) {
+  const streamId = activeStreamIds.get(conversationId) ?? crypto.randomUUID();
+  activeStreamIds.set(conversationId, streamId);
+  return streamId;
 }
 
 export const useConversationStore = create<ConversationState>()((set, get) => ({
   conversations: [],
   currentConversationId: null,
   messages: new Map(),
+  activeStreamIds: new Map(),
+  pendingInteractions: new Map(),
   loading: false,
   error: null,
 
-  createConversation: async (mode) => {
+  createConversation: async () => {
     set({ loading: true, error: null });
     try {
-      const id = await productConversationService.createConversation(mode);
+      const id = await productConversationService.createConversation();
       set((state) => ({
         currentConversationId: id,
         messages: state.messages.has(id) ? state.messages : new Map(state.messages).set(id, []),
@@ -91,22 +100,14 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
       await get().loadConversations();
       return id;
     } catch (error) {
-      const message = String(error);
-      set({ error: message });
+      set({ error: String(error) });
       throw error;
     } finally {
       set({ loading: false });
     }
   },
 
-  sendMessage: async (text) => {
-    const conversationId = get().currentConversationId;
-    if (!conversationId) {
-      const error = new Error("No active product conversation");
-      set({ error: error.message });
-      throw error;
-    }
-
+  sendMessage: async (conversationId, text) => {
     set((state) => ({
       error: null,
       messages: appendMessage(state.messages, conversationId, {
@@ -127,8 +128,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
   loadConversations: async () => {
     set({ loading: true, error: null });
     try {
-      const conversations = await productConversationService.getConversations();
-      set({ conversations });
+      set({ conversations: await productConversationService.getConversations() });
     } catch (error) {
       set({ error: String(error) });
       throw error;
@@ -142,65 +142,74 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
   handleProductEvent: (event) => {
     const conversationId = event.conversation_id || get().currentConversationId;
     if (!conversationId) return;
+    const text = eventText(event);
 
     switch (event.type) {
       case "MessageDelta":
-        set((state) => ({ messages: appendAssistantText(state.messages, conversationId, eventText(event)) }));
+        set((state) => {
+          const activeStreamIds = new Map(state.activeStreamIds);
+          const streamId = getOrCreateStreamId(activeStreamIds, conversationId);
+          return { activeStreamIds, messages: appendAssistantContent(state.messages, conversationId, streamId, text) };
+        });
         break;
       case "Reasoning":
       case "Thinking":
-      case "ToolStarted":
-      case "ToolCompleted":
-      case "Error":
-      case "StatusUpdate":
-      case "Progress":
-        if (eventText(event)) {
-          set((state) => ({
-            messages: appendMessage(state.messages, conversationId, {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: eventText(event),
-            }),
-          }));
-        }
+        set((state) => {
+          const activeStreamIds = new Map(state.activeStreamIds);
+          const streamId = getOrCreateStreamId(activeStreamIds, conversationId);
+          return { activeStreamIds, messages: appendThinking(state.messages, conversationId, streamId, text) };
+        });
         break;
       case "MessageCompleted":
+        set((state) => {
+          const activeStreamIds = new Map(state.activeStreamIds);
+          activeStreamIds.delete(conversationId);
+          return { activeStreamIds };
+        });
+        break;
+      case "ToolStarted":
+      case "ToolCompleted":
+        if (text) set((state) => ({ messages: appendMessage(state.messages, conversationId, { id: crypto.randomUUID(), role: "tool", content: text }) }));
+        break;
+      case "StatusUpdate":
+      case "Progress":
+      case "Error":
+        if (text) set((state) => ({ messages: appendMessage(state.messages, conversationId, { id: crypto.randomUUID(), role: "status", content: text }) }));
+        break;
       case "ApprovalRequired":
       case "ClarificationRequired":
       case "SecretRequired":
-      case "PrivilegeRequired":
-      case "InteractionExpired":
+      case "PrivilegeRequired": {
+        const requestId = typeof event.request_id === "string" ? event.request_id : null;
+        if (requestId) set((state) => ({ pendingInteractions: new Map(state.pendingInteractions).set(requestId, event) }));
         break;
+      }
+      case "InteractionExpired": {
+        const requestId = typeof event.request_id === "string" ? event.request_id : null;
+        if (requestId) set((state) => {
+          const pendingInteractions = new Map(state.pendingInteractions);
+          pendingInteractions.delete(requestId);
+          return { pendingInteractions };
+        });
+        break;
+      }
     }
   },
 
   abort: async () => {
     const conversationId = get().currentConversationId;
-    if (!conversationId) return;
-    await productConversationService.abortConversation(conversationId);
+    if (conversationId) await productConversationService.abortConversation(conversationId);
   },
-
-  respondApproval: async (requestId, choice, all) => {
-    const conversationId = get().currentConversationId;
-    if (!conversationId) return;
+  respondApproval: async (conversationId, requestId, choice, all) => {
     await productConversationService.respondApproval(conversationId, requestId, choice, all);
   },
-
-  respondClarification: async (requestId, answer) => {
-    const conversationId = get().currentConversationId;
-    if (!conversationId) return;
+  respondClarification: async (conversationId, requestId, answer) => {
     await productConversationService.respondClarification(conversationId, requestId, answer);
   },
-
-  respondSecret: async (requestId, secret) => {
-    const conversationId = get().currentConversationId;
-    if (!conversationId) return;
+  respondSecret: async (conversationId, requestId, secret) => {
     await productConversationService.respondSecret(conversationId, requestId, secret);
   },
-
-  respondSudo: async (requestId, password) => {
-    const conversationId = get().currentConversationId;
-    if (!conversationId) return;
+  respondSudo: async (conversationId, requestId, password) => {
     await productConversationService.respondSudo(conversationId, requestId, password);
   },
 }));

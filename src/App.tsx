@@ -26,6 +26,7 @@ import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useConversationStore } from "./stores/conversationStore";
 import type { ProductEvent } from "./services/productConversation";
+import type { ApprovalRequest } from "./lib/types";
 
 
 type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
@@ -64,6 +65,72 @@ function toProductEvent(payload: unknown, currentConversationId: string | null):
   return { ...payload, type, conversation_id: conversationId };
 }
 
+type InteractionKind = "approval" | "clarification" | "secret" | "privilege";
+
+interface PendingInteraction {
+  conversationId: string;
+  requestId: string;
+  kind: InteractionKind;
+  payload: Record<string, unknown>;
+  choices: string[];
+}
+
+function interactionFromEvent(event: ProductEvent): PendingInteraction | null {
+  const requestId = typeof event.request_id === "string" ? event.request_id : null;
+  if (!requestId) return null;
+  const kindByEvent: Partial<Record<ProductEvent["type"], InteractionKind>> = {
+    ApprovalRequired: "approval",
+    ClarificationRequired: "clarification",
+    SecretRequired: "secret",
+    PrivilegeRequired: "privilege",
+  };
+  const kind = kindByEvent[event.type];
+  if (!kind) return null;
+  const choices = Array.isArray(event.choices)
+    ? event.choices.filter((choice): choice is string => typeof choice === "string")
+    : [];
+  return { conversationId: event.conversation_id, requestId, kind, payload: event, choices };
+}
+
+function InteractionDialog({
+  interaction,
+  inputType,
+  title,
+  onSubmit,
+  onClose,
+}: {
+  interaction: PendingInteraction;
+  inputType: "text" | "password";
+  title: string;
+  onSubmit: (value: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const message = typeof interaction.payload.message === "string" ? interaction.payload.message : "";
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <form
+        className="w-full max-w-md rounded-lg border border-ac-border bg-ac-bg p-4 shadow-xl"
+        onSubmit={(event) => { event.preventDefault(); onSubmit(value); }}
+      >
+        <h2 className="mb-2 text-sm font-semibold text-ac-ink">{title}</h2>
+        {message && <p className="mb-3 text-sm text-ac-muted">{message}</p>}
+        <input
+          autoFocus
+          type={inputType}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          className="w-full rounded border border-ac-border bg-ac-surface px-3 py-2 text-sm text-ac-ink"
+        />
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-ac-muted">Cancel</button>
+          <button type="submit" className="ac-btn px-3 py-1.5 text-xs">Submit</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
@@ -74,6 +141,8 @@ export function App() {
   // Command palette (Cmd/Ctrl+K).
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
+  const [pendingInteractions, setPendingInteractions] = useState<Map<string, PendingInteraction>>(new Map());
+  const [expiredInteraction, setExpiredInteraction] = useState<string | null>(null);
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
       path: string;
@@ -93,10 +162,11 @@ export function App() {
     setConnected,
     setError,
     setHermesHome,
-    pendingApproval,
-    setPendingApproval,
   } = useGatewayStore();
   const respondApproval = useConversationStore((state) => state.respondApproval);
+  const respondClarification = useConversationStore((state) => state.respondClarification);
+  const respondSecret = useConversationStore((state) => state.respondSecret);
+  const respondSudo = useConversationStore((state) => state.respondSudo);
 
   // Product events are normalized once at the Tauri boundary, then become the
   // single source of truth for product conversation state across all views.
@@ -110,19 +180,16 @@ export function App() {
 
       useConversationStore.getState().handleProductEvent(productEvent);
 
-      if (productEvent.type === "ApprovalRequired") {
-        const requestId = typeof productEvent.request_id === "string"
-          ? productEvent.request_id
-          : `req-${Date.now()}`;
-        const toolName = typeof productEvent.tool_id === "string" ? productEvent.tool_id : "tool";
-        const action = typeof productEvent.message === "string" ? productEvent.message : "";
-        useGatewayStore.getState().setPendingApproval({
-          requestId,
-          toolName,
-          toolInput: action,
-          action,
-          commandClass: "write",
+      const interaction = interactionFromEvent(productEvent);
+      if (interaction) setPendingInteractions((current) => new Map(current).set(interaction.requestId, interaction));
+      if (productEvent.type === "InteractionExpired" && typeof productEvent.request_id === "string") {
+        const requestId = productEvent.request_id;
+        setPendingInteractions((current) => {
+          const next = new Map(current);
+          next.delete(requestId);
+          return next;
         });
+        setExpiredInteraction("This request expired.");
       }
     });
 
@@ -296,21 +363,47 @@ export function App() {
     setScreen("connection");
   }, [setHermesHome, setConnected, setError]);
 
-  const handleApprovalDecision = useCallback(
-    async (decision: "approved" | "denied" | "approved_always") => {
-      const approval = useGatewayStore.getState().pendingApproval;
-      if (!approval) return;
+  const removeInteraction = useCallback((requestId: string) => {
+    setPendingInteractions((current) => {
+      const next = new Map(current);
+      next.delete(requestId);
+      return next;
+    });
+  }, []);
 
-      try {
-        const choice = decision === "approved" ? "once" : decision === "denied" ? "deny" : "always";
-        await respondApproval(approval.requestId, choice, decision === "approved_always");
-      } catch (err) {
-        console.error("Failed to send approval decision:", err);
+  const handleApprovalDecision = useCallback(async (interaction: PendingInteraction, choice: string) => {
+    try {
+      await respondApproval(interaction.conversationId, interaction.requestId, choice, choice === "always");
+      removeInteraction(interaction.requestId);
+    } catch (err) {
+      console.error("Failed to send approval decision:", err);
+    }
+  }, [removeInteraction, respondApproval]);
+
+  const handleTextInteraction = useCallback(async (interaction: PendingInteraction, value: string) => {
+    try {
+      if (interaction.kind === "clarification") {
+        await respondClarification(interaction.conversationId, interaction.requestId, value);
+      } else if (interaction.kind === "secret") {
+        await respondSecret(interaction.conversationId, interaction.requestId, value);
+      } else if (interaction.kind === "privilege") {
+        await respondSudo(interaction.conversationId, interaction.requestId, value);
       }
-      setPendingApproval(null);
-    },
-    [respondApproval, setPendingApproval]
-  );
+      removeInteraction(interaction.requestId);
+    } catch (err) {
+      console.error("Failed to respond to interaction:", err);
+    }
+  }, [removeInteraction, respondClarification, respondSecret, respondSudo]);
+
+  const pendingInteraction = Array.from(pendingInteractions.values())[0] ?? null;
+  const approvalInteraction = pendingInteraction?.kind === "approval" ? pendingInteraction : null;
+  const approvalRequest: ApprovalRequest | null = approvalInteraction ? {
+    requestId: approvalInteraction.requestId,
+    toolName: typeof approvalInteraction.payload.tool_id === "string" ? approvalInteraction.payload.tool_id : "tool",
+    toolInput: typeof approvalInteraction.payload.input === "string" ? approvalInteraction.payload.input : "",
+    action: typeof approvalInteraction.payload.message === "string" ? approvalInteraction.payload.message : "",
+    commandClass: "write",
+  } : null;
 
   // ── Screen router ────────────────────────────────────────────────────────
 
@@ -360,12 +453,11 @@ export function App() {
             <div className="flex flex-1 min-w-0">
               <div className="flex-1 flex flex-col overflow-hidden">
                 <ChatView historyOpen={historyOpen} onToggleHistory={() => setHistoryOpen((v) => !v)} />
-                {pendingApproval && (
+                {approvalInteraction && approvalRequest && (
                   <ApprovalCard
-                    request={pendingApproval}
-                    onApprove={() => handleApprovalDecision("approved")}
-                    onDeny={() => handleApprovalDecision("denied")}
-                    onApproveAlways={() => handleApprovalDecision("approved_always")}
+                    request={approvalRequest}
+                    choices={approvalInteraction.choices}
+                    onChoose={(choice) => { void handleApprovalDecision(approvalInteraction, choice); }}
                   />
                 )}
               </div>
@@ -410,6 +502,27 @@ export function App() {
       {/* Self-diagnosis modal — mood/energy check-in */}
       {selfDiagOpen && (
         <SelfDiagModal onClose={() => setSelfDiagOpen(false)} />
+      )}
+
+      {pendingInteraction?.kind === "clarification" && (
+        <InteractionDialog interaction={pendingInteraction} inputType="text" title="Clarification required"
+          onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
+          onClose={() => removeInteraction(pendingInteraction.requestId)} />
+      )}
+      {pendingInteraction?.kind === "secret" && (
+        <InteractionDialog interaction={pendingInteraction} inputType="password" title="Secret required"
+          onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
+          onClose={() => removeInteraction(pendingInteraction.requestId)} />
+      )}
+      {pendingInteraction?.kind === "privilege" && (
+        <InteractionDialog interaction={pendingInteraction} inputType="password" title="Password required"
+          onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
+          onClose={() => removeInteraction(pendingInteraction.requestId)} />
+      )}
+      {expiredInteraction && (
+        <button onClick={() => setExpiredInteraction(null)} className="fixed bottom-4 right-4 z-50 rounded bg-ac-surface px-4 py-2 text-sm text-ac-ink shadow-lg">
+          {expiredInteraction}
+        </button>
       )}
 
       {/* Command palette (Cmd/Ctrl+K) */}

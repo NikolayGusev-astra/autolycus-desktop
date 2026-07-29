@@ -11,6 +11,7 @@ interface Message {
   role: string;
   content: string;
   timestamp: number;
+  thinking?: string;
   isStreaming?: boolean;
   attachments?: MessageAttachment[];
 }
@@ -132,6 +133,12 @@ export function MessageBubble({ message, onRegenerate, canRegenerate }: MessageB
               : "bg-ac-surface text-ac-ink border border-ac-border"
           }`}
         >
+          {!isUser && message.thinking && (
+            <details className="mb-2 text-xs text-ac-muted">
+              <summary className="cursor-pointer select-none">Thinking</summary>
+              <p className="mt-1 whitespace-pre-wrap">{message.thinking}</p>
+            </details>
+          )}
           {isUser ? (
             message.content ? (
               <p className="whitespace-pre-wrap">{message.content}</p>
