@@ -1309,12 +1309,14 @@ fn get_active_connection_mode_for_context(
 ) -> Result<String, ProductCommandError> {
     ctx.conversation_service()
         .active_connection_mode()
-        .map(|mode| match mode {
-            ConnectionMode::Local => "local",
-            ConnectionMode::Remote => "remote",
-            ConnectionMode::Ssh => "ssh",
-        }
-        .to_string())
+        .map(|mode| {
+            match mode {
+                ConnectionMode::Local => "local",
+                ConnectionMode::Remote => "remote",
+                ConnectionMode::Ssh => "ssh",
+            }
+            .to_string()
+        })
         .map_err(ProductCommandError::from)
 }
 
@@ -4171,10 +4173,11 @@ mod tests {
         let (url, _) = start_product_command_backend().await;
         let ctx = product_command_test_context(url).await;
 
-        assert_eq!(get_active_connection_mode_for_context(&ctx).unwrap(), "local");
-        let conversation_id = create_conversation_for_context(&ctx, None)
-            .await
-            .unwrap();
+        assert_eq!(
+            get_active_connection_mode_for_context(&ctx).unwrap(),
+            "local"
+        );
+        let conversation_id = create_conversation_for_context(&ctx, None).await.unwrap();
 
         assert!(!conversation_id.is_empty());
         assert_eq!(

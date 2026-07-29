@@ -511,10 +511,7 @@ mod tests {
             service.active_connection_mode().unwrap(),
             ConnectionMode::Local
         ));
-        let conversation_id = service
-            .create_conversation(None)
-            .await
-            .unwrap();
+        let conversation_id = service.create_conversation(None).await.unwrap();
         assert_eq!(
             service.refresh_status(&conversation_id).await.unwrap(),
             ConversationStatus::Active
