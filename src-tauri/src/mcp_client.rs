@@ -36,6 +36,18 @@ fn build_initialize_request(id: u64) -> Value {
     })
 }
 
+/// Stateless MCP 2026 discovery.  Every stateless request carries client
+/// metadata so servers can correlate requests without a session cookie.
+pub(crate) fn build_discover_request(id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "server/discover",
+        "params": { "protocolVersion": "2026-07-28" },
+        "_meta": { "client": "steersman-desktop", "protocolVersion": "2026-07-28" }
+    })
+}
+
 /// Build the MCP `tools/call` JSON-RPC request frame.
 fn build_tools_call_request(id: u64, tool_name: &str, arguments: &Value) -> Value {
     json!({
@@ -114,7 +126,8 @@ impl McpStdioClient {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    tracing::debug!(target: "steersman_desktop_lib::mcp_client", stderr = %line, "MCP server stderr");
+                    // Server stderr is untrusted and may contain credentials.  Deliberately
+                    // discard it rather than putting it in application logs.
                 }
             });
         }
@@ -138,6 +151,32 @@ impl McpStdioClient {
             return Err(format!("initialize error: {}", resp));
         }
         Ok(())
+    }
+
+    /// Try the stateless 2026 discovery handshake.  Callers may use the
+    /// legacy initialize handshake only after an explicit protocol rejection.
+    pub async fn discover(&mut self) -> Result<Value, String> {
+        let id = next_id();
+        self.send(&build_discover_request(id)).await?;
+        let response = self.read_response(id).await?;
+        if let Some(error) = response.get("error") {
+            // Classify, but never propagate arbitrary server text: it can
+            // contain credentials supplied by an upstream proxy.
+            let text = error.to_string().to_ascii_lowercase();
+            return Err(if text.contains("method not found")
+                || text.contains("unsupported")
+                || text.contains("protocol")
+            {
+                "MCP discover rejected: protocol unsupported"
+            } else if text.contains("401") || text.contains("auth") || text.contains("unauthorized")
+            {
+                "MCP discover rejected: authentication"
+            } else {
+                "MCP discover rejected"
+            }
+            .into());
+        }
+        Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
 
     /// Call an MCP tool by name with the given arguments. Returns the `result`
@@ -200,6 +239,33 @@ impl McpStdioClient {
     pub async fn shutdown(&mut self) {
         // Best-effort: try to send a shutdown, then kill.
         let _ = self.child.kill().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await;
+    }
+}
+
+/// Factory/pool boundary for infrastructure consumers.  It intentionally owns
+/// no credentials and never formats a process command through a shell.
+#[derive(Default)]
+pub struct McpClientPool;
+
+impl McpClientPool {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn spawn_stdio(
+        &self,
+        executable: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<McpStdioClient, String> {
+        if executable.is_empty()
+            || executable.contains(['\0', '\r', '\n'])
+            || args.iter().any(|arg| arg.contains(['\0', '\r', '\n']))
+        {
+            return Err("invalid MCP process configuration".into());
+        }
+        McpStdioClient::spawn(executable, args, env)
     }
 }
 
@@ -252,6 +318,14 @@ mod tests {
                 .and_then(|n| n.as_str()),
             Some("list_inbox")
         );
+    }
+
+    #[test]
+    fn stateless_discover_carries_required_metadata() {
+        let request = build_discover_request(7);
+        assert_eq!(request["method"], "server/discover");
+        assert_eq!(request["params"]["protocolVersion"], "2026-07-28");
+        assert!(request.get("_meta").is_some());
     }
 
     #[test]
