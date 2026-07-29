@@ -26,6 +26,7 @@ import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useConversationStore } from "./stores/conversationStore";
 import type { ProductEvent } from "./services/productConversation";
+import type { PendingInteraction } from "./stores/conversationStore";
 import type { ApprovalRequest } from "./lib/types";
 
 
@@ -65,33 +66,6 @@ function toProductEvent(payload: unknown, currentConversationId: string | null):
   return { ...payload, type, conversation_id: conversationId };
 }
 
-type InteractionKind = "approval" | "clarification" | "secret" | "privilege";
-
-interface PendingInteraction {
-  conversationId: string;
-  requestId: string;
-  kind: InteractionKind;
-  payload: Record<string, unknown>;
-  choices: string[];
-}
-
-function interactionFromEvent(event: ProductEvent): PendingInteraction | null {
-  const requestId = typeof event.request_id === "string" ? event.request_id : null;
-  if (!requestId) return null;
-  const kindByEvent: Partial<Record<ProductEvent["type"], InteractionKind>> = {
-    ApprovalRequired: "approval",
-    ClarificationRequired: "clarification",
-    SecretRequired: "secret",
-    PrivilegeRequired: "privilege",
-  };
-  const kind = kindByEvent[event.type];
-  if (!kind) return null;
-  const choices = Array.isArray(event.choices)
-    ? event.choices.filter((choice): choice is string => typeof choice === "string")
-    : [];
-  return { conversationId: event.conversation_id, requestId, kind, payload: event, choices };
-}
-
 function InteractionDialog({
   interaction,
   inputType,
@@ -107,6 +81,8 @@ function InteractionDialog({
 }) {
   const [value, setValue] = useState("");
   const message = typeof interaction.payload.message === "string" ? interaction.payload.message : "";
+  const prompt = typeof interaction.payload.prompt === "string" ? interaction.payload.prompt : "";
+  const envVar = typeof interaction.payload.env_var === "string" ? interaction.payload.env_var : "";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <form
@@ -115,6 +91,17 @@ function InteractionDialog({
       >
         <h2 className="mb-2 text-sm font-semibold text-ac-ink">{title}</h2>
         {message && <p className="mb-3 text-sm text-ac-muted">{message}</p>}
+        {prompt && <p className="mb-3 whitespace-pre-wrap text-sm text-ac-ink">{prompt}</p>}
+        {envVar && <p className="mb-3 text-xs text-ac-muted">Environment variable: <code>{envVar}</code></p>}
+        {interaction.choices.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {interaction.choices.map((choice) => (
+              <button key={choice} type="button" onClick={() => onSubmit(choice)} className="rounded border border-ac-brand/30 px-3 py-1.5 text-xs text-ac-brand hover:bg-ac-brand/10">
+                {choice}
+              </button>
+            ))}
+          </div>
+        )}
         <input
           autoFocus
           type={inputType}
@@ -141,7 +128,6 @@ export function App() {
   // Command palette (Cmd/Ctrl+K).
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
-  const [pendingInteractions, setPendingInteractions] = useState<Map<string, PendingInteraction>>(new Map());
   const [expiredInteraction, setExpiredInteraction] = useState<string | null>(null);
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
@@ -167,6 +153,8 @@ export function App() {
   const respondClarification = useConversationStore((state) => state.respondClarification);
   const respondSecret = useConversationStore((state) => state.respondSecret);
   const respondSudo = useConversationStore((state) => state.respondSudo);
+  const pendingInteractions = useConversationStore((state) => state.pendingInteractions);
+  const removePendingInteraction = useConversationStore((state) => state.removePendingInteraction);
 
   // Product events are normalized once at the Tauri boundary, then become the
   // single source of truth for product conversation state across all views.
@@ -180,15 +168,7 @@ export function App() {
 
       useConversationStore.getState().handleProductEvent(productEvent);
 
-      const interaction = interactionFromEvent(productEvent);
-      if (interaction) setPendingInteractions((current) => new Map(current).set(interaction.requestId, interaction));
       if (productEvent.type === "InteractionExpired" && typeof productEvent.request_id === "string") {
-        const requestId = productEvent.request_id;
-        setPendingInteractions((current) => {
-          const next = new Map(current);
-          next.delete(requestId);
-          return next;
-        });
         setExpiredInteraction("This request expired.");
       }
     });
@@ -363,22 +343,14 @@ export function App() {
     setScreen("connection");
   }, [setHermesHome, setConnected, setError]);
 
-  const removeInteraction = useCallback((requestId: string) => {
-    setPendingInteractions((current) => {
-      const next = new Map(current);
-      next.delete(requestId);
-      return next;
-    });
-  }, []);
-
   const handleApprovalDecision = useCallback(async (interaction: PendingInteraction, choice: string) => {
     try {
-      await respondApproval(interaction.conversationId, interaction.requestId, choice, choice === "always");
-      removeInteraction(interaction.requestId);
+      await respondApproval(interaction.conversationId, interaction.requestId, choice, false);
+      removePendingInteraction(interaction.conversationId, interaction.requestId);
     } catch (err) {
       console.error("Failed to send approval decision:", err);
     }
-  }, [removeInteraction, respondApproval]);
+  }, [removePendingInteraction, respondApproval]);
 
   const handleTextInteraction = useCallback(async (interaction: PendingInteraction, value: string) => {
     try {
@@ -389,11 +361,11 @@ export function App() {
       } else if (interaction.kind === "privilege") {
         await respondSudo(interaction.conversationId, interaction.requestId, value);
       }
-      removeInteraction(interaction.requestId);
+      removePendingInteraction(interaction.conversationId, interaction.requestId);
     } catch (err) {
       console.error("Failed to respond to interaction:", err);
     }
-  }, [removeInteraction, respondClarification, respondSecret, respondSudo]);
+  }, [removePendingInteraction, respondClarification, respondSecret, respondSudo]);
 
   const pendingInteraction = Array.from(pendingInteractions.values())[0] ?? null;
   const approvalInteraction = pendingInteraction?.kind === "approval" ? pendingInteraction : null;
@@ -507,17 +479,17 @@ export function App() {
       {pendingInteraction?.kind === "clarification" && (
         <InteractionDialog interaction={pendingInteraction} inputType="text" title="Clarification required"
           onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
-          onClose={() => removeInteraction(pendingInteraction.requestId)} />
+          onClose={() => removePendingInteraction(pendingInteraction.conversationId, pendingInteraction.requestId)} />
       )}
       {pendingInteraction?.kind === "secret" && (
         <InteractionDialog interaction={pendingInteraction} inputType="password" title="Secret required"
           onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
-          onClose={() => removeInteraction(pendingInteraction.requestId)} />
+          onClose={() => removePendingInteraction(pendingInteraction.conversationId, pendingInteraction.requestId)} />
       )}
       {pendingInteraction?.kind === "privilege" && (
         <InteractionDialog interaction={pendingInteraction} inputType="password" title="Password required"
           onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
-          onClose={() => removeInteraction(pendingInteraction.requestId)} />
+          onClose={() => removePendingInteraction(pendingInteraction.conversationId, pendingInteraction.requestId)} />
       )}
       {expiredInteraction && (
         <button onClick={() => setExpiredInteraction(null)} className="fixed bottom-4 right-4 z-50 rounded bg-ac-surface px-4 py-2 text-sm text-ac-ink shadow-lg">

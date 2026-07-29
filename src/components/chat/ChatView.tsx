@@ -432,11 +432,17 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         )}
       </div>
       <div className="flex-1 overflow-hidden">
+        {currentSessionId && (
+          <div className="border-b border-ac-brand/20 bg-ac-brand-soft px-4 py-2 text-xs text-ac-ink">
+            Viewing legacy session. Create a new conversation to send messages.
+          </div>
+        )}
         <MessageList conversationId={currentSessionId ? null : currentConversationId} />
       </div>
       <ChatInput
         onSend={handleSend}
-        onStop={handleStop}
+        onStop={currentSessionId ? undefined : handleStop}
+        disabled={Boolean(currentSessionId)}
         agentStatus={agentStatus}
       />
     </div>

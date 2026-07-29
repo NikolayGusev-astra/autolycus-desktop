@@ -12,12 +12,24 @@ export interface ConversationMessage {
   thinking?: string;
 }
 
+export type InteractionKind = "approval" | "clarification" | "secret" | "privilege";
+
+export interface PendingInteraction {
+  conversationId: string;
+  requestId: string;
+  kind: InteractionKind;
+  /** The complete gateway event, preserved for interaction-specific UI. */
+  payload: ProductEvent;
+  choices: string[];
+}
+
 interface ConversationState {
   conversations: ProductConversationDto[];
   currentConversationId: string | null;
   messages: Map<string, ConversationMessage[]>;
   activeStreamIds: Map<string, string>;
-  pendingInteractions: Map<string, ProductEvent>;
+  /** Keyed by a stable (conversationId, requestId) tuple. */
+  pendingInteractions: Map<string, PendingInteraction>;
   loading: boolean;
   error: string | null;
   createConversation: () => Promise<string>;
@@ -25,6 +37,7 @@ interface ConversationState {
   loadConversations: () => Promise<void>;
   setCurrentConversation: (id: string) => void;
   handleProductEvent: (event: ProductEvent) => void;
+  removePendingInteraction: (conversationId: string, requestId: string) => void;
   abort: () => Promise<void>;
   respondApproval: (conversationId: string, requestId: string, choice: string, all: boolean) => Promise<void>;
   respondClarification: (conversationId: string, requestId: string, answer: string) => Promise<void>;
@@ -78,6 +91,29 @@ function getOrCreateStreamId(activeStreamIds: Map<string, string>, conversationI
   const streamId = activeStreamIds.get(conversationId) ?? crypto.randomUUID();
   activeStreamIds.set(conversationId, streamId);
   return streamId;
+}
+
+function interactionKey(conversationId: string, requestId: string): string {
+  return JSON.stringify([conversationId, requestId]);
+}
+
+function interactionFromEvent(event: ProductEvent): PendingInteraction | null {
+  const requestId = typeof event.request_id === "string" ? event.request_id : null;
+  if (!requestId) return null;
+
+  const kindByEvent: Partial<Record<ProductEvent["type"], InteractionKind>> = {
+    ApprovalRequired: "approval",
+    ClarificationRequired: "clarification",
+    SecretRequired: "secret",
+    PrivilegeRequired: "privilege",
+  };
+  const kind = kindByEvent[event.type];
+  if (!kind) return null;
+
+  const choices = Array.isArray(event.choices)
+    ? event.choices.filter((choice): choice is string => typeof choice === "string")
+    : [];
+  return { conversationId: event.conversation_id, requestId, kind, payload: event, choices };
 }
 
 export const useConversationStore = create<ConversationState>()((set, get) => ({
@@ -180,21 +216,32 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
       case "ClarificationRequired":
       case "SecretRequired":
       case "PrivilegeRequired": {
-        const requestId = typeof event.request_id === "string" ? event.request_id : null;
-        if (requestId) set((state) => ({ pendingInteractions: new Map(state.pendingInteractions).set(requestId, event) }));
+        const interaction = interactionFromEvent(event);
+        if (interaction) set((state) => ({
+          pendingInteractions: new Map(state.pendingInteractions).set(
+            interactionKey(interaction.conversationId, interaction.requestId),
+            interaction,
+          ),
+        }));
         break;
       }
       case "InteractionExpired": {
         const requestId = typeof event.request_id === "string" ? event.request_id : null;
         if (requestId) set((state) => {
           const pendingInteractions = new Map(state.pendingInteractions);
-          pendingInteractions.delete(requestId);
+          pendingInteractions.delete(interactionKey(conversationId, requestId));
           return { pendingInteractions };
         });
         break;
       }
     }
   },
+
+  removePendingInteraction: (conversationId, requestId) => set((state) => {
+    const pendingInteractions = new Map(state.pendingInteractions);
+    pendingInteractions.delete(interactionKey(conversationId, requestId));
+    return { pendingInteractions };
+  }),
 
   abort: async () => {
     const conversationId = get().currentConversationId;
