@@ -140,6 +140,7 @@ pub struct McpHealthSnapshot {
 }
 
 struct ActiveRuntime {
+    #[allow(dead_code)]
     generation: u64,
     handle: McpRuntimeHandle,
     capabilities: McpCapabilitySnapshot,
@@ -407,9 +408,11 @@ pub fn map_error(error: &str) -> IntegrationCommandError {
         IntegrationCommandError::AuthenticationRequired
     } else if e.contains("403") || e.contains("scope") || e.contains("permission") {
         IntegrationCommandError::PermissionDenied
-    } else if e.contains("timeout") || e.contains("network") {
-        IntegrationCommandError::HealthCheckFailed
-    } else if e.contains("config") || e.contains("invalid") {
+    } else if e.contains("timeout")
+        || e.contains("network")
+        || e.contains("config")
+        || e.contains("invalid")
+    {
         IntegrationCommandError::HealthCheckFailed
     } else {
         IntegrationCommandError::RuntimeUnavailable
