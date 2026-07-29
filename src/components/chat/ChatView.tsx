@@ -290,7 +290,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [addMessage, appendToken, currentSessionId, setAgentStatus, setCurrentSession, setPipelineStatus, updateMessage]);
+  }, [addMessage, appendToken, currentSessionId, setAgentStatus, setCurrentSession, setPipelineStatus, t, updateMessage]);
 
   const handleSend = useCallback(
     async (text: string, attachments?: import("./ChatInput").Attachment[]) => {
