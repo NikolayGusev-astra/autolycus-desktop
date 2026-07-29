@@ -18,6 +18,7 @@ pub struct IntegrationActor {
 #[derive(Clone)]
 pub struct ConfigureIntegrationRequest {
     pub definition_id: IntegrationDefinitionId,
+    pub instance_id: Option<IntegrationInstanceId>,
     pub display_name: String,
     pub fields: Vec<ConfiguredFieldValue>,
     pub management: Option<IntegrationManagement>,
@@ -28,6 +29,7 @@ impl fmt::Debug for ConfigureIntegrationRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConfigureIntegrationRequest")
             .field("definition_id", &self.definition_id)
+            .field("instance_id", &self.instance_id)
             .field("display_name", &self.display_name)
             .field("fields", &self.fields)
             .field("management", &self.management)
@@ -97,6 +99,34 @@ impl IntegrationService {
         self.admin_dto(instance).await
     }
 
+    pub async fn get_user_integration(
+        &self,
+        instance_id: &IntegrationInstanceId,
+    ) -> Result<UserIntegrationDto, IntegrationCommandError> {
+        let instance = self.instances.get(instance_id).await?;
+        let definition = self.catalog.get_definition(&instance.definition_id).await?;
+        Ok(UserIntegrationDto {
+            id: instance.id,
+            definition_id: instance.definition_id,
+            display_name: instance.display_name,
+            description: definition.description,
+            category: definition.category,
+            status: instance.status.as_user_status().into(),
+            enabled: instance.enabled,
+            capabilities: definition
+                .capabilities
+                .into_iter()
+                .filter(|capability| instance.configured_capabilities.contains(&capability.id))
+                .map(|capability| UserCapabilityDto {
+                    id: capability.id,
+                    display_name: capability.display_name,
+                    description: capability.description,
+                    access: capability.access,
+                })
+                .collect(),
+        })
+    }
+
     pub async fn configure_integration(
         &self,
         actor: &IntegrationActor,
@@ -104,9 +134,13 @@ impl IntegrationService {
     ) -> Result<AdminIntegrationDto, IntegrationCommandError> {
         let definition = self.catalog.get_definition(&request.definition_id).await?;
         self.validate_request(&definition, &request)?;
-        let existing = self.instances.list().await?.into_iter().find(|item| {
-            item.definition_id == request.definition_id && item.display_name == request.display_name
-        });
+        let existing = match &request.instance_id {
+            Some(id) => Some(self.instances.get(id).await?),
+            None => self.instances.list().await?.into_iter().find(|item| {
+                item.definition_id == request.definition_id
+                    && item.display_name == request.display_name
+            }),
+        };
         if let Some(ref item) = existing {
             self.ensure_mutable(actor, item)?;
         }
@@ -509,6 +543,10 @@ pub struct FakeInstanceRepository {
     failure: Mutex<Option<IntegrationCommandError>>,
 }
 
+/// Desktop startup uses the deterministic in-memory implementation until a
+/// persistent repository is introduced.
+pub type InMemoryIntegrationInstanceRepository = FakeInstanceRepository;
+
 impl FakeInstanceRepository {
     pub fn new() -> Self {
         Self::default()
@@ -731,6 +769,7 @@ mod tests {
     fn request(name: &str) -> ConfigureIntegrationRequest {
         ConfigureIntegrationRequest {
             definition_id: IntegrationDefinitionId("gmail".into()),
+            instance_id: None,
             display_name: name.into(),
             fields: vec![
                 ConfiguredFieldValue {

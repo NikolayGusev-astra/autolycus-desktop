@@ -2,10 +2,11 @@ use std::fmt;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct IntegrationDefinitionId(pub String);
 
 impl fmt::Display for IntegrationDefinitionId {
@@ -14,7 +15,8 @@ impl fmt::Display for IntegrationDefinitionId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct IntegrationInstanceId(pub Uuid);
 
 impl fmt::Display for IntegrationInstanceId {
@@ -23,7 +25,8 @@ impl fmt::Display for IntegrationInstanceId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CapabilityId(pub String);
 
 impl fmt::Display for CapabilityId {

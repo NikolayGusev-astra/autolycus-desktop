@@ -46,9 +46,15 @@ mod terminal;
 mod validation;
 mod ws_transport;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
-use serde::Serialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 // ── Re-exports ───────────────────────────────────────────────────────────
@@ -102,6 +108,356 @@ pub struct AppState {
     pub sessions: std::sync::Arc<session_registry::SessionRegistry>,
     pub conversations: std::sync::Arc<InMemoryConversationRepository>,
     pub product_ctx: ProductContext,
+}
+
+/// IPC state for integration commands.  The ports stay behind
+/// `IntegrationService`; command handlers never access them directly.
+pub struct IntegrationAppState {
+    pub service: Arc<IntegrationService>,
+    pub actor_resolver: Arc<dyn IntegrationActorResolver>,
+    pub event_revisions: Arc<Mutex<HashMap<IntegrationInstanceId, u64>>>,
+}
+
+pub trait IntegrationActorResolver: Send + Sync {
+    fn resolve_actor(&self) -> IntegrationActor;
+}
+
+pub struct DesktopActorResolver;
+
+impl IntegrationActorResolver for DesktopActorResolver {
+    fn resolve_actor(&self) -> IntegrationActor {
+        IntegrationActor { is_admin: true }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ConfigureIntegrationCommandRequest {
+    pub definition_id: IntegrationDefinitionId,
+    pub instance_id: Option<IntegrationInstanceId>,
+    pub display_name: Option<String>,
+    pub values: BTreeMap<String, SetupValueDto>,
+    pub enabled_capabilities: Vec<CapabilityId>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SetupValueDto {
+    Text(String),
+    Boolean(bool),
+    Number(f64),
+    Secret(String),
+}
+
+impl fmt::Debug for SetupValueDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(value) => f.debug_tuple("Text").field(value).finish(),
+            Self::Boolean(value) => f.debug_tuple("Boolean").field(value).finish(),
+            Self::Number(value) => f.debug_tuple("Number").field(value).finish(),
+            Self::Secret(_) => f.debug_tuple("Secret").field(&"[REDACTED]").finish(),
+        }
+    }
+}
+
+impl SetupValueDto {
+    fn into_value(self) -> String {
+        match self {
+            Self::Text(value) | Self::Secret(value) => value,
+            Self::Boolean(value) => value.to_string(),
+            Self::Number(value) => value.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct IntegrationInstanceCommandRequest {
+    pub instance_id: IntegrationInstanceId,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum IntegrationViewDto {
+    User(UserIntegrationDto),
+    Admin(AdminIntegrationDto),
+}
+
+#[derive(Clone, Serialize)]
+pub struct IntegrationTestResultDto {
+    pub instance_id: IntegrationInstanceId,
+    pub status: String,
+    pub issues: Vec<IntegrationIssue>,
+    pub tested_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RemoveIntegrationResultDto {
+    pub instance_id: IntegrationInstanceId,
+    pub removed: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", content = "details", rename_all = "snake_case")]
+pub enum IntegrationEvent {
+    StatusChanged { status: String },
+    NeedsAttention { issue: IntegrationIssue },
+    Ready,
+    Removed,
+}
+
+#[derive(Clone, Serialize)]
+pub struct IntegrationEventEnvelope {
+    pub instance_id: IntegrationInstanceId,
+    pub revision: u64,
+    pub event: IntegrationEvent,
+}
+
+fn integration_error(error: IntegrationCommandError) -> String {
+    // Do not surface `Internal.message`: infrastructure errors may contain credentials.
+    match error {
+        IntegrationCommandError::DefinitionNotFound => "definition_not_found",
+        IntegrationCommandError::InstanceNotFound => "instance_not_found",
+        IntegrationCommandError::AlreadyConfigured => "already_configured",
+        IntegrationCommandError::ConfigurationInvalid { .. } => "configuration_invalid",
+        IntegrationCommandError::AuthenticationRequired => "authentication_required",
+        IntegrationCommandError::PermissionDenied => "permission_denied",
+        IntegrationCommandError::RuntimeUnavailable => "runtime_unavailable",
+        IntegrationCommandError::HealthCheckFailed => "health_check_failed",
+        IntegrationCommandError::SecretStoreUnavailable => "secret_store_unavailable",
+        IntegrationCommandError::Internal { .. } => "internal_error",
+    }
+    .into()
+}
+
+async fn integration_view_for_actor(
+    service: &IntegrationService,
+    actor: &IntegrationActor,
+    instance_id: &IntegrationInstanceId,
+) -> Result<IntegrationViewDto, IntegrationCommandError> {
+    if actor.is_admin {
+        service
+            .get_integration(actor, instance_id)
+            .await
+            .map(IntegrationViewDto::Admin)
+    } else {
+        service
+            .get_user_integration(instance_id)
+            .await
+            .map(IntegrationViewDto::User)
+    }
+}
+
+fn event_for_view(view: &IntegrationViewDto) -> IntegrationEvent {
+    let status = match view {
+        IntegrationViewDto::Admin(dto) => dto.status.clone(),
+        IntegrationViewDto::User(dto) => {
+            return IntegrationEvent::StatusChanged {
+                status: dto.status.clone(),
+            }
+        }
+    };
+    match status {
+        IntegrationStatus::Ready => IntegrationEvent::Ready,
+        IntegrationStatus::NeedsAttention { reason } => {
+            IntegrationEvent::NeedsAttention { issue: reason }
+        }
+        other => IntegrationEvent::StatusChanged {
+            status: other.as_user_status().into(),
+        },
+    }
+}
+
+fn emit_integration_event(
+    app: &AppHandle,
+    state: &IntegrationAppState,
+    instance_id: IntegrationInstanceId,
+    event: IntegrationEvent,
+) {
+    let revision = {
+        let mut revisions = state
+            .event_revisions
+            .lock()
+            .expect("integration event store poisoned");
+        let entry = revisions.entry(instance_id.clone()).or_insert(0);
+        *entry += 1;
+        *entry
+    };
+    let _ = app.emit(
+        "integration-event",
+        IntegrationEventEnvelope {
+            instance_id,
+            revision,
+            event,
+        },
+    );
+}
+
+#[tauri::command]
+async fn list_available_integrations_cmd(
+    state: State<'_, IntegrationAppState>,
+) -> Result<Vec<IntegrationDefinition>, String> {
+    state
+        .service
+        .list_available_integrations()
+        .await
+        .map_err(integration_error)
+}
+
+#[tauri::command]
+async fn list_configured_integrations_cmd(
+    state: State<'_, IntegrationAppState>,
+) -> Result<Vec<IntegrationViewDto>, String> {
+    let actor = state.actor_resolver.resolve_actor();
+    let instances = state
+        .service
+        .list_configured_integrations()
+        .await
+        .map_err(integration_error)?;
+    let mut views = Vec::with_capacity(instances.len());
+    for instance in instances {
+        views.push(
+            integration_view_for_actor(&state.service, &actor, &instance.id)
+                .await
+                .map_err(integration_error)?,
+        );
+    }
+    Ok(views)
+}
+
+#[tauri::command]
+async fn get_integration_cmd(
+    state: State<'_, IntegrationAppState>,
+    request: IntegrationInstanceCommandRequest,
+) -> Result<IntegrationViewDto, String> {
+    let actor = state.actor_resolver.resolve_actor();
+    integration_view_for_actor(&state.service, &actor, &request.instance_id)
+        .await
+        .map_err(integration_error)
+}
+
+#[tauri::command]
+async fn configure_integration_cmd(
+    app: AppHandle,
+    state: State<'_, IntegrationAppState>,
+    request: ConfigureIntegrationCommandRequest,
+) -> Result<IntegrationViewDto, String> {
+    let actor = state.actor_resolver.resolve_actor();
+    let display_name = request
+        .display_name
+        .unwrap_or_else(|| request.definition_id.0.clone());
+    let result = state
+        .service
+        .configure_integration(
+            &actor,
+            ConfigureIntegrationRequest {
+                definition_id: request.definition_id,
+                instance_id: request.instance_id,
+                display_name,
+                fields: request
+                    .values
+                    .into_iter()
+                    .map(|(key, value)| ConfiguredFieldValue {
+                        key,
+                        value: value.into_value(),
+                    })
+                    .collect(),
+                management: None,
+                enabled_capabilities: request.enabled_capabilities,
+            },
+        )
+        .await
+        .map_err(integration_error)?;
+    let id = result.id.clone();
+    let view = integration_view_for_actor(&state.service, &actor, &id)
+        .await
+        .map_err(integration_error)?;
+    emit_integration_event(&app, &state, id, event_for_view(&view));
+    Ok(view)
+}
+
+macro_rules! integration_state_command {
+    ($name:ident, $service_method:ident) => {
+        #[tauri::command]
+        async fn $name(
+            app: AppHandle,
+            state: State<'_, IntegrationAppState>,
+            request: IntegrationInstanceCommandRequest,
+        ) -> Result<IntegrationViewDto, String> {
+            let actor = state.actor_resolver.resolve_actor();
+            let _result = state
+                .service
+                .$service_method(&actor, &request.instance_id)
+                .await
+                .map_err(integration_error)?;
+            let view = integration_view_for_actor(&state.service, &actor, &request.instance_id)
+                .await
+                .map_err(integration_error)?;
+            emit_integration_event(&app, &state, request.instance_id, event_for_view(&view));
+            Ok(view)
+        }
+    };
+}
+integration_state_command!(enable_integration_cmd, enable_integration);
+integration_state_command!(disable_integration_cmd, disable_integration);
+integration_state_command!(refresh_integration_status_cmd, refresh_integration_status);
+
+#[tauri::command]
+async fn test_integration_cmd(
+    app: AppHandle,
+    state: State<'_, IntegrationAppState>,
+    request: IntegrationInstanceCommandRequest,
+) -> Result<IntegrationTestResultDto, String> {
+    let actor = state.actor_resolver.resolve_actor();
+    let dto = state
+        .service
+        .test_integration(&actor, &request.instance_id)
+        .await
+        .map_err(integration_error)?;
+    let issue = match dto.status.clone() {
+        IntegrationStatus::Degraded { reason } | IntegrationStatus::NeedsAttention { reason } => {
+            vec![reason]
+        }
+        _ => Vec::new(),
+    };
+    let event = match dto.status.clone() {
+        IntegrationStatus::Ready => IntegrationEvent::Ready,
+        IntegrationStatus::NeedsAttention { reason } => {
+            IntegrationEvent::NeedsAttention { issue: reason }
+        }
+        other => IntegrationEvent::StatusChanged {
+            status: other.as_user_status().into(),
+        },
+    };
+    emit_integration_event(&app, &state, request.instance_id.clone(), event);
+    Ok(IntegrationTestResultDto {
+        instance_id: request.instance_id,
+        status: dto.status.as_user_status().into(),
+        issues: issue,
+        tested_at: Utc::now(),
+    })
+}
+
+#[tauri::command]
+async fn remove_integration_cmd(
+    app: AppHandle,
+    state: State<'_, IntegrationAppState>,
+    request: IntegrationInstanceCommandRequest,
+) -> Result<RemoveIntegrationResultDto, String> {
+    let actor = state.actor_resolver.resolve_actor();
+    state
+        .service
+        .remove_integration(&actor, &request.instance_id)
+        .await
+        .map_err(integration_error)?;
+    emit_integration_event(
+        &app,
+        &state,
+        request.instance_id.clone(),
+        IntegrationEvent::Removed,
+    );
+    Ok(RemoveIntegrationResultDto {
+        instance_id: request.instance_id,
+        removed: true,
+    })
 }
 
 impl AppState {
@@ -3761,6 +4117,23 @@ pub fn run() {
         ))
         .setup(|app| {
             app.manage(AppState::new(app.handle().clone()));
+            let catalog: Arc<dyn IntegrationCatalogRepository> =
+                Arc::new(FakeCatalogRepository::new());
+            let instances: Arc<dyn IntegrationInstanceRepository> =
+                Arc::new(InMemoryIntegrationInstanceRepository::new());
+            let secrets: Arc<dyn IntegrationSecretStore> = Arc::new(FakeSecretStore::new());
+            let runtime: Arc<dyn IntegrationRuntimePort> =
+                Arc::new(McpIntegrationRuntimeAdapter::new(
+                    Arc::clone(&catalog),
+                    Arc::new(mcp_client::McpClientPool::new()),
+                ));
+            app.manage(IntegrationAppState {
+                service: Arc::new(IntegrationService::new(
+                    catalog, instances, secrets, runtime,
+                )),
+                actor_resolver: Arc::new(DesktopActorResolver),
+                event_revisions: Arc::new(Mutex::new(HashMap::new())),
+            });
             // ── Tray icon (best-effort) ───────────────────────────────
             // On some Linux DEs (notably Astra Linux / older libayatana-
             // appindicator), building the tray icon fails with a raw-data
@@ -3863,6 +4236,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Integrations (Phase 4.4)
+            list_available_integrations_cmd,
+            list_configured_integrations_cmd,
+            get_integration_cmd,
+            configure_integration_cmd,
+            enable_integration_cmd,
+            disable_integration_cmd,
+            test_integration_cmd,
+            remove_integration_cmd,
+            refresh_integration_status_cmd,
             // App
             init_app,
             detect_instances,
@@ -4418,5 +4801,58 @@ mod tests {
             after
         );
         assert!(after.contains("steersman:"), "steersman missing");
+    }
+
+    #[test]
+    fn integration_command_dtos_redact_secrets_and_separate_views() {
+        let secret = SetupValueDto::Secret("never-expose-this".into());
+        assert!(!format!("{secret:?}").contains("never-expose-this"));
+        let user = IntegrationViewDto::User(UserIntegrationDto {
+            id: IntegrationInstanceId(uuid::Uuid::nil()),
+            definition_id: IntegrationDefinitionId("gmail".into()),
+            display_name: "Mail".into(),
+            description: "Mail".into(),
+            category: IntegrationCategory::Communication,
+            status: "ready".into(),
+            enabled: true,
+            capabilities: Vec::new(),
+        });
+        let value = serde_json::to_value(user).unwrap();
+        assert_eq!(value["kind"], "user");
+        assert!(value["data"].get("setup_schema").is_none());
+    }
+
+    #[test]
+    fn integration_event_revisions_are_monotonic_per_instance() {
+        let id = IntegrationInstanceId(uuid::Uuid::nil());
+        let revisions = Arc::new(Mutex::new(HashMap::new()));
+        let next = |store: &Arc<Mutex<HashMap<IntegrationInstanceId, u64>>>| {
+            let mut store = store.lock().unwrap();
+            let revision = store.entry(id.clone()).or_insert(0);
+            *revision += 1;
+            *revision
+        };
+        assert_eq!(next(&revisions), 1);
+        assert_eq!(next(&revisions), 2);
+    }
+
+    #[test]
+    fn integration_commands_are_registered_without_mcp_types() {
+        let source = include_str!("lib.rs");
+        for name in [
+            "list_available_integrations_cmd",
+            "list_configured_integrations_cmd",
+            "get_integration_cmd",
+            "configure_integration_cmd",
+            "enable_integration_cmd",
+            "disable_integration_cmd",
+            "test_integration_cmd",
+            "remove_integration_cmd",
+            "refresh_integration_status_cmd",
+        ] {
+            assert!(source.contains(name));
+        }
+        let commands = &source[source.find("tauri::generate_handler![").unwrap()..];
+        assert!(!commands.contains("McpIntegrationRuntimeAdapter"));
     }
 }
