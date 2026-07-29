@@ -8,6 +8,7 @@ import { SquarePen, PanelRight } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useConversationStore } from "../../stores/conversationStore";
 import type { PipelineStatus, ApprovalRequest } from "../../lib/types";
 import { useTranslation } from "../../hooks/useTranslation";
 
@@ -23,6 +24,13 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     setPipelineStatus,
     setPendingApproval,
     } = useGatewayStore();
+  const {
+    currentConversationId,
+    createConversation,
+    sendMessage: sendProductMessage,
+    abort: abortConversation,
+    messages: productMessagesByConversation,
+  } = useConversationStore();
 
   const { t } = useTranslation();
 
@@ -31,6 +39,32 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
   // Stable streaming-message ID: all token chunks append to THIS message,
   // eliminating the "last message" race that lost/corrupted tokens.
   const streamingMsgIdRef = useRef<string | null>(null);
+
+  // Product conversations replace the legacy session ID for new chat turns.
+  // The legacy session/event path below stays mounted until its migration is complete.
+  useEffect(() => {
+    if (currentConversationId) return;
+    void createConversation("local").catch((error) => {
+      console.error("Failed to create product conversation:", error);
+    });
+  }, [createConversation, currentConversationId]);
+
+  // MessageList remains shared with the legacy chat UI. Mirror the Product API
+  // conversation into that presentation store while it is being migrated.
+  const productMessages = currentConversationId
+    ? productMessagesByConversation.get(currentConversationId) ?? []
+    : [];
+  useEffect(() => {
+    if (!currentConversationId) return;
+    useGatewayStore.setState({
+      messages: productMessages.map((message) => ({
+        id: message.id,
+        role: message.role === "user" ? "user" : "assistant",
+        content: message.content,
+        timestamp: Date.now(),
+      })),
+    });
+  }, [currentConversationId, productMessages]);
 
   // Fetch gateway status on mount (when connected).
   // gateway_status_cmd returns a bool (running?), not a struct. Pipeline
@@ -357,6 +391,8 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         .filter((m) => !m.isStreaming && (m.role === "user" || m.role === "assistant"))
         .slice(-HISTORY_TURNS)
         .map((m) => ({ role: m.role, content: m.content }));
+      // Retained for the legacy command path while Product API v2 owns sends.
+      void history;
 
       addMessage(userMsg);
 
@@ -365,13 +401,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         // arrives via chat_event events, which populate messages incrementally.
         // Awaiting here blocked the input clear (and the UI) until the agent
         // fully finished responding.
-        invoke<string>("send_message_cmd", {
-          request: {
-            text: messageText,
-            session_id: currentSessionId,
-            history,
-          },
-        }).catch((err) => {
+        sendProductMessage(messageText).catch((err) => {
           console.error("Failed to send message:", err);
           setAgentStatus("error");
         });
@@ -380,14 +410,14 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         setAgentStatus("error");
       }
     },
-    [currentSessionId, addMessage, setAgentStatus]
+    [addMessage, sendProductMessage, setAgentStatus]
   );
 
   // Stop the current generation: tell the backend to emit chat-abort, then
   // reset the UI locally so the user sees an immediate stop. The streaming
   // message is finalized (isStreaming=false) with whatever tokens arrived.
   const handleStop = useCallback(() => {
-    invoke("abort_message_cmd").catch((err) =>
+    abortConversation().catch((err) =>
       console.error("Failed to abort:", err)
     );
     const sid = streamingMsgIdRef.current;
@@ -397,7 +427,7 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     streamingMsgIdRef.current = null;
     runningToolRef.current = null;
     setAgentStatus("idle");
-  }, [updateMessage, setAgentStatus]);
+  }, [abortConversation, updateMessage, setAgentStatus]);
 
   // Listen for backend-initiated abort (e.g. gateway disconnect).
   useEffect(() => {
@@ -419,7 +449,10 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
     setAgentStatus("idle");
     streamingMsgIdRef.current = null;
     runningToolRef.current = null;
-  }, [setAgentStatus]);
+    void createConversation("local").catch((error) => {
+      console.error("Failed to create product conversation:", error);
+    });
+  }, [createConversation, setAgentStatus]);
 
   return (
     <div className="flex h-full flex-col bg-ac-bg">

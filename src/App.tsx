@@ -6,6 +6,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Sidebar, type ViewId } from "./components/layout/Sidebar";
 import { Header } from "./components/layout/Header";
 import { ChatView } from "./components/chat/ChatView";
@@ -23,9 +24,45 @@ import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { OnboardingScreen } from "./components/onboarding/OnboardingScreen";
 import { useGatewayStore } from "./stores/gatewayStore";
+import { useConversationStore } from "./stores/conversationStore";
+import type { ProductEvent } from "./services/productConversation";
 
 
 type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
+
+const PRODUCT_EVENT_TYPES: Record<string, ProductEvent["type"]> = {
+  message_delta: "MessageDelta",
+  message_completed: "MessageCompleted",
+  reasoning: "Reasoning",
+  thinking: "Thinking",
+  tool_started: "ToolStarted",
+  tool_completed: "ToolCompleted",
+  approval_required: "ApprovalRequired",
+  clarification_required: "ClarificationRequired",
+  secret_required: "SecretRequired",
+  privilege_required: "PrivilegeRequired",
+  error: "Error",
+  status_update: "StatusUpdate",
+  progress: "Progress",
+  interaction_expired: "InteractionExpired",
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toProductEvent(payload: unknown, currentConversationId: string | null): ProductEvent | null {
+  if (!isRecord(payload) || typeof payload.type !== "string") return null;
+
+  const type = PRODUCT_EVENT_TYPES[payload.type];
+  const conversationId =
+    typeof payload.conversation_id === "string"
+      ? payload.conversation_id
+      : currentConversationId;
+  if (!type || !conversationId) return null;
+
+  return { ...payload, type, conversation_id: conversationId };
+}
 
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
@@ -59,6 +96,40 @@ export function App() {
     pendingApproval,
     setPendingApproval,
   } = useGatewayStore();
+  const respondApproval = useConversationStore((state) => state.respondApproval);
+
+  // Product events are normalized once at the Tauri boundary, then become the
+  // single source of truth for product conversation state across all views.
+  useEffect(() => {
+    const unlisten = listen<unknown>("product-event", ({ payload }) => {
+      const productEvent = toProductEvent(
+        payload,
+        useConversationStore.getState().currentConversationId,
+      );
+      if (!productEvent) return;
+
+      useConversationStore.getState().handleProductEvent(productEvent);
+
+      if (productEvent.type === "ApprovalRequired") {
+        const requestId = typeof productEvent.request_id === "string"
+          ? productEvent.request_id
+          : `req-${Date.now()}`;
+        const toolName = typeof productEvent.tool_id === "string" ? productEvent.tool_id : "tool";
+        const action = typeof productEvent.message === "string" ? productEvent.message : "";
+        useGatewayStore.getState().setPendingApproval({
+          requestId,
+          toolName,
+          toolInput: action,
+          action,
+          commandClass: "write",
+        });
+      }
+    });
+
+    return () => {
+      void unlisten.then((dispose) => dispose());
+    };
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -231,23 +302,14 @@ export function App() {
       if (!approval) return;
 
       try {
-        await invoke("send_message_cmd", {
-          request: {
-            text: JSON.stringify({
-              type: "approval_decision",
-              request_id: approval.requestId,
-              decision,
-            }),
-            session_id: null,
-            history: null,
-          },
-        });
+        const choice = decision === "approved" ? "once" : decision === "denied" ? "deny" : "always";
+        await respondApproval(approval.requestId, choice, decision === "approved_always");
       } catch (err) {
         console.error("Failed to send approval decision:", err);
       }
       setPendingApproval(null);
     },
-    [setPendingApproval]
+    [respondApproval, setPendingApproval]
   );
 
   // ── Screen router ────────────────────────────────────────────────────────
