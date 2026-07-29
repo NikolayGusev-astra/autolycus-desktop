@@ -371,14 +371,17 @@ impl IntegrationService {
     ) {
         // Ports intentionally never reveal secret values; restoration can preserve
         // presence only.  Rollback errors are intentionally ignored.
-        if previous.is_none() {
-            let _ = self.runtime.stop(id).await;
-            let _ = self.secrets.delete_instance_secrets(id).await;
-            let _ = self.instances.delete(id).await;
-        } else {
-            let _ = self.instances.save(previous.expect("checked")).await;
-            if old_secrets.values().all(|present| !present) {
+        match previous {
+            None => {
+                let _ = self.runtime.stop(id).await;
                 let _ = self.secrets.delete_instance_secrets(id).await;
+                let _ = self.instances.delete(id).await;
+            }
+            Some(previous) => {
+                let _ = self.instances.save(previous).await;
+                if old_secrets.values().all(|present| !present) {
+                    let _ = self.secrets.delete_instance_secrets(id).await;
+                }
             }
         }
     }
@@ -717,6 +720,14 @@ impl IntegrationRuntimePort for FakeRuntimePort {
 mod tests {
     use super::*;
 
+    type ServiceFixture = (
+        IntegrationService,
+        Arc<FakeInstanceRepository>,
+        Arc<FakeSecretStore>,
+        Arc<FakeRuntimePort>,
+        Arc<Mutex<Vec<String>>>,
+    );
+
     fn request(name: &str) -> ConfigureIntegrationRequest {
         ConfigureIntegrationRequest {
             definition_id: IntegrationDefinitionId("gmail".into()),
@@ -735,13 +746,7 @@ mod tests {
             enabled_capabilities: vec![CapabilityId("email.read".into())],
         }
     }
-    fn service() -> (
-        IntegrationService,
-        Arc<FakeInstanceRepository>,
-        Arc<FakeSecretStore>,
-        Arc<FakeRuntimePort>,
-        Arc<Mutex<Vec<String>>>,
-    ) {
+    fn service() -> ServiceFixture {
         let events = Arc::new(Mutex::new(Vec::new()));
         let instances = Arc::new(FakeInstanceRepository::with_events(events.clone()));
         let secrets = Arc::new(FakeSecretStore::with_events(events.clone()));
