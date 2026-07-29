@@ -72,12 +72,20 @@ function InteractionDialog({
   title,
   onSubmit,
   onClose,
+  queuePosition,
+  queueSize,
+  onPrevious,
+  onNext,
 }: {
   interaction: PendingInteraction;
   inputType: "text" | "password";
   title: string;
   onSubmit: (value: string) => void;
   onClose: () => void;
+  queuePosition: number;
+  queueSize: number;
+  onPrevious: () => void;
+  onNext: () => void;
 }) {
   const [value, setValue] = useState("");
   const message = typeof interaction.payload.message === "string" ? interaction.payload.message : "";
@@ -89,7 +97,16 @@ function InteractionDialog({
         className="w-full max-w-md rounded-lg border border-ac-border bg-ac-bg p-4 shadow-xl"
         onSubmit={(event) => { event.preventDefault(); onSubmit(value); }}
       >
-        <h2 className="mb-2 text-sm font-semibold text-ac-ink">{title}</h2>
+        <div className="mb-2 flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-ac-ink">{title}</h2>
+          {queueSize > 1 && (
+            <div className="ml-auto flex items-center gap-1 text-xs text-ac-muted">
+              <button type="button" onClick={onPrevious} className="px-1 hover:text-ac-ink" aria-label="Previous interaction">Previous</button>
+              <span>{queuePosition + 1} of {queueSize}</span>
+              <button type="button" onClick={onNext} className="px-1 hover:text-ac-ink" aria-label="Next interaction">Next</button>
+            </div>
+          )}
+        </div>
         {message && <p className="mb-3 text-sm text-ac-muted">{message}</p>}
         {prompt && <p className="mb-3 whitespace-pre-wrap text-sm text-ac-ink">{prompt}</p>}
         {envVar && <p className="mb-3 text-xs text-ac-muted">Environment variable: <code>{envVar}</code></p>}
@@ -129,6 +146,7 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
   const [expiredInteraction, setExpiredInteraction] = useState<string | null>(null);
+  const [interactionIndex, setInteractionIndex] = useState(0);
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
       path: string;
@@ -155,6 +173,7 @@ export function App() {
   const respondSudo = useConversationStore((state) => state.respondSudo);
   const pendingInteractions = useConversationStore((state) => state.pendingInteractions);
   const removePendingInteraction = useConversationStore((state) => state.removePendingInteraction);
+  const cancelInteraction = useConversationStore((state) => state.cancelInteraction);
 
   // Product events are normalized once at the Tauri boundary, then become the
   // single source of truth for product conversation state across all views.
@@ -367,7 +386,8 @@ export function App() {
     }
   }, [removePendingInteraction, respondClarification, respondSecret, respondSudo]);
 
-  const pendingInteraction = Array.from(pendingInteractions.values())[0] ?? null;
+  const queuedInteractions = Array.from(pendingInteractions.values());
+  const pendingInteraction = queuedInteractions[Math.min(interactionIndex, queuedInteractions.length - 1)] ?? null;
   const approvalInteraction = pendingInteraction?.kind === "approval" ? pendingInteraction : null;
   const approvalRequest: ApprovalRequest | null = approvalInteraction ? {
     requestId: approvalInteraction.requestId,
@@ -425,13 +445,6 @@ export function App() {
             <div className="flex flex-1 min-w-0">
               <div className="flex-1 flex flex-col overflow-hidden">
                 <ChatView historyOpen={historyOpen} onToggleHistory={() => setHistoryOpen((v) => !v)} />
-                {approvalInteraction && approvalRequest && (
-                  <ApprovalCard
-                    request={approvalRequest}
-                    choices={approvalInteraction.choices}
-                    onChoose={(choice) => { void handleApprovalDecision(approvalInteraction, choice); }}
-                  />
-                )}
               </div>
               {historyOpen && <HistoryPanel onClose={() => setHistoryOpen(false)} />}
             </div>
@@ -476,20 +489,52 @@ export function App() {
         <SelfDiagModal onClose={() => setSelfDiagOpen(false)} />
       )}
 
+      {pendingInteraction && (
+        <div className="fixed bottom-4 right-4 z-40 rounded-full bg-ac-brand px-3 py-1.5 text-xs font-medium text-white shadow-lg">
+          {queuedInteractions.length} pending interaction{queuedInteractions.length === 1 ? "" : "s"}
+        </div>
+      )}
+
+      {approvalInteraction && approvalRequest && (
+        <div className="fixed inset-x-0 bottom-0 z-50 border-t border-ac-border bg-ac-bg shadow-xl">
+          {queuedInteractions.length > 1 && (
+            <div className="flex justify-end gap-2 px-4 pt-2 text-xs text-ac-muted">
+              <button onClick={() => setInteractionIndex((index) => (index - 1 + queuedInteractions.length) % queuedInteractions.length)} className="hover:text-ac-ink">Previous</button>
+              <span>{Math.min(interactionIndex, queuedInteractions.length - 1) + 1} of {queuedInteractions.length}</span>
+              <button onClick={() => setInteractionIndex((index) => (index + 1) % queuedInteractions.length)} className="hover:text-ac-ink">Next</button>
+            </div>
+          )}
+          <ApprovalCard
+            request={approvalRequest}
+            choices={approvalInteraction.choices}
+            onChoose={(choice) => { void handleApprovalDecision(approvalInteraction, choice); }}
+          />
+        </div>
+      )}
+
       {pendingInteraction?.kind === "clarification" && (
         <InteractionDialog interaction={pendingInteraction} inputType="text" title="Clarification required"
           onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
-          onClose={() => removePendingInteraction(pendingInteraction.conversationId, pendingInteraction.requestId)} />
+          onClose={() => { void cancelInteraction(pendingInteraction.conversationId, pendingInteraction.requestId, pendingInteraction.kind); }}
+          queuePosition={Math.min(interactionIndex, queuedInteractions.length - 1)} queueSize={queuedInteractions.length}
+          onPrevious={() => setInteractionIndex((index) => (index - 1 + queuedInteractions.length) % queuedInteractions.length)}
+          onNext={() => setInteractionIndex((index) => (index + 1) % queuedInteractions.length)} />
       )}
       {pendingInteraction?.kind === "secret" && (
         <InteractionDialog interaction={pendingInteraction} inputType="password" title="Secret required"
           onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
-          onClose={() => removePendingInteraction(pendingInteraction.conversationId, pendingInteraction.requestId)} />
+          onClose={() => { void cancelInteraction(pendingInteraction.conversationId, pendingInteraction.requestId, pendingInteraction.kind); }}
+          queuePosition={Math.min(interactionIndex, queuedInteractions.length - 1)} queueSize={queuedInteractions.length}
+          onPrevious={() => setInteractionIndex((index) => (index - 1 + queuedInteractions.length) % queuedInteractions.length)}
+          onNext={() => setInteractionIndex((index) => (index + 1) % queuedInteractions.length)} />
       )}
       {pendingInteraction?.kind === "privilege" && (
         <InteractionDialog interaction={pendingInteraction} inputType="password" title="Password required"
           onSubmit={(value) => { void handleTextInteraction(pendingInteraction, value); }}
-          onClose={() => removePendingInteraction(pendingInteraction.conversationId, pendingInteraction.requestId)} />
+          onClose={() => { void cancelInteraction(pendingInteraction.conversationId, pendingInteraction.requestId, pendingInteraction.kind); }}
+          queuePosition={Math.min(interactionIndex, queuedInteractions.length - 1)} queueSize={queuedInteractions.length}
+          onPrevious={() => setInteractionIndex((index) => (index - 1 + queuedInteractions.length) % queuedInteractions.length)}
+          onNext={() => setInteractionIndex((index) => (index + 1) % queuedInteractions.length)} />
       )}
       {expiredInteraction && (
         <button onClick={() => setExpiredInteraction(null)} className="fixed bottom-4 right-4 z-50 rounded bg-ac-surface px-4 py-2 text-sm text-ac-ink shadow-lg">

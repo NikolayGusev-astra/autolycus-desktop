@@ -38,6 +38,7 @@ interface ConversationState {
   setCurrentConversation: (id: string) => void;
   handleProductEvent: (event: ProductEvent) => void;
   removePendingInteraction: (conversationId: string, requestId: string) => void;
+  cancelInteraction: (conversationId: string, requestId: string, kind: InteractionKind) => Promise<void>;
   abort: () => Promise<void>;
   respondApproval: (conversationId: string, requestId: string, choice: string, all: boolean) => Promise<void>;
   respondClarification: (conversationId: string, requestId: string, answer: string) => Promise<void>;
@@ -242,6 +243,11 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
     pendingInteractions.delete(interactionKey(conversationId, requestId));
     return { pendingInteractions };
   }),
+
+  cancelInteraction: async (conversationId, requestId, kind) => {
+    await productConversationService.cancelInteraction(conversationId, requestId, kind);
+    get().removePendingInteraction(conversationId, requestId);
+  },
 
   abort: async () => {
     const conversationId = get().currentConversationId;

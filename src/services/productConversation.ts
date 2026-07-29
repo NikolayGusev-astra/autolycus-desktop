@@ -48,6 +48,14 @@ export const productConversationService = {
     return invoke("abort_conversation_cmd", { conversationId });
   },
 
+  async cancelInteraction(conversationId: string, requestId: string, kind: string): Promise<string> {
+    if (kind === "approval") {
+      return invoke("respond_approval_cmd", { conversationId, requestId, choice: "deny", all: false });
+    }
+
+    return invoke("abort_conversation_cmd", { conversationId });
+  },
+
   async respondApproval(
     conversationId: string,
     requestId: string,
