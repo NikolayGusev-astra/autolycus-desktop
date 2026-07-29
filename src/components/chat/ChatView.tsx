@@ -63,8 +63,9 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         content: message.content,
         timestamp: Date.now(),
       })),
-    });
-  }, [currentConversationId, productMessages]);
+});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+	  }, [currentConversationId, productMessages]);
 
   // Fetch gateway status on mount (when connected).
   // gateway_status_cmd returns a bool (running?), not a struct. Pipeline
