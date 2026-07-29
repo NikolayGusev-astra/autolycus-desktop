@@ -37,6 +37,9 @@ pub enum ChatEvent {
         tool_input: String,
         action: String,
         command_class: String,
+        message: Option<String>,
+        choices: Vec<String>,
+        allow_permanent: bool,
     },
     #[serde(rename = "pipeline_status")]
     PipelineStatus {
@@ -320,12 +323,34 @@ fn parse_gateway_event(value: &Value) -> Option<ChatEvent> {
                 .or_else(|| payload_field(value, "message"))
                 .unwrap_or("");
             let command_class = payload_field(value, "command_class").unwrap_or("write");
+            let message = payload_field(value, "message").map(str::to_string);
+            let choices = value
+                .get("params")
+                .and_then(|params| params.get("payload"))
+                .and_then(|payload| payload.get("choices"))
+                .and_then(|choices| choices.as_array())
+                .map(|choices| {
+                    choices
+                        .iter()
+                        .filter_map(|choice| choice.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let allow_permanent = value
+                .get("params")
+                .and_then(|params| params.get("payload"))
+                .and_then(|payload| payload.get("allow_permanent"))
+                .and_then(|allow_permanent| allow_permanent.as_bool())
+                .unwrap_or(false);
             Some(ChatEvent::ApprovalRequest {
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
                 tool_input: tool_input.to_string(),
                 action: action.to_string(),
                 command_class: command_class.to_string(),
+                message,
+                choices,
+                allow_permanent,
             })
         }
         "session.info" => {

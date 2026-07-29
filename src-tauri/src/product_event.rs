@@ -1,6 +1,29 @@
 use serde::Serialize;
 
-use crate::{ChatEvent, ConversationId};
+use crate::{ApprovalChoice, ChatEvent, ConversationId};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPayload {
+    pub request_id: String,
+    pub tool_id: String,
+    pub message: Option<String>,
+    pub choices: Vec<ApprovalChoice>,
+    pub allow_permanent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClarificationPayload {
+    pub request_id: String,
+    pub message: String,
+    pub choices: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecretPayload {
+    pub request_id: String,
+    pub prompt: Option<String>,
+    pub env_var: Option<String>,
+}
 
 /// Stable event contract consumed by the product layer. Hermes-specific event
 /// details remain in `ChatEvent` and can evolve without leaking into callers.
@@ -31,20 +54,12 @@ pub enum ProductEvent {
         name: String,
         result: String,
     },
-    ApprovalRequired {
-        conversation_id: ConversationId,
+    ApprovalRequired(ApprovalPayload),
+    ClarificationRequired(ClarificationPayload),
+    SecretRequired(SecretPayload),
+    InteractionExpired {
         request_id: String,
-        tool_id: String,
-        message: Option<String>,
-    },
-    ClarificationRequired {
-        conversation_id: ConversationId,
-        request_id: String,
-        message: String,
-    },
-    SecretRequired {
-        conversation_id: ConversationId,
-        request_id: String,
+        kind: String,
     },
     PrivilegeRequired {
         conversation_id: ConversationId,
@@ -100,28 +115,49 @@ pub fn translate_hermes_to_product(
             request_id,
             tool_name,
             tool_input,
+            message,
+            choices,
+            allow_permanent,
             ..
-        } => Some(ProductEvent::ApprovalRequired {
-            conversation_id: conv_id,
+        } => Some(ProductEvent::ApprovalRequired(ApprovalPayload {
             request_id,
             tool_id: tool_name,
-            message: (!tool_input.is_empty()).then_some(tool_input),
-        }),
+            message: message.or_else(|| (!tool_input.is_empty()).then_some(tool_input)),
+            choices: choices
+                .into_iter()
+                .filter_map(|choice| match choice.as_str() {
+                    "once" => Some(ApprovalChoice::Once),
+                    "session" => Some(ApprovalChoice::Session),
+                    "always" => Some(ApprovalChoice::Always),
+                    "deny" => Some(ApprovalChoice::Deny),
+                    _ => None,
+                })
+                .collect(),
+            allow_permanent,
+        })),
         ChatEvent::ClarifyRequest {
             request_id,
             question,
-            ..
-        } => Some(ProductEvent::ClarificationRequired {
-            conversation_id: conv_id,
+            choices,
+        } => Some(ProductEvent::ClarificationRequired(ClarificationPayload {
             request_id,
             message: question,
+            choices,
+        })),
+        ChatEvent::SecretRequest {
+            request_id,
+            prompt,
+            env_var,
+            ..
+        } => Some(ProductEvent::SecretRequired(SecretPayload {
+            request_id,
+            prompt: (!prompt.is_empty()).then_some(prompt),
+            env_var: (!env_var.is_empty()).then_some(env_var),
+        })),
+        ChatEvent::SecretExpire { request_id } => Some(ProductEvent::InteractionExpired {
+            request_id,
+            kind: "secret".into(),
         }),
-        ChatEvent::SecretRequest { request_id, .. } | ChatEvent::SecretExpire { request_id } => {
-            Some(ProductEvent::SecretRequired {
-                conversation_id: conv_id,
-                request_id,
-            })
-        }
         ChatEvent::SudoRequest {
             request_id, reason, ..
         } => Some(ProductEvent::PrivilegeRequired {
@@ -129,10 +165,9 @@ pub fn translate_hermes_to_product(
             request_id,
             message: reason.unwrap_or_default(),
         }),
-        ChatEvent::SudoExpire { request_id } => Some(ProductEvent::PrivilegeRequired {
-            conversation_id: conv_id,
+        ChatEvent::SudoExpire { request_id } => Some(ProductEvent::InteractionExpired {
             request_id,
-            message: "privilege request expired".into(),
+            kind: "sudo".into(),
         }),
         ChatEvent::Error { message } => Some(ProductEvent::Error {
             conversation_id: conv_id,
@@ -185,11 +220,80 @@ mod tests {
                     tool_input: "ls".into(),
                     action: "run".into(),
                     command_class: "read".into(),
+                    message: Some("Approve shell command?".into()),
+                    choices: vec!["once".into(), "always".into(), "deny".into()],
+                    allow_permanent: true,
                 },
                 id
             ),
-            Some(ProductEvent::ApprovalRequired { request_id, tool_id, .. })
-                if request_id == "request-1" && tool_id == "shell"
+            Some(ProductEvent::ApprovalRequired(ApprovalPayload {
+                request_id,
+                tool_id,
+                message,
+                choices,
+                allow_permanent,
+            })) if request_id == "request-1"
+                && tool_id == "shell"
+                && message.as_deref() == Some("Approve shell command?")
+                && choices == vec![ApprovalChoice::Once, ApprovalChoice::Always, ApprovalChoice::Deny]
+                && allow_permanent
+        ));
+    }
+
+    #[test]
+    fn preserves_clarification_secret_and_expiration_payloads() {
+        let id = ConversationId("conversation-1".into());
+
+        assert!(matches!(
+            translate_hermes_to_product(
+                ChatEvent::ClarifyRequest {
+                    request_id: "clarify-1".into(),
+                    question: "Which environment?".into(),
+                    choices: vec!["development".into(), "production".into()],
+                },
+                id.clone(),
+            ),
+            Some(ProductEvent::ClarificationRequired(ClarificationPayload {
+                request_id,
+                message,
+                choices,
+            })) if request_id == "clarify-1"
+                && message == "Which environment?"
+                && choices == vec!["development", "production"]
+        ));
+
+        assert!(matches!(
+            translate_hermes_to_product(
+                ChatEvent::SecretRequest {
+                    request_id: "secret-1".into(),
+                    prompt: "Enter API key".into(),
+                    env_var: "API_KEY".into(),
+                    metadata: None,
+                },
+                id.clone(),
+            ),
+            Some(ProductEvent::SecretRequired(SecretPayload {
+                request_id,
+                prompt,
+                env_var,
+            })) if request_id == "secret-1"
+                && prompt.as_deref() == Some("Enter API key")
+                && env_var.as_deref() == Some("API_KEY")
+        ));
+
+        assert!(matches!(
+            translate_hermes_to_product(ChatEvent::SecretExpire {
+                request_id: "secret-1".into(),
+            }, id.clone()),
+            Some(ProductEvent::InteractionExpired { request_id, kind })
+                if request_id == "secret-1" && kind == "secret"
+        ));
+        assert!(matches!(
+            translate_hermes_to_product(ChatEvent::SudoExpire {
+                request_id: "sudo-1".into(),
+            }, id),
+            Some(ProductEvent::InteractionExpired { request_id, kind })
+                if request_id == "sudo-1" && kind == "sudo"
         ));
     }
 }

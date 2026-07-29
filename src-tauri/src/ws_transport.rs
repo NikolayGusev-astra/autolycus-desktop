@@ -989,6 +989,21 @@ fn translate_gateway_event(routed: &RoutedGatewayEvent) -> Option<ChatEvent> {
                 tool_input: p.tool_input.clone().unwrap_or_default(),
                 action: p.action.clone().unwrap_or_default(),
                 command_class: p.command_class.clone().unwrap_or("write".to_string()),
+                message: p.message.clone(),
+                choices: p
+                    .choices
+                    .iter()
+                    .map(|choice| {
+                        match choice {
+                            hermes_protocol::ApprovalChoice::Once => "once",
+                            hermes_protocol::ApprovalChoice::Session => "session",
+                            hermes_protocol::ApprovalChoice::Always => "always",
+                            hermes_protocol::ApprovalChoice::Deny => "deny",
+                        }
+                        .to_string()
+                    })
+                    .collect(),
+                allow_permanent: p.allow_permanent.unwrap_or(false),
             })
         }
         ParsedGatewayEvent::Known(GatewayEvent::StatusUpdate(p)) => Some(ChatEvent::Status {
