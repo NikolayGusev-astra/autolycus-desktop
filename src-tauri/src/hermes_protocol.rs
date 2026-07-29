@@ -542,13 +542,16 @@ pub struct ToolCompletePayload {
 #[serde(rename_all = "snake_case")]
 pub struct ApprovalRequestPayload {
     pub request_id: String,
+    #[allow(dead_code)]
     pub tool_id: String,
     pub name: String,
+    #[allow(dead_code)]
     pub command: Option<String>,
     pub tool_input: Option<String>,
     pub action: Option<String>,
     pub message: Option<String>,
     pub command_class: Option<String>,
+    #[allow(dead_code)]
     pub smart_denied: Option<bool>,
     pub allow_permanent: Option<bool>,
     #[serde(default)]
