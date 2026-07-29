@@ -1,7 +1,7 @@
 // src/components/chat/ChatView.tsx
 // v0.6.0: pipeline status, approval flow, tool events, context window, gateway status
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { SquarePen, PanelRight } from "lucide-react";
@@ -51,9 +51,11 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
 
   // MessageList remains shared with the legacy chat UI. Mirror the Product API
   // conversation into that presentation store while it is being migrated.
-  const productMessages = currentConversationId
-    ? productMessagesByConversation.get(currentConversationId) ?? []
-    : [];
+  const productMessages = useMemo(() => {
+    return currentConversationId
+      ? productMessagesByConversation.get(currentConversationId) ?? []
+      : [];
+  }, [currentConversationId, productMessagesByConversation]);
   useEffect(() => {
     if (!currentConversationId) return;
     useGatewayStore.setState({
@@ -64,7 +66,6 @@ export function ChatView({ historyOpen, onToggleHistory }: { historyOpen?: boole
         timestamp: Date.now(),
       })),
 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
 	  }, [currentConversationId, productMessages]);
 
   // Fetch gateway status on mount (when connected).
