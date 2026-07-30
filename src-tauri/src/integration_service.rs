@@ -5,13 +5,21 @@ use std::{
     collections::HashMap,
     fmt, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::integration_domain::*;
@@ -720,6 +728,342 @@ impl IntegrationSecretStore for FileSecretStore {
     }
 }
 
+const INTEGRATION_SECRET_SERVICE: &str = "autolycus-integrations";
+const SECRET_INDEX_KEY: &str = "__autolycus_secret_keys";
+const MACHINE_KEY_SALT: &[u8] = b"autolycus-integrations-encrypted-file-store-v1";
+
+/// Minimal keyring boundary. Keeping it separate from `keyring::Entry` lets the
+/// secret store be tested without creating credentials in the user's profile.
+trait CredentialBackend: Send + Sync {
+    fn set(&self, account: &str, value: &str) -> Result<(), String>;
+    fn get(&self, account: &str) -> Result<Option<String>, String>;
+    fn delete(&self, account: &str) -> Result<(), String>;
+}
+
+struct SystemCredentialBackend;
+
+impl CredentialBackend for SystemCredentialBackend {
+    fn set(&self, account: &str, value: &str) -> Result<(), String> {
+        keyring::Entry::new(INTEGRATION_SECRET_SERVICE, account)
+            .map_err(|error| error.to_string())?
+            .set_password(value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn get(&self, account: &str) -> Result<Option<String>, String> {
+        let entry = keyring::Entry::new(INTEGRATION_SECRET_SERVICE, account)
+            .map_err(|error| error.to_string())?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn delete(&self, account: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new(INTEGRATION_SECRET_SERVICE, account)
+            .map_err(|error| error.to_string())?;
+        match entry.delete_password() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+/// Encrypted, machine-bound fallback for hosts without a usable OS keyring.
+/// This is deliberately distinct from the legacy base64 `FileSecretStore`.
+struct EncryptedFileSecretStore {
+    secrets_dir: PathBuf,
+    key: [u8; 32],
+}
+
+impl EncryptedFileSecretStore {
+    fn new(hermes_home: impl AsRef<Path>) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(machine_identifier().as_bytes());
+        digest.update(MACHINE_KEY_SALT);
+        Self {
+            secrets_dir: hermes_home
+                .as_ref()
+                .join("integrations")
+                .join("encrypted-secrets"),
+            key: digest.finalize().into(),
+        }
+    }
+
+    fn key_path(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+    ) -> Result<PathBuf, IntegrationCommandError> {
+        validate_secret_key(key)?;
+        Ok(self
+            .secrets_dir
+            .join(id.to_string())
+            .join(format!("{key}.enc")))
+    }
+
+    fn set(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), IntegrationCommandError> {
+        let path = self.key_path(id, key)?;
+        let parent = path.parent().expect("secret path has a parent");
+        fs::create_dir_all(parent).map_err(FileInstanceRepository::persistence_error)?;
+        let nonce_source = Uuid::new_v4();
+        let nonce_bytes = &nonce_source.as_bytes()[..12];
+        let cipher = Aes256Gcm::new_from_slice(&self.key).expect("AES-256 key length is fixed");
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(nonce_bytes), value.as_bytes())
+            .map_err(|_| IntegrationCommandError::SecretStoreUnavailable)?;
+        let mut stored = nonce_bytes.to_vec();
+        stored.extend(ciphertext);
+        fs::write(path, stored).map_err(FileInstanceRepository::persistence_error)
+    }
+
+    fn has(&self, id: &IntegrationInstanceId, key: &str) -> Result<bool, IntegrationCommandError> {
+        let path = self.key_path(id, key)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        let stored = fs::read(path).map_err(FileInstanceRepository::persistence_error)?;
+        if stored.len() <= 12 {
+            return Err(IntegrationCommandError::SecretStoreUnavailable);
+        }
+        let cipher = Aes256Gcm::new_from_slice(&self.key).expect("AES-256 key length is fixed");
+        cipher
+            .decrypt(Nonce::from_slice(&stored[..12]), &stored[12..])
+            .map_err(|_| IntegrationCommandError::SecretStoreUnavailable)?;
+        Ok(true)
+    }
+
+    fn delete_instance(&self, id: &IntegrationInstanceId) -> Result<(), IntegrationCommandError> {
+        let path = self.secrets_dir.join(id.to_string());
+        if path.exists() {
+            fs::remove_dir_all(path).map_err(FileInstanceRepository::persistence_error)?;
+        }
+        Ok(())
+    }
+}
+
+fn machine_identifier() -> String {
+    #[cfg(windows)]
+    if let Ok(hklm) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey("SOFTWARE\\Microsoft\\Cryptography")
+    {
+        if let Ok(value) = hklm.get_value::<String, _>("MachineGuid") {
+            return value;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(value) = fs::read_to_string("/etc/machine-id") {
+        return value.trim().to_owned();
+    }
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown-machine".into())
+}
+
+fn validate_secret_key(key: &str) -> Result<(), IntegrationCommandError> {
+    if key.is_empty() || Path::new(key).components().count() != 1 {
+        return Err(IntegrationCommandError::Persistence {
+            message: "invalid secret key".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Stores integration secrets in the platform credential manager. When that
+/// service is unavailable (notably headless Linux), it uses AES-256-GCM files
+/// derived from the machine identifier and application salt instead.
+pub struct OsSecretStore {
+    legacy: FileSecretStore,
+    encrypted_fallback: EncryptedFileSecretStore,
+    credentials: Arc<dyn CredentialBackend>,
+    use_fallback: AtomicBool,
+    migration_lock: Mutex<()>,
+}
+
+impl OsSecretStore {
+    pub fn new(hermes_home: impl AsRef<Path>) -> Self {
+        Self::with_backend(hermes_home, Arc::new(SystemCredentialBackend))
+    }
+
+    fn with_backend(
+        hermes_home: impl AsRef<Path>,
+        credentials: Arc<dyn CredentialBackend>,
+    ) -> Self {
+        Self {
+            legacy: FileSecretStore::new(&hermes_home),
+            encrypted_fallback: EncryptedFileSecretStore::new(hermes_home),
+            credentials,
+            use_fallback: AtomicBool::new(false),
+            migration_lock: Mutex::new(()),
+        }
+    }
+
+    fn account(id: &IntegrationInstanceId, key: &str) -> String {
+        format!("{id}:{key}")
+    }
+
+    fn fallback(&self, error: &str) {
+        if !self.use_fallback.swap(true, Ordering::AcqRel) {
+            warn!(
+                error,
+                "OS keyring unavailable; using encrypted integration secret files"
+            );
+        }
+    }
+
+    fn keys(&self, id: &IntegrationInstanceId) -> Result<Vec<String>, String> {
+        match self.credentials.get(&Self::account(id, SECRET_INDEX_KEY))? {
+            Some(value) => serde_json::from_str(&value).map_err(|error| error.to_string()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn store_keyring(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        self.credentials.set(&Self::account(id, key), value)?;
+        let mut keys = self.keys(id)?;
+        if !keys.iter().any(|item| item == key) {
+            keys.push(key.to_owned());
+            self.credentials.set(
+                &Self::account(id, SECRET_INDEX_KEY),
+                &serde_json::to_string(&keys).expect("secret keys serialize"),
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn migrate_legacy(&self, id: &IntegrationInstanceId) {
+        let _guard = self.migration_lock.lock().await;
+        let directory = self.legacy.secrets_dir.join(id.to_string());
+        let Ok(entries) = fs::read_dir(&directory) else {
+            return;
+        };
+        let mut migrated = 0usize;
+        let mut failures = 0usize;
+        for entry in entries.flatten() {
+            let Some(key) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let result = fs::read_to_string(entry.path())
+                .map_err(|error| error.to_string())
+                .and_then(|encoded| BASE64.decode(encoded).map_err(|error| error.to_string()))
+                .and_then(|value| String::from_utf8(value).map_err(|error| error.to_string()))
+                .and_then(|value| {
+                    if self.use_fallback.load(Ordering::Acquire) {
+                        self.encrypted_fallback
+                            .set(id, &key, &value)
+                            .map_err(|error| format!("{error:?}"))
+                    } else {
+                        self.store_keyring(id, &key, &value).or_else(|error| {
+                            self.fallback(&error);
+                            self.encrypted_fallback
+                                .set(id, &key, &value)
+                                .map_err(|fallback| format!("{fallback:?}"))
+                        })
+                    }
+                });
+            match result {
+                Ok(()) => {
+                    if fs::remove_file(entry.path()).is_ok() {
+                        migrated += 1
+                    } else {
+                        failures += 1
+                    }
+                }
+                Err(_) => failures += 1,
+            }
+        }
+        if migrated > 0 || failures > 0 {
+            info!(%id, migrated, failures, "migrated legacy integration secrets");
+        }
+        if fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none()) {
+            let _ = fs::remove_dir(&directory);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl IntegrationSecretStore for OsSecretStore {
+    async fn set_secret(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), IntegrationCommandError> {
+        validate_secret_key(key)?;
+        self.migrate_legacy(id).await;
+        if self.use_fallback.load(Ordering::Acquire) {
+            return self.encrypted_fallback.set(id, key, value);
+        }
+        if let Err(error) = self.store_keyring(id, key, value) {
+            self.fallback(&error);
+            self.encrypted_fallback.set(id, key, value)?;
+        }
+        Ok(())
+    }
+
+    async fn has_secret(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+    ) -> Result<bool, IntegrationCommandError> {
+        validate_secret_key(key)?;
+        self.migrate_legacy(id).await;
+        if self.use_fallback.load(Ordering::Acquire) {
+            return self.encrypted_fallback.has(id, key);
+        }
+        match self.credentials.get(&Self::account(id, key)) {
+            Ok(value) => Ok(value.is_some()),
+            Err(error) => {
+                self.fallback(&error);
+                self.encrypted_fallback.has(id, key)
+            }
+        }
+    }
+
+    async fn delete_instance_secrets(
+        &self,
+        id: &IntegrationInstanceId,
+    ) -> Result<(), IntegrationCommandError> {
+        self.migrate_legacy(id).await;
+        if self.use_fallback.load(Ordering::Acquire) {
+            return self.encrypted_fallback.delete_instance(id);
+        }
+        match self.keys(id) {
+            Ok(keys) => {
+                for key in keys {
+                    if let Err(error) = self.credentials.delete(&Self::account(id, &key)) {
+                        self.fallback(&error);
+                        return self.encrypted_fallback.delete_instance(id);
+                    }
+                }
+                if let Err(error) = self
+                    .credentials
+                    .delete(&Self::account(id, SECRET_INDEX_KEY))
+                {
+                    self.fallback(&error);
+                    return self.encrypted_fallback.delete_instance(id);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.fallback(&error);
+                self.encrypted_fallback.delete_instance(id)
+            }
+        }
+    }
+}
+
 /// In-memory ports for service tests and consumers that need a deterministic fake.
 /// `events` records only operation names and ids; it never records secret values.
 #[derive(Default)]
@@ -1296,6 +1640,72 @@ mod tests {
         assert_ne!(stored, "top-secret");
         store.delete_instance_secrets(&id).await.unwrap();
         assert!(!store.has_secret(&id, "token").await.unwrap());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[derive(Default)]
+    struct MockCredentialBackend {
+        values: std::sync::Mutex<HashMap<String, String>>,
+    }
+
+    impl CredentialBackend for MockCredentialBackend {
+        fn set(&self, account: &str, value: &str) -> Result<(), String> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(account.into(), value.into());
+            Ok(())
+        }
+
+        fn get(&self, account: &str) -> Result<Option<String>, String> {
+            Ok(self.values.lock().unwrap().get(account).cloned())
+        }
+
+        fn delete(&self, account: &str) -> Result<(), String> {
+            self.values.lock().unwrap().remove(account);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn os_secret_store_round_trips_and_deletes_mocked_keyring_secrets() {
+        let home = persistence_test_dir();
+        let store = OsSecretStore::with_backend(&home, Arc::new(MockCredentialBackend::default()));
+        let id = IntegrationInstanceId(Uuid::new_v4());
+        store.set_secret(&id, "token", "top-secret").await.unwrap();
+        assert!(store.has_secret(&id, "token").await.unwrap());
+        store.delete_instance_secrets(&id).await.unwrap();
+        assert!(!store.has_secret(&id, "token").await.unwrap());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn os_secret_store_reports_missing_mocked_keyring_secret() {
+        let home = persistence_test_dir();
+        let store = OsSecretStore::with_backend(&home, Arc::new(MockCredentialBackend::default()));
+        assert!(!store
+            .has_secret(&IntegrationInstanceId(Uuid::new_v4()), "token")
+            .await
+            .unwrap());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn os_secret_store_migrates_base64_files_to_mocked_keyring() {
+        let home = persistence_test_dir();
+        let legacy = FileSecretStore::new(&home);
+        let id = IntegrationInstanceId(Uuid::new_v4());
+        legacy.set_secret(&id, "token", "old-secret").await.unwrap();
+        let legacy_path = home
+            .join("integrations/secrets")
+            .join(id.to_string())
+            .join("token");
+        let store = OsSecretStore::with_backend(&home, Arc::new(MockCredentialBackend::default()));
+        assert!(store.has_secret(&id, "token").await.unwrap());
+        assert!(
+            !legacy_path.exists(),
+            "legacy secret should be removed after migration"
+        );
         fs::remove_dir_all(home).unwrap();
     }
 

@@ -47,6 +47,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 keyring = "2"
+aes-gcm = "0.10"
 regex = "1"
 arc-swap = "1"
 sha2 = "0.10"
@@ -59,3 +60,6 @@ url = "2"
 # Vendored build compiles OpenSSL from source (adds ~2 min to build time).
 [target.'cfg(target_os = "macos")'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

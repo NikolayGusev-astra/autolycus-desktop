@@ -4143,7 +4143,7 @@ pub fn run() {
             let instances: Arc<dyn IntegrationInstanceRepository> =
                 Arc::new(FileInstanceRepository::new(&hermes_home));
             let secrets: Arc<dyn IntegrationSecretStore> =
-                Arc::new(FileSecretStore::new(&hermes_home));
+                Arc::new(OsSecretStore::new(&hermes_home));
             let runtime: Arc<dyn IntegrationRuntimePort> =
                 Arc::new(McpIntegrationRuntimeAdapter::new(
                     Arc::clone(&catalog),
