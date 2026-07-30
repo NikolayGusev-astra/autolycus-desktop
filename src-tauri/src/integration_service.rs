@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::capability_router::{CapabilityIntegrationSource, CapabilityRoutingError};
 use crate::integration_domain::*;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -529,6 +530,15 @@ impl IntegrationService {
         result: &'static str,
     ) {
         info!(%definition_id, %instance_id, operation, result, "integration operation");
+    }
+}
+
+#[async_trait::async_trait]
+impl CapabilityIntegrationSource for IntegrationService {
+    async fn list_instances(&self) -> Result<Vec<IntegrationInstance>, CapabilityRoutingError> {
+        self.list_configured_integrations()
+            .await
+            .map_err(|_| CapabilityRoutingError::InstanceUnavailable)
     }
 }
 

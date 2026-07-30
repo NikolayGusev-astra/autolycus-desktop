@@ -4,6 +4,7 @@
 
 mod auth;
 mod briefing;
+mod capability_router;
 mod chat;
 mod config;
 mod config_health;
@@ -59,6 +60,7 @@ use tauri::{AppHandle, Emitter, State};
 
 // ── Re-exports ───────────────────────────────────────────────────────────
 
+pub use capability_router::*;
 pub use chat::{send_message, ChatEvent, ConnectionMode, SendMessageRequest};
 pub use config::{ConnectionConfig, PublicConnectionConfig, SshConfig};
 pub use conversation_service::*;
@@ -116,6 +118,96 @@ pub struct IntegrationAppState {
     pub service: Arc<IntegrationService>,
     pub actor_resolver: Arc<dyn IntegrationActorResolver>,
     pub event_revisions: Arc<Mutex<HashMap<IntegrationInstanceId, u64>>>,
+}
+
+/// IPC state for product capability routing. It contains product abstractions
+/// only; provider processes remain behind the integration runtime.
+pub struct CapabilityRouterAppState {
+    pub router: Arc<CapabilityRouter>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ResolveCapabilityRouteRequest {
+    pub conversation_id: ConversationId,
+    pub capability_id: CapabilityId,
+    pub input: CapabilityInvocationInput,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct SubmitCapabilityRouteChoiceRequest {
+    pub conversation_id: ConversationId,
+    pub capability_id: CapabilityId,
+    pub instance_id: IntegrationInstanceId,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ClearCapabilityRoutePreferenceRequest {
+    pub conversation_id: ConversationId,
+    pub capability_id: CapabilityId,
+}
+
+fn capability_routing_error(error: CapabilityRoutingError) -> String {
+    match error {
+        CapabilityRoutingError::UnknownCapability => "unknown_capability",
+        CapabilityRoutingError::InvalidInput => "invalid_input",
+        CapabilityRoutingError::InstanceUnavailable => "instance_unavailable",
+        CapabilityRoutingError::StaleRoute => "stale_route",
+        CapabilityRoutingError::InvocationFailed => "invocation_failed",
+    }
+    .into()
+}
+
+#[tauri::command]
+async fn list_assistant_capabilities_cmd(
+    state: State<'_, CapabilityRouterAppState>,
+) -> Result<Vec<AssistantCapabilityDefinition>, String> {
+    Ok(state.router.list_capabilities().await)
+}
+
+#[tauri::command]
+async fn resolve_capability_route_cmd(
+    router: State<'_, CapabilityRouterAppState>,
+    integrations: State<'_, IntegrationAppState>,
+    request: ResolveCapabilityRouteRequest,
+) -> Result<CapabilityRoutingOutcome, String> {
+    router
+        .router
+        .resolve(
+            &request.conversation_id,
+            &request.capability_id,
+            &request.input,
+            integrations.actor_resolver.resolve_actor().is_admin,
+        )
+        .await
+        .map_err(capability_routing_error)
+}
+
+#[tauri::command]
+async fn submit_capability_route_choice_cmd(
+    state: State<'_, CapabilityRouterAppState>,
+    request: SubmitCapabilityRouteChoiceRequest,
+) -> Result<(), String> {
+    state
+        .router
+        .submit_choice(
+            request.conversation_id,
+            request.capability_id,
+            request.instance_id,
+        )
+        .await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_capability_route_preference_cmd(
+    state: State<'_, CapabilityRouterAppState>,
+    request: ClearCapabilityRoutePreferenceRequest,
+) -> Result<(), String> {
+    state
+        .router
+        .clear_preference(&request.conversation_id, &request.capability_id)
+        .await;
+    Ok(())
 }
 
 pub trait IntegrationActorResolver: Send + Sync {
@@ -4149,12 +4241,21 @@ pub fn run() {
                     Arc::clone(&catalog),
                     Arc::new(mcp_client::McpClientPool::new()),
                 ));
+            let integration_service = Arc::new(IntegrationService::new(
+                catalog, instances, secrets, runtime,
+            ));
             app.manage(IntegrationAppState {
-                service: Arc::new(IntegrationService::new(
-                    catalog, instances, secrets, runtime,
-                )),
+                service: Arc::clone(&integration_service),
                 actor_resolver: Arc::new(DesktopActorResolver),
                 event_revisions: Arc::new(Mutex::new(HashMap::new())),
+            });
+            app.manage(CapabilityRouterAppState {
+                router: Arc::new(CapabilityRouter::new(
+                    Arc::new(StaticCapabilityRegistry),
+                    integration_service as Arc<dyn CapabilityIntegrationSource>,
+                    Arc::new(CapabilityRoutingPreference::default()),
+                    Arc::new(DefaultRoutingPolicy),
+                )),
             });
             // ── Tray icon (best-effort) ───────────────────────────────
             // On some Linux DEs (notably Astra Linux / older libayatana-
@@ -4269,6 +4370,11 @@ pub fn run() {
             test_integration_cmd,
             remove_integration_cmd,
             refresh_integration_status_cmd,
+            // Assistant capabilities (Phase 5)
+            list_assistant_capabilities_cmd,
+            resolve_capability_route_cmd,
+            submit_capability_route_choice_cmd,
+            clear_capability_route_preference_cmd,
             // App
             init_app,
             detect_instances,

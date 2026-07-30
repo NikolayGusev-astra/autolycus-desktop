@@ -14,6 +14,17 @@ use crate::ws_transport::{
 };
 use crate::{RuntimeError, RuntimeState, RuntimeSupervisor, SessionRegistry};
 
+/// Product intent selected before a message reaches a capability provider.
+/// The conversation layer deliberately carries no provider-specific concepts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssistantIntent {
+    RespondNormally,
+    InvokeCapability {
+        capability_id: crate::CapabilityId,
+        input: crate::CapabilityInvocationInput,
+    },
+}
+
 /// Product API for creating and using conversations. Session IDs remain an
 /// infrastructure concern and are resolved through `SessionRegistry`.
 #[derive(Clone)]

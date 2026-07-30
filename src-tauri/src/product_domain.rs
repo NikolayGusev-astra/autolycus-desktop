@@ -11,7 +11,7 @@ use crate::{ConversationService, ProductEvent, RuntimeSupervisor, SessionRegistr
 
 /// Stable identity exposed by the product API. It is intentionally separate
 /// from the transport registry's conversation key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct ConversationId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
