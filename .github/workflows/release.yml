@@ -193,9 +193,26 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
           find artifacts -type d -name "*.app" -exec zip -r {}.zip {} \; -exec mv {}.zip release-assets/ \;
           ls -la release-assets/
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          shopt -s nullglob
+          assets=(release-assets/*)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release assets were produced."
+            exit 1
+          fi
+          printf 'Release assets:\n%s\n' "${assets[@]}"
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum -- * > SHA256SUMS
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
