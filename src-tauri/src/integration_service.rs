@@ -1370,7 +1370,8 @@ mod tests {
     }
 
     fn persistence_test_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("steersman-integration-test-{}", Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("steersman-integration-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
