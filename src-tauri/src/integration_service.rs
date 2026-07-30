@@ -744,7 +744,8 @@ const MACHINE_KEY_SALT: &[u8] = b"autolycus-integrations-encrypted-file-store-v1
 
 /// Minimal keyring boundary. Keeping it separate from `keyring::Entry` lets the
 /// secret store be tested without creating credentials in the user's profile.
-trait CredentialBackend: Send + Sync {
+/// Platform credential manager boundary for deterministic acceptance tests.
+pub trait CredentialBackend: Send + Sync {
     fn set(&self, account: &str, value: &str) -> Result<(), String>;
     fn get(&self, account: &str) -> Result<Option<String>, String>;
     fn delete(&self, account: &str) -> Result<(), String>;
@@ -898,10 +899,10 @@ pub struct OsSecretStore {
 
 impl OsSecretStore {
     pub fn new(hermes_home: impl AsRef<Path>) -> Self {
-        Self::with_backend(hermes_home, Arc::new(SystemCredentialBackend))
+        Self::with_credential_backend(hermes_home, Arc::new(SystemCredentialBackend))
     }
 
-    fn with_backend(
+    pub fn with_credential_backend(
         hermes_home: impl AsRef<Path>,
         credentials: Arc<dyn CredentialBackend>,
     ) -> Self {
@@ -1683,7 +1684,10 @@ mod tests {
     #[tokio::test]
     async fn os_secret_store_round_trips_and_deletes_mocked_keyring_secrets() {
         let home = persistence_test_dir();
-        let store = OsSecretStore::with_backend(&home, Arc::new(MockCredentialBackend::default()));
+        let store = OsSecretStore::with_credential_backend(
+            &home,
+            Arc::new(MockCredentialBackend::default()),
+        );
         let id = IntegrationInstanceId(Uuid::new_v4());
         store.set_secret(&id, "token", "top-secret").await.unwrap();
         assert!(store.has_secret(&id, "token").await.unwrap());
@@ -1695,7 +1699,10 @@ mod tests {
     #[tokio::test]
     async fn os_secret_store_reports_missing_mocked_keyring_secret() {
         let home = persistence_test_dir();
-        let store = OsSecretStore::with_backend(&home, Arc::new(MockCredentialBackend::default()));
+        let store = OsSecretStore::with_credential_backend(
+            &home,
+            Arc::new(MockCredentialBackend::default()),
+        );
         assert!(!store
             .has_secret(&IntegrationInstanceId(Uuid::new_v4()), "token")
             .await
@@ -1713,7 +1720,10 @@ mod tests {
             .join("integrations/secrets")
             .join(id.to_string())
             .join("token");
-        let store = OsSecretStore::with_backend(&home, Arc::new(MockCredentialBackend::default()));
+        let store = OsSecretStore::with_credential_backend(
+            &home,
+            Arc::new(MockCredentialBackend::default()),
+        );
         assert!(store.has_secret(&id, "token").await.unwrap());
         assert!(
             !legacy_path.exists(),

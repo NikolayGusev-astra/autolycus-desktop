@@ -62,6 +62,27 @@ jobs:
       - name: Cargo test (strict)
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 
+      - name: Cargo test (all targets)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Reject TODO, FIXME, and HACK comments
+        run: |
+          ! rg -n "TODO|FIXME|HACK" src-tauri/src src --glob '*.{rs,ts,tsx}'
+
+      - name: Reject new unwrap calls in production Rust
+        env:
+          RATCHET_TARGET: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          base="${RATCHET_TARGET:-origin/main}"
+          ! git diff --unified=0 "$base"...HEAD -- src-tauri/src | rg '^\+.*\.unwrap\('
+
+      - name: Reject raw Tauri invokes in new components
+        env:
+          RATCHET_TARGET: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          base="${RATCHET_TARGET:-origin/main}"
+          ! git diff --unified=0 "$base"...HEAD -- src/components | rg '^\+.*\binvoke\('
+
       - name: Clippy report
         run: mkdir -p .artifacts && npm run clippy:report
 

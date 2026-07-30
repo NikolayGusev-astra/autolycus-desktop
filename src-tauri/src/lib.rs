@@ -43,6 +43,7 @@ mod sources;
 mod ssh;
 mod stt;
 mod telegram;
+pub mod telemetry;
 mod terminal;
 mod validation;
 mod ws_transport;
@@ -74,13 +75,14 @@ pub use product_domain::*;
 pub use product_event::*;
 pub use profiles::ProfileInfo;
 pub use runtime_supervisor::{LocalRuntimeSpec, RuntimeError, RuntimeState, RuntimeSupervisor};
+pub use session_registry::RuntimeKey;
 pub use session_registry::SessionRegistry;
 pub use sessions::FeedItem;
 pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
 pub use ws_transport::{
     build_ws_url, ensure_ws_connection, redacted_ws_url, submit_prompt_on_connection, to_ws_url,
-    EndpointIdentity, GatewayAuth, HealthStatus, WsState,
+    EmitFn, EndpointIdentity, EndpointSnapshot, GatewayAuth, HealthStatus, WsState,
 };
 
 // ── App State ─────────────────────────────────────────────────────────────
@@ -4223,6 +4225,7 @@ pub fn run() {
         )
         .with_writer(std::io::stderr)
         .try_init();
+    telemetry::initialize(telemetry::TelemetryConfig::from_environment());
 
     tauri::Builder::default()
         // Single-instance: a second launch focuses the existing window instead
