@@ -223,6 +223,8 @@ fn integration_error(error: IntegrationCommandError) -> String {
         IntegrationCommandError::RuntimeUnavailable => "runtime_unavailable",
         IntegrationCommandError::HealthCheckFailed => "health_check_failed",
         IntegrationCommandError::SecretStoreUnavailable => "secret_store_unavailable",
+        IntegrationCommandError::Persistence { .. } => "persistence_error",
+        IntegrationCommandError::UnsupportedSchemaVersion { .. } => "unsupported_schema_version",
         IntegrationCommandError::Internal { .. } => "internal_error",
     }
     .into()
@@ -321,6 +323,17 @@ async fn list_configured_integrations_cmd(
         );
     }
     Ok(views)
+}
+
+#[tauri::command]
+async fn recover_instances_cmd(
+    state: State<'_, IntegrationAppState>,
+) -> Result<IntegrationRecoveryReport, String> {
+    state
+        .service
+        .recover_instances()
+        .await
+        .map_err(integration_error)
 }
 
 #[tauri::command]
@@ -1450,6 +1463,7 @@ async fn test_connection(
 #[tauri::command]
 async fn start_gateway_cmd(
     state: State<'_, AppState>,
+    integrations: State<'_, IntegrationAppState>,
     profile: Option<String>,
 ) -> Result<GatewayStartResult, String> {
     let hermes_home = state.hermes_home()?;
@@ -1475,6 +1489,12 @@ async fn start_gateway_cmd(
         .start(endpoint, std::sync::Arc::new(|_| {}))
         .await
         .map_err(|error| error.to_string())?;
+    let service = Arc::clone(&integrations.service);
+    tokio::spawn(async move {
+        if let Err(error) = service.recover_instances().await {
+            tracing::warn!(?error, "integration startup recovery failed");
+        }
+    });
     Ok(result)
 }
 
@@ -4119,9 +4139,11 @@ pub fn run() {
             app.manage(AppState::new(app.handle().clone()));
             let catalog: Arc<dyn IntegrationCatalogRepository> =
                 Arc::new(FakeCatalogRepository::new());
+            let hermes_home = config::resolve_hermes_home();
             let instances: Arc<dyn IntegrationInstanceRepository> =
-                Arc::new(InMemoryIntegrationInstanceRepository::new());
-            let secrets: Arc<dyn IntegrationSecretStore> = Arc::new(FakeSecretStore::new());
+                Arc::new(FileInstanceRepository::new(&hermes_home));
+            let secrets: Arc<dyn IntegrationSecretStore> =
+                Arc::new(FileSecretStore::new(&hermes_home));
             let runtime: Arc<dyn IntegrationRuntimePort> =
                 Arc::new(McpIntegrationRuntimeAdapter::new(
                     Arc::clone(&catalog),
@@ -4239,6 +4261,7 @@ pub fn run() {
             // Integrations (Phase 4.4)
             list_available_integrations_cmd,
             list_configured_integrations_cmd,
+            recover_instances_cmd,
             get_integration_cmd,
             configure_integration_cmd,
             enable_integration_cmd,
@@ -4842,6 +4865,7 @@ mod tests {
         for name in [
             "list_available_integrations_cmd",
             "list_configured_integrations_cmd",
+            "recover_instances_cmd",
             "get_integration_cmd",
             "configure_integration_cmd",
             "enable_integration_cmd",
@@ -4852,7 +4876,7 @@ mod tests {
         ] {
             assert!(source.contains(name), "missing command: {}", name);
         }
-        // Verify the invoke_handler block contains all 9 integration commands
+        // Verify the invoke_handler block contains all integration commands
         // and does not contain MCP adapter types.
         let handler_start = source.find("// Integrations (Phase 4.4)").unwrap();
         let handler_end = source[handler_start..].find("// App").unwrap();

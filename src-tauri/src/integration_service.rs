@@ -1,8 +1,14 @@
 //! Application service for integration configuration.  This module deliberately
 //! depends only on the integration domain ports and types.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -60,6 +66,13 @@ pub struct IntegrationService {
     secrets: Arc<dyn IntegrationSecretStore>,
     runtime: Arc<dyn IntegrationRuntimePort>,
     instance_locks: Arc<Mutex<HashMap<IntegrationInstanceId, Arc<Mutex<()>>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct IntegrationRecoveryReport {
+    pub loaded: usize,
+    pub re_enabled: usize,
+    pub failed: usize,
 }
 
 impl IntegrationService {
@@ -153,6 +166,7 @@ impl IntegrationService {
         let secret_presence = self.secret_presence(&definition, &id).await?;
         let now = Utc::now();
         let mut instance = previous.clone().unwrap_or(IntegrationInstance {
+            version: INTEGRATION_INSTANCE_SCHEMA_VERSION,
             id: id.clone(),
             definition_id: definition.id.clone(),
             display_name: request.display_name.clone(),
@@ -293,6 +307,47 @@ impl IntegrationService {
         self.instances.delete(id).await?;
         self.event(&instance.definition_id, id, "remove", "ok");
         Ok(())
+    }
+
+    pub async fn recover_instances(
+        &self,
+    ) -> Result<IntegrationRecoveryReport, IntegrationCommandError> {
+        let instances = self.instances.list().await?;
+        let mut report = IntegrationRecoveryReport {
+            loaded: instances.len(),
+            re_enabled: 0,
+            failed: 0,
+        };
+        for mut instance in instances.into_iter().filter(|item| item.enabled) {
+            let _guard = self.lock(&instance.id).await;
+            // Runtime adapters keep only live process state in memory. Rebuild
+            // that state from the persisted instance before reconnecting it.
+            let startup = self.runtime.configure(&instance).await;
+            let startup = match startup {
+                Ok(()) => self.runtime.start(&instance.id).await,
+                Err(error) => Err(error),
+            };
+            match startup {
+                Ok(()) => {
+                    instance.status = self.health_status(&instance.id).await;
+                    instance.updated_at = Utc::now();
+                    if self.instances.save(instance).await.is_ok() {
+                        report.re_enabled += 1;
+                    } else {
+                        report.failed += 1;
+                    }
+                }
+                Err(_) => {
+                    instance.status = IntegrationStatus::Degraded {
+                        reason: IntegrationIssue::RuntimeUnavailable,
+                    };
+                    instance.updated_at = Utc::now();
+                    let _ = self.instances.save(instance).await;
+                    report.failed += 1;
+                }
+            }
+        }
+        Ok(report)
     }
 
     async fn lock(&self, id: &IntegrationInstanceId) -> tokio::sync::OwnedMutexGuard<()> {
@@ -500,6 +555,169 @@ fn valid_field(field: &SetupField, value: &str) -> bool {
                     regex::Regex::new(pattern).is_ok_and(|expression| expression.is_match(value))
                 })
         })
+}
+
+/// JSON-backed production repository. Each instance is isolated so a damaged
+/// file cannot hide or overwrite another configured integration.
+pub struct FileInstanceRepository {
+    instances_dir: PathBuf,
+}
+
+impl FileInstanceRepository {
+    pub fn new(hermes_home: impl AsRef<Path>) -> Self {
+        Self {
+            instances_dir: hermes_home.as_ref().join("integrations").join("instances"),
+        }
+    }
+
+    fn path_for(&self, id: &IntegrationInstanceId) -> PathBuf {
+        self.instances_dir.join(format!("{id}.json"))
+    }
+
+    fn persistence_error(error: impl fmt::Display) -> IntegrationCommandError {
+        IntegrationCommandError::Persistence {
+            message: error.to_string(),
+        }
+    }
+
+    fn write(&self, instance: &IntegrationInstance) -> Result<(), IntegrationCommandError> {
+        fs::create_dir_all(&self.instances_dir).map_err(Self::persistence_error)?;
+        let json = serde_json::to_vec_pretty(instance).map_err(Self::persistence_error)?;
+        fs::write(self.path_for(&instance.id), json).map_err(Self::persistence_error)
+    }
+
+    fn read(&self, path: &Path) -> Result<IntegrationInstance, IntegrationCommandError> {
+        let contents = fs::read(path).map_err(Self::persistence_error)?;
+        let instance: IntegrationInstance =
+            serde_json::from_slice(&contents).map_err(Self::persistence_error)?;
+        if instance.version != INTEGRATION_INSTANCE_SCHEMA_VERSION {
+            return Err(IntegrationCommandError::UnsupportedSchemaVersion {
+                version: instance.version,
+            });
+        }
+        Ok(instance)
+    }
+}
+
+#[async_trait::async_trait]
+impl IntegrationInstanceRepository for FileInstanceRepository {
+    async fn create(&self, instance: IntegrationInstance) -> Result<(), IntegrationCommandError> {
+        if self.path_for(&instance.id).exists() {
+            return Err(IntegrationCommandError::AlreadyConfigured);
+        }
+        self.write(&instance)
+    }
+
+    async fn get(
+        &self,
+        id: &IntegrationInstanceId,
+    ) -> Result<IntegrationInstance, IntegrationCommandError> {
+        let path = self.path_for(id);
+        if !path.exists() {
+            return Err(IntegrationCommandError::InstanceNotFound);
+        }
+        self.read(&path)
+    }
+
+    async fn list(&self) -> Result<Vec<IntegrationInstance>, IntegrationCommandError> {
+        if !self.instances_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = fs::read_dir(&self.instances_dir).map_err(Self::persistence_error)?;
+        let mut instances = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(Self::persistence_error)?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                instances.push(self.read(&path)?);
+            }
+        }
+        instances.sort_by(|left, right| left.id.to_string().cmp(&right.id.to_string()));
+        Ok(instances)
+    }
+
+    async fn save(&self, instance: IntegrationInstance) -> Result<(), IntegrationCommandError> {
+        self.write(&instance)
+    }
+
+    async fn delete(&self, id: &IntegrationInstanceId) -> Result<(), IntegrationCommandError> {
+        let path = self.path_for(id);
+        if !path.exists() {
+            return Err(IntegrationCommandError::InstanceNotFound);
+        }
+        fs::remove_file(path).map_err(Self::persistence_error)
+    }
+}
+
+/// Base64 is obfuscation, not encryption. It keeps credentials out of normal
+/// text files until the application has a platform key management layer.
+pub struct FileSecretStore {
+    secrets_dir: PathBuf,
+}
+
+impl FileSecretStore {
+    pub fn new(hermes_home: impl AsRef<Path>) -> Self {
+        Self {
+            secrets_dir: hermes_home.as_ref().join("integrations").join("secrets"),
+        }
+    }
+
+    fn key_path(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+    ) -> Result<PathBuf, IntegrationCommandError> {
+        if key.is_empty() || Path::new(key).components().count() != 1 {
+            return Err(IntegrationCommandError::Persistence {
+                message: "invalid secret key".into(),
+            });
+        }
+        Ok(self.secrets_dir.join(id.to_string()).join(key))
+    }
+}
+
+#[async_trait::async_trait]
+impl IntegrationSecretStore for FileSecretStore {
+    async fn set_secret(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), IntegrationCommandError> {
+        let path = self.key_path(id, key)?;
+        let parent = path.parent().expect("secret path has a parent");
+        fs::create_dir_all(parent).map_err(FileInstanceRepository::persistence_error)?;
+        fs::write(path, BASE64.encode(value)).map_err(FileInstanceRepository::persistence_error)
+    }
+
+    async fn has_secret(
+        &self,
+        id: &IntegrationInstanceId,
+        key: &str,
+    ) -> Result<bool, IntegrationCommandError> {
+        let path = self.key_path(id, key)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        let value = fs::read_to_string(path).map_err(FileInstanceRepository::persistence_error)?;
+        BASE64
+            .decode(value)
+            .map_err(FileInstanceRepository::persistence_error)?;
+        Ok(true)
+    }
+
+    async fn delete_instance_secrets(
+        &self,
+        id: &IntegrationInstanceId,
+    ) -> Result<(), IntegrationCommandError> {
+        let path = self.secrets_dir.join(id.to_string());
+        if path.exists() {
+            fs::remove_dir_all(path).map_err(FileInstanceRepository::persistence_error)?;
+        }
+        Ok(())
+    }
 }
 
 /// In-memory ports for service tests and consumers that need a deterministic fake.
@@ -807,6 +1025,25 @@ mod tests {
         IntegrationActor { is_admin: false }
     }
 
+    fn persistence_test_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("steersman-integration-test-{}", Uuid::new_v4()))
+    }
+
+    fn persisted_instance() -> IntegrationInstance {
+        IntegrationInstance {
+            version: INTEGRATION_INSTANCE_SCHEMA_VERSION,
+            id: IntegrationInstanceId(Uuid::new_v4()),
+            definition_id: IntegrationDefinitionId("gmail".into()),
+            display_name: "Persisted Gmail".into(),
+            status: IntegrationStatus::Ready,
+            enabled: true,
+            management: IntegrationManagement::UserManaged,
+            configured_capabilities: vec![CapabilityId("email.read".into())],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
     #[tokio::test]
     async fn list_available_and_unknown_definition() {
         let (service, ..) = service();
@@ -1025,5 +1262,120 @@ mod tests {
                 .unwrap_err(),
             IntegrationCommandError::InstanceNotFound
         );
+    }
+
+    #[tokio::test]
+    async fn file_instance_repository_persists_the_full_lifecycle() {
+        let home = persistence_test_dir();
+        let repository = FileInstanceRepository::new(&home);
+        let mut instance = persisted_instance();
+        repository.create(instance.clone()).await.unwrap();
+        assert_eq!(repository.get(&instance.id).await.unwrap(), instance);
+        assert_eq!(repository.list().await.unwrap(), vec![instance.clone()]);
+        instance.display_name = "Updated Gmail".into();
+        repository.save(instance.clone()).await.unwrap();
+        assert_eq!(repository.get(&instance.id).await.unwrap(), instance);
+        repository.delete(&instance.id).await.unwrap();
+        assert!(repository.list().await.unwrap().is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_secret_store_sets_checks_and_deletes_secrets() {
+        let home = persistence_test_dir();
+        let store = FileSecretStore::new(&home);
+        let id = IntegrationInstanceId(Uuid::new_v4());
+        store.set_secret(&id, "token", "top-secret").await.unwrap();
+        assert!(store.has_secret(&id, "token").await.unwrap());
+        let stored = fs::read_to_string(
+            home.join("integrations/secrets")
+                .join(id.to_string())
+                .join("token"),
+        )
+        .unwrap();
+        assert_ne!(stored, "top-secret");
+        store.delete_instance_secrets(&id).await.unwrap();
+        assert!(!store.has_secret(&id, "token").await.unwrap());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_loads_and_reenables_enabled_instances() {
+        let home = persistence_test_dir();
+        let repository = Arc::new(FileInstanceRepository::new(&home));
+        let instance = persisted_instance();
+        repository.create(instance.clone()).await.unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(FakeRuntimePort::with_events(events.clone()));
+        let service = IntegrationService::new(
+            Arc::new(FakeCatalogRepository::new()),
+            repository.clone(),
+            Arc::new(FileSecretStore::new(&home)),
+            runtime,
+        );
+        let report = service.recover_instances().await.unwrap();
+        assert_eq!(
+            report,
+            IntegrationRecoveryReport {
+                loaded: 1,
+                re_enabled: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(
+            repository.get(&instance.id).await.unwrap().status,
+            IntegrationStatus::Ready
+        );
+        assert!(events
+            .lock()
+            .await
+            .iter()
+            .any(|event| event.starts_with("runtime.start:")));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupted_instance_file_returns_a_typed_persistence_error() {
+        let home = persistence_test_dir();
+        let repository = FileInstanceRepository::new(&home);
+        let dir = home.join("integrations/instances");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("corrupted.json"), b"not json").unwrap();
+        assert!(matches!(
+            repository.list().await,
+            Err(IntegrationCommandError::Persistence { .. })
+        ));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn instance_schema_migrates_missing_version_and_rejects_unknown_versions() {
+        let home = persistence_test_dir();
+        let repository = FileInstanceRepository::new(&home);
+        let instance = persisted_instance();
+        let dir = home.join("integrations/instances");
+        fs::create_dir_all(&dir).unwrap();
+        let mut legacy = serde_json::to_value(&instance).unwrap();
+        legacy.as_object_mut().unwrap().remove("version");
+        fs::write(
+            dir.join(format!("{}.json", instance.id)),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            repository.get(&instance.id).await.unwrap().version,
+            INTEGRATION_INSTANCE_SCHEMA_VERSION
+        );
+        legacy["version"] = serde_json::json!(99);
+        fs::write(
+            dir.join(format!("{}.json", instance.id)),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            repository.get(&instance.id).await.unwrap_err(),
+            IntegrationCommandError::UnsupportedSchemaVersion { version: 99 }
+        );
+        fs::remove_dir_all(home).unwrap();
     }
 }

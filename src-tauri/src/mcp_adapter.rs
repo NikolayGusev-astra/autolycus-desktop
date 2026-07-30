@@ -487,6 +487,7 @@ impl IntegrationRuntimePort for McpIntegrationRuntimeAdapter {
             .cloned()
             .ok_or(IntegrationCommandError::RuntimeUnavailable)?;
         let instance = IntegrationInstance {
+            version: crate::integration_domain::INTEGRATION_INSTANCE_SCHEMA_VERSION,
             id: id.clone(),
             definition_id: cfg.descriptor.definition_id.clone(),
             display_name: String::new(),

@@ -118,8 +118,10 @@ pub struct FieldValidation {
     pub pattern: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationInstance {
+    #[serde(default = "integration_instance_schema_version")]
+    pub version: u32,
     pub id: IntegrationInstanceId,
     pub definition_id: IntegrationDefinitionId,
     pub display_name: String,
@@ -131,7 +133,13 @@ pub struct IntegrationInstance {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub const INTEGRATION_INSTANCE_SCHEMA_VERSION: u32 = 1;
+
+pub const fn integration_instance_schema_version() -> u32 {
+    INTEGRATION_INSTANCE_SCHEMA_VERSION
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationManagement {
     UserManaged,
@@ -139,7 +147,7 @@ pub enum IntegrationManagement {
     SystemManaged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationStatus {
     NotConfigured,
@@ -167,7 +175,7 @@ impl IntegrationStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationIssue {
     AuthenticationRequired,
@@ -239,6 +247,8 @@ pub enum IntegrationCommandError {
     RuntimeUnavailable,
     HealthCheckFailed,
     SecretStoreUnavailable,
+    Persistence { message: String },
+    UnsupportedSchemaVersion { version: u32 },
     Internal { message: String },
 }
 
@@ -476,6 +486,7 @@ mod tests {
 
     fn instance(definition_id: &str) -> IntegrationInstance {
         IntegrationInstance {
+            version: INTEGRATION_INSTANCE_SCHEMA_VERSION,
             id: IntegrationInstanceId(Uuid::new_v4()),
             definition_id: IntegrationDefinitionId(definition_id.into()),
             display_name: "Test".into(),
