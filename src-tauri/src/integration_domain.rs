@@ -317,6 +317,26 @@ pub trait IntegrationRuntimePort: Send + Sync {
         &self,
         instance_id: &IntegrationInstanceId,
     ) -> Result<IntegrationStatus, IntegrationCommandError>;
+    /// Invokes a curated product capability. Implementations must not expose
+    /// provider operation names or credentials outside the integration layer.
+    async fn invoke_capability(
+        &self,
+        instance: &IntegrationInstance,
+        capability: &CapabilityId,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, IntegrationCommandError> {
+        let _ = (instance, capability, input);
+        Err(IntegrationCommandError::RuntimeUnavailable)
+    }
+
+    async fn capability_available(
+        &self,
+        instance: &IntegrationInstance,
+        capability: &CapabilityId,
+    ) -> Result<bool, IntegrationCommandError> {
+        let _ = (instance, capability);
+        Ok(true)
+    }
 }
 
 pub struct StaticIntegrationCatalogRepository;

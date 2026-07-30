@@ -168,9 +168,10 @@ async fn list_assistant_capabilities_cmd(
 async fn resolve_capability_route_cmd(
     router: State<'_, CapabilityRouterAppState>,
     integrations: State<'_, IntegrationAppState>,
+    app: AppHandle,
     request: ResolveCapabilityRouteRequest,
 ) -> Result<CapabilityRoutingOutcome, String> {
-    router
+    let outcome = router
         .router
         .resolve(
             &request.conversation_id,
@@ -179,7 +180,18 @@ async fn resolve_capability_route_cmd(
             integrations.actor_resolver.resolve_actor().is_admin,
         )
         .await
-        .map_err(capability_routing_error)
+        .map_err(capability_routing_error)?;
+    if let CapabilityRoutingOutcome::ClarificationRequired { clarification } = &outcome {
+        let _ = app.emit(
+            "capability-route-clarification",
+            serde_json::json!({
+                "conversation_id": request.conversation_id,
+                "capability_id": request.capability_id,
+                "clarification": clarification,
+            }),
+        );
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -1556,6 +1568,7 @@ async fn test_connection(
 async fn start_gateway_cmd(
     state: State<'_, AppState>,
     integrations: State<'_, IntegrationAppState>,
+    router: State<'_, CapabilityRouterAppState>,
     profile: Option<String>,
 ) -> Result<GatewayStartResult, String> {
     let hermes_home = state.hermes_home()?;
@@ -1582,9 +1595,13 @@ async fn start_gateway_cmd(
         .await
         .map_err(|error| error.to_string())?;
     let service = Arc::clone(&integrations.service);
+    let capability_router = router.router.clone();
     tokio::spawn(async move {
         if let Err(error) = service.recover_instances().await {
             tracing::warn!(?error, "integration startup recovery failed");
+        }
+        if let Err(error) = capability_router.refresh_capability_availability().await {
+            tracing::warn!(?error, "capability availability reconciliation failed");
         }
     });
     Ok(result)
@@ -4242,7 +4259,10 @@ pub fn run() {
                     Arc::new(mcp_client::McpClientPool::new()),
                 ));
             let integration_service = Arc::new(IntegrationService::new(
-                catalog, instances, secrets, runtime,
+                catalog,
+                instances,
+                secrets,
+                Arc::clone(&runtime),
             ));
             app.manage(IntegrationAppState {
                 service: Arc::clone(&integration_service),
@@ -4250,12 +4270,15 @@ pub fn run() {
                 event_revisions: Arc::new(Mutex::new(HashMap::new())),
             });
             app.manage(CapabilityRouterAppState {
-                router: Arc::new(CapabilityRouter::new(
-                    Arc::new(StaticCapabilityRegistry),
-                    integration_service as Arc<dyn CapabilityIntegrationSource>,
-                    Arc::new(CapabilityRoutingPreference::default()),
-                    Arc::new(DefaultRoutingPolicy),
-                )),
+                router: Arc::new(
+                    CapabilityRouter::new(
+                        Arc::new(StaticCapabilityRegistry),
+                        integration_service as Arc<dyn CapabilityIntegrationSource>,
+                        Arc::new(CapabilityRoutingPreference::default()),
+                        Arc::new(DefaultRoutingPolicy),
+                    )
+                    .with_runtime(runtime),
+                ),
             });
             // ── Tray icon (best-effort) ───────────────────────────────
             // On some Linux DEs (notably Astra Linux / older libayatana-

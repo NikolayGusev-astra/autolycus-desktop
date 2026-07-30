@@ -30,6 +30,8 @@ import { useConversationStore } from "./stores/conversationStore";
 import type { ProductEvent } from "./services/productConversation";
 import type { PendingInteraction } from "./stores/conversationStore";
 import type { ApprovalRequest } from "./lib/types";
+import { capabilityRouter, type CapabilityRouteClarificationEvent } from "./services/capabilityRouter";
+import { RouteClarificationDialog } from "./components/capabilities/RouteClarificationDialog";
 
 
 type AppScreen = "splash" | "welcome" | "connection" | "onboarding" | "main";
@@ -53,6 +55,18 @@ const PRODUCT_EVENT_TYPES: Record<string, ProductEvent["type"]> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function toRouteClarificationEvent(value: unknown): CapabilityRouteClarificationEvent | null {
+  if (!isRecord(value) || typeof value.conversation_id !== "string" || typeof value.capability_id !== "string" || !isRecord(value.clarification)) return null;
+  const clarification = value.clarification;
+  if (typeof clarification.request_id !== "string" || typeof clarification.prompt !== "string" || !Array.isArray(clarification.choices)) return null;
+  const choices = clarification.choices.map((choice) => {
+    if (!isRecord(choice) || typeof choice.instance_id !== "string" || typeof choice.label !== "string" || typeof choice.description !== "string") return null;
+    return { instance_id: choice.instance_id, label: choice.label, description: choice.description };
+  });
+  if (choices.some((choice) => choice === null)) return null;
+  return { conversation_id: value.conversation_id, capability_id: value.capability_id, clarification: { request_id: clarification.request_id, prompt: clarification.prompt, choices: choices.filter((choice): choice is NonNullable<typeof choice> => choice !== null) } };
 }
 
 function toProductEvent(payload: unknown, currentConversationId: string | null): ProductEvent | null {
@@ -154,6 +168,7 @@ export function App() {
   const [appVersion, setAppVersion] = useState<string>("");
   const [expiredInteraction, setExpiredInteraction] = useState<string | null>(null);
   const [interactionIndex, setInteractionIndex] = useState(0);
+  const [routeClarifications, setRouteClarifications] = useState<CapabilityRouteClarificationEvent[]>([]);
   const [detectedInstances, setDetectedInstances] = useState<
     Array<{
       path: string;
@@ -202,6 +217,16 @@ export function App() {
     return () => {
       void unlisten.then((dispose) => dispose());
     };
+  }, []);
+
+  // Capability clarifications join the same global interaction flow: only the
+  // first unresolved choice is presented, then the next queued choice opens.
+  useEffect(() => {
+    const unlisten = listen<unknown>("capability-route-clarification", ({ payload }) => {
+      const clarification = toRouteClarificationEvent(payload);
+      if (clarification) setRouteClarifications((queue) => [...queue, clarification]);
+    });
+    return () => { void unlisten.then((dispose) => dispose()); };
   }, []);
 
   useEffect(() => {
@@ -395,6 +420,16 @@ export function App() {
 
   const queuedInteractions = Array.from(pendingInteractions.values());
   const pendingInteraction = queuedInteractions[Math.min(interactionIndex, queuedInteractions.length - 1)] ?? null;
+  const routeClarification = routeClarifications[0] ?? null;
+  const chooseRoute = useCallback(async (instanceId: string) => {
+    if (!routeClarification) return;
+    await capabilityRouter.submitRouteChoice({
+      conversation_id: routeClarification.conversation_id,
+      capability_id: routeClarification.capability_id,
+      instance_id: instanceId,
+    });
+    setRouteClarifications((queue) => queue.slice(1));
+  }, [routeClarification]);
   const approvalInteraction = pendingInteraction?.kind === "approval" ? pendingInteraction : null;
   const approvalRequest: ApprovalRequest | null = approvalInteraction ? {
     requestId: approvalInteraction.requestId,
@@ -504,6 +539,12 @@ export function App() {
         <div className="fixed bottom-4 right-4 z-40 rounded-full bg-ac-brand px-3 py-1.5 text-xs font-medium text-white shadow-lg">
           {queuedInteractions.length} pending interaction{queuedInteractions.length === 1 ? "" : "s"}
         </div>
+      )}
+
+      {routeClarification && (
+        <RouteClarificationDialog event={routeClarification}
+          onChoose={(instanceId) => { void chooseRoute(instanceId); }}
+          onClose={() => setRouteClarifications((queue) => queue.slice(1))} />
       )}
 
       {approvalInteraction && approvalRequest && (

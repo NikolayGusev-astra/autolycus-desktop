@@ -378,16 +378,16 @@ pub fn capability_requirements(
 ) -> Vec<McpCapabilityRequirement> {
     let pairs: &[(&str, &[&str])] = match definition.0.as_str() {
         "gmail" => &[
-            ("email.read", &["list_inbox"]),
+            ("email.read", &["search_messages"]),
             ("email.send", &["send_email"]),
         ],
         "jira" => &[
-            ("issue.read", &["search_issues"]),
+            ("issue.read", &["search_issues", "get_issue"]),
             ("issue.write", &["create_issue"]),
             ("issue.transition", &["transition_issue"]),
         ],
         "confluence" => &[
-            ("page.read", &["search_pages"]),
+            ("page.read", &["search_pages", "get_page"]),
             ("page.write", &["create_page"]),
         ],
         _ => &[],
@@ -517,6 +517,51 @@ impl IntegrationRuntimePort for McpIntegrationRuntimeAdapter {
             old.handle.process.shutdown().await;
         }
         Ok(())
+    }
+
+    async fn invoke_capability(
+        &self,
+        instance: &IntegrationInstance,
+        capability: &CapabilityId,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, IntegrationCommandError> {
+        let tool = match (instance.definition_id.0.as_str(), capability.0.as_str()) {
+            ("jira", "issue.search") => "search_issues",
+            ("jira", "issue.read") => "get_issue",
+            ("gmail", "mail.search") => "search_messages",
+            ("gmail", "mail.read") => "get_message",
+            ("confluence", "documentation.search") => "search_pages",
+            ("confluence", "documentation.read") => "get_page",
+            _ => return Err(IntegrationCommandError::RuntimeUnavailable),
+        };
+        let mut runtimes = self.runtimes.lock().await;
+        let runtime = runtimes
+            .get_mut(&instance.id)
+            .ok_or(IntegrationCommandError::RuntimeUnavailable)?;
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            runtime.handle.process.call_tool(tool, input),
+        )
+        .await
+        .map_err(|_| IntegrationCommandError::HealthCheckFailed)?
+        .map_err(|error| map_error(&error))
+    }
+
+    async fn capability_available(
+        &self,
+        instance: &IntegrationInstance,
+        capability: &CapabilityId,
+    ) -> Result<bool, IntegrationCommandError> {
+        let legacy = match capability.0.as_str() {
+            "issue.search" | "issue.read" => CapabilityId("issue.read".into()),
+            "mail.search" | "mail.read" => CapabilityId("email.read".into()),
+            "documentation.search" | "documentation.read" => CapabilityId("page.read".into()),
+            _ => return Ok(false),
+        };
+        Ok(matches!(
+            self.capability_status(instance, &legacy).await?,
+            NormalizedCapability::Available
+        ))
     }
 
     async fn stop(&self, id: &IntegrationInstanceId) -> Result<(), IntegrationCommandError> {

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::integration_domain::{
     CapabilityId, IntegrationInstance, IntegrationInstanceId, IntegrationManagement,
-    IntegrationStatus,
+    IntegrationRuntimePort, IntegrationStatus,
 };
 use crate::product_domain::ConversationId;
 
@@ -250,11 +250,110 @@ pub trait AssistantCapabilityInvoker: Send + Sync {
     ) -> Result<CapabilityInvocationResult, CapabilityRoutingError>;
 }
 
+/// Product-facing invoker. The runtime owns provider/tool selection; this
+/// type only passes a curated capability and returns a bounded product result.
+pub struct IntegrationCapabilityInvoker {
+    runtime: Arc<dyn IntegrationRuntimePort>,
+    integrations: Arc<dyn CapabilityIntegrationSource>,
+}
+
+impl IntegrationCapabilityInvoker {
+    pub fn new(
+        runtime: Arc<dyn IntegrationRuntimePort>,
+        integrations: Arc<dyn CapabilityIntegrationSource>,
+    ) -> Self {
+        Self {
+            runtime,
+            integrations,
+        }
+    }
+}
+
+#[async_trait]
+impl AssistantCapabilityInvoker for IntegrationCapabilityInvoker {
+    async fn invoke(
+        &self,
+        route: &CapabilityRoute,
+        input: &CapabilityInvocationInput,
+    ) -> Result<CapabilityInvocationResult, CapabilityRoutingError> {
+        let instance = self
+            .integrations
+            .list_instances()
+            .await?
+            .into_iter()
+            .find(|item| item.id == route.instance_id)
+            .ok_or(CapabilityRoutingError::InstanceUnavailable)?;
+        let raw = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.runtime
+                .invoke_capability(&instance, &route.capability_id, &input.values),
+        )
+        .await
+        .map_err(|_| CapabilityRoutingError::InvocationFailed)?
+        .map_err(|_| CapabilityRoutingError::InvocationFailed)?;
+        normalize_runtime_result(&route.capability_id, raw)
+    }
+}
+
+fn normalize_runtime_result(
+    capability: &CapabilityId,
+    raw: Value,
+) -> Result<CapabilityInvocationResult, CapabilityRoutingError> {
+    let sanitized = sanitize_value(raw, 0);
+    match capability.0.as_str() {
+        "issue.search" | "mail.search" | "documentation.search" => {
+            Ok(CapabilityInvocationResult::SearchResults {
+                items: sanitized
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_else(|| vec![sanitized]),
+                continuation: None,
+            })
+        }
+        "issue.read" | "mail.read" | "documentation.read" => {
+            Ok(CapabilityInvocationResult::Resource { item: sanitized })
+        }
+        _ => Err(CapabilityRoutingError::UnknownCapability),
+    }
+}
+
+fn sanitize_value(value: Value, depth: usize) -> Value {
+    if depth >= 8 {
+        return Value::String("[truncated]".into());
+    }
+    match value {
+        Value::String(text) => Value::String(text.chars().take(8_000).collect()),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .take(100)
+                .map(|value| sanitize_value(value, depth + 1))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .take(100)
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "token" | "authorization" | "password" | "secret"
+                    )
+                })
+                .map(|(key, value)| (key, sanitize_value(value, depth + 1)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 pub struct CapabilityRouter {
     registry: Arc<dyn AssistantCapabilityRegistry>,
     integrations: Arc<dyn CapabilityIntegrationSource>,
     preferences: Arc<CapabilityRoutingPreference>,
     policies: Arc<dyn CapabilityRoutingPolicy>,
+    runtime: Option<Arc<dyn IntegrationRuntimePort>>,
+    availability: Mutex<HashMap<(IntegrationInstanceId, CapabilityId), bool>>,
 }
 impl CapabilityRouter {
     pub fn new(
@@ -268,7 +367,34 @@ impl CapabilityRouter {
             integrations,
             preferences,
             policies,
+            runtime: None,
+            availability: Mutex::default(),
         }
+    }
+    pub fn with_runtime(mut self, runtime: Arc<dyn IntegrationRuntimePort>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+    pub async fn refresh_capability_availability(&self) -> Result<(), CapabilityRoutingError> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        let instances = self.integrations.list_instances().await?;
+        let capabilities = self.registry.list().await;
+        let mut next = HashMap::new();
+        for instance in &instances {
+            for definition in &capabilities {
+                if supports_capability(instance, &definition.id) {
+                    let available = runtime
+                        .capability_available(instance, &definition.id)
+                        .await
+                        .unwrap_or(false);
+                    next.insert((instance.id.clone(), definition.id.clone()), available);
+                }
+            }
+        }
+        *self.availability.lock().await = next;
+        Ok(())
     }
     pub async fn list_capabilities(&self) -> Vec<AssistantCapabilityDefinition> {
         self.registry.list().await
@@ -286,12 +412,19 @@ impl CapabilityRouter {
             .await
             .ok_or(CapabilityRoutingError::UnknownCapability)?;
         validate_input(input)?;
+        let availability = self.availability.lock().await.clone();
         let mut candidates: Vec<_> = self
             .integrations
             .list_instances()
             .await?
             .into_iter()
             .filter(|i| supports_capability(i, capability_id))
+            .filter(|i| {
+                availability
+                    .get(&(i.id.clone(), capability_id.clone()))
+                    .copied()
+                    .unwrap_or(true)
+            })
             .filter(|i| i.enabled && self.policies.allows(&definition, i, is_admin))
             .filter(|i| {
                 matches!(
