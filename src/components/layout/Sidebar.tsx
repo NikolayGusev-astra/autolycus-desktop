@@ -13,6 +13,7 @@ import {
   Zap,
   PanelLeftClose,
   Compass,
+  Plug,
 } from "lucide-react";
 import { useUIStore } from "../../stores/uiStore";
 import { useTranslation } from "../../hooks/useTranslation";
@@ -21,7 +22,9 @@ export type ViewId =
   | "dashboard"
   | "chat"
   | "work"
-  | "settings";
+  | "settings"
+  | "integrations"
+  | "admin-integrations";
 
 interface SidebarProps {
   activeView: ViewId;
@@ -38,6 +41,7 @@ export function Sidebar({ activeView, onViewChange, onSelfDiagnosis }: SidebarPr
     { id: "dashboard", icon: LayoutDashboard, label: t("feed.title") },
     { id: "chat", icon: MessageSquare, label: t("nav.assistant") },
     { id: "work", icon: Briefcase, label: t("nav.work") },
+    { id: "integrations", icon: Plug, label: "Integrations" },
     { id: "settings", icon: SettingsIcon, label: t("nav.settings") },
   ];
 

@@ -19,6 +19,8 @@ import { HistoryPanel } from "./components/sessions/HistoryPanel";
 import { FeedView } from "./components/views/FeedView";
 import { WorkView, type WorkTab } from "./components/views/WorkView";
 import { SelfDiagModal } from "./components/SelfDiagModal";
+import { UserIntegrationOverview } from "./components/integrations/UserIntegrationOverview";
+import { AdminIntegrationOverview } from "./components/integrations/AdminIntegrationOverview";
 import { useTranslation as useTranslationHook } from "./hooks/useTranslation";
 import { SplashScreen } from "./components/SplashScreen";
 import { WelcomeScreen } from "./components/WelcomeScreen";
@@ -137,7 +139,12 @@ function InteractionDialog({
 
 export function App() {
   const [screen, setScreen] = useState<AppScreen>("splash");
-  const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const [activeView, setActiveView] = useState<ViewId>(() => window.location.pathname === "/admin/integrations" ? "admin-integrations" : window.location.pathname === "/integrations" ? "integrations" : "dashboard");
+  const navigate = useCallback((view: ViewId) => {
+    const path = view === "integrations" ? "/integrations" : view === "admin-integrations" ? "/admin/integrations" : "/";
+    window.history.pushState({}, "", path);
+    setActiveView(view);
+  }, []);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [selfDiagOpen, setSelfDiagOpen] = useState(false);
   // Which sub-tab WorkView opens on (e.g. "tasks" from dashboard "new task").
@@ -432,7 +439,7 @@ export function App() {
     <div className="flex h-full bg-ac-bg overflow-hidden">
       <Sidebar
         activeView={activeView}
-        onViewChange={setActiveView}
+        onViewChange={navigate}
         onSelfDiagnosis={() => setSelfDiagOpen(true)}
       />
 
@@ -472,6 +479,10 @@ export function App() {
             <div className="flex-1 overflow-y-auto">
               <SettingsPanel onClose={() => setActiveView("dashboard")} />
             </div>
+          ) : activeView === "integrations" ? (
+            <div className="flex-1 overflow-y-auto"><UserIntegrationOverview /></div>
+          ) : activeView === "admin-integrations" ? (
+            <div className="flex-1 overflow-y-auto"><AdminIntegrationOverview /></div>
           ) : (
             <div className="flex-1 overflow-y-auto p-6">
               <div className="max-w-2xl mx-auto text-center py-20 text-ac-muted">

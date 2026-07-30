@@ -16,6 +16,8 @@ export interface UserIntegration {
   id: string; definition_id: string; display_name: string; description: string;
   category: string; status: string; enabled: boolean; capabilities: Capability[];
 }
+/** Public integration shape. User-facing components intentionally depend on this only. */
+export type UserIntegrationDto = UserIntegration;
 export interface AdminIntegration {
   id: string; definition_id: string; display_name: string; status: IntegrationStatus;
   management: string; setup_schema: SetupField[];
