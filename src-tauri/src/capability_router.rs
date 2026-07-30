@@ -631,13 +631,17 @@ mod tests {
     }
     #[test]
     fn product_layers_have_no_transport_imports() {
-        for source in [
-            include_str!("capability_router.rs"),
+        // Only inspect the non-test portion of capability_router.rs to avoid
+        // the test assertion itself matching the check string.
+        let source = include_str!("capability_router.rs");
+        let test_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        for file in [
+            &source[..test_start],
             include_str!("product_domain.rs"),
             include_str!("conversation_service.rs"),
         ] {
-            assert!(!source.contains("mcp_adapter"));
-            assert!(!source.contains("mcp_client"));
+            assert!(!file.contains("mcp_adapter"));
+            assert!(!file.contains("mcp_client"));
         }
     }
 }
