@@ -880,33 +880,96 @@ fn ensure_steersman_mcp_registered(_hermes_home: &std::path::Path) -> Result<(),
     Ok(())
 }
 
+/// Render only MCP sources that are configured and enabled for the active
+/// profile. The runtime tool registry remains authoritative for exact tools.
+fn configured_sources_markdown(servers: &HashMap<String, mcp::McpServerConfig>) -> String {
+    let mut names: Vec<_> = servers
+        .iter()
+        .filter(|(_, server)| server.enabled.unwrap_or(true))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    names.sort_unstable();
+
+    if names.is_empty() {
+        return "- Нет настроенных MCP-источников.".to_string();
+    }
+
+    names
+        .into_iter()
+        .map(|name| {
+            match name {
+                "email" => "- **email MCP**: `list_inbox`, `get_message`, `mark_read`, `send_email`.",
+                "jira" => "- **jira MCP**: `jira_search_jql`, `jira_get_issue`, `jira_transition_issue`, `jira_add_comment`.",
+                "rupost_calendar" => "- **rupost_calendar MCP**: `list_calendars`, `list_events`, `get_event`.",
+                "confluence" => "- **confluence MCP**: инструменты базы знаний, доступные в реестре.",
+                "lodestone" => "- **lodestone MCP**: инструменты поиска по документам, доступные в реестре.",
+                other => return format!("- **{} MCP**: используй только инструменты из реестра.", other),
+            }
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_configured_sources_template(
+    template: &str,
+    servers: &HashMap<String, mcp::McpServerConfig>,
+) -> String {
+    template.replace(
+        "{{CONFIGURED_SOURCES}}",
+        &configured_sources_markdown(servers),
+    )
+}
+
+fn is_managed_or_legacy_assistant_content(content: &str) -> bool {
+    content.contains("<!-- steersman-managed-mcp-sources -->")
+        || (content.contains("- **email** — почта (IMAP/SMTP).")
+            && content.contains("- **jira** — задачи Jira.")
+            && content.contains("- **lodestone** — RAG-поиск"))
+        || (content.contains("- **email MCP**: `list_inbox`")
+            && content.contains("- **jira MCP**: `jira_search_jql`")
+            && content.contains("- **lodestone MCP**: RAG-поиск"))
+}
+
 /// ADR-008: Ensure ~/.hermes/AGENTS.md exists with the Steersman assistant
-/// persona. If the user already has one, we do NOT overwrite (their content
-/// wins). If absent, we copy the bundled template.
+/// persona. Managed and legacy bundled files are refreshed from the configured
+/// MCP sources; user-authored files are left untouched.
 fn ensure_agents_md(hermes_home: &std::path::Path) -> Result<(), String> {
     let agents_path = hermes_home.join("AGENTS.md");
-    if agents_path.exists() {
-        return Ok(()); // respect user's existing file
+    if agents_path.exists()
+        && !std::fs::read_to_string(&agents_path)
+            .map(|content| is_managed_or_legacy_assistant_content(&content))
+            .unwrap_or(false)
+    {
+        return Ok(()); // respect a user-authored file
     }
     let template = include_str!("../templates/AGENTS.md");
-    std::fs::write(&agents_path, template).map_err(|e| format!("write AGENTS.md: {}", e))?;
+    let servers = mcp::read_mcp_servers_yaml(hermes_home, None);
+    let content = render_configured_sources_template(template, &servers);
+    std::fs::write(&agents_path, content).map_err(|e| format!("write AGENTS.md: {}", e))?;
     tracing::info!(target: "steersman_desktop_lib::init", "created AGENTS.md from template");
     Ok(())
 }
 
 /// ADR-008 Phase 3: Ensure the steersman-assistant skill is installed in
 /// ~/.hermes/skills/ so the agent knows its executive-assistant role and
-/// the steersman_* tool patterns. Idempotent — skips if the user has a
-/// custom version (we only install if absent, never overwrite).
+/// the steersman_* tool patterns. Managed and legacy bundled files are
+/// refreshed; a custom version is never overwritten.
 fn ensure_bundled_skill(hermes_home: &std::path::Path) -> Result<(), String> {
     let skill_dir = hermes_home.join("skills").join("steersman-assistant");
     let skill_md = skill_dir.join("SKILL.md");
-    if skill_md.exists() {
-        return Ok(()); // respect user's existing skill
+    if skill_md.exists()
+        && !std::fs::read_to_string(&skill_md)
+            .map(|content| is_managed_or_legacy_assistant_content(&content))
+            .unwrap_or(false)
+    {
+        return Ok(()); // respect a user-authored skill
     }
     std::fs::create_dir_all(&skill_dir).map_err(|e| format!("create skill dir: {}", e))?;
     let template = include_str!("../templates/skills/steersman-assistant/SKILL.md");
-    std::fs::write(&skill_md, template).map_err(|e| format!("write SKILL.md: {}", e))?;
+    let servers = mcp::read_mcp_servers_yaml(hermes_home, None);
+    let content = render_configured_sources_template(template, &servers);
+    std::fs::write(&skill_md, content).map_err(|e| format!("write SKILL.md: {}", e))?;
     tracing::info!(target: "steersman_desktop_lib::init", "installed steersman-assistant skill");
     Ok(())
 }
@@ -2107,7 +2170,7 @@ async fn generate_smart_briefing_cmd(
     // agent has direct access to email (himalaya MCP), Jira MCP, chat
     // sessions in state.db, and the LLM for analysis. No separate Python
     // briefing server needed (replaces mcp-smart-briefing/server.py).
-    let prompt = briefing::briefing_prompt(days);
+    let prompt = briefing::briefing_prompt(&hermes_home, profile.as_deref(), days);
 
     let port = gateway::get_gateway_port(&state.gateway, None)
         .await
