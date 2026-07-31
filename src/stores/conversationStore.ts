@@ -12,6 +12,8 @@ export interface ConversationMessage {
   thinking?: string;
 }
 
+const NO_MESSAGES: ConversationMessage[] = [];
+
 export type InteractionKind = "approval" | "clarification" | "secret" | "privilege";
 
 export interface PendingInteraction {
@@ -26,7 +28,8 @@ export interface PendingInteraction {
 interface ConversationState {
   conversations: ProductConversationDto[];
   currentConversationId: string | null;
-  messages: Map<string, ConversationMessage[]>;
+  messagesByConversation: Map<string, ConversationMessage[]>;
+  getMessages: (conversationId: string) => ConversationMessage[];
   activeStreamIds: Map<string, string>;
   /** Keyed by a stable (conversationId, requestId) tuple. */
   pendingInteractions: Map<string, PendingInteraction>;
@@ -56,32 +59,32 @@ function eventText(event: ProductEvent): string {
         : "";
 }
 
-function appendMessage(messages: Map<string, ConversationMessage[]>, conversationId: string, message: ConversationMessage) {
-  const next = new Map(messages);
-  next.set(conversationId, [...(next.get(conversationId) ?? []), message]);
+function appendMessage(messagesByConversation: Map<string, ConversationMessage[]>, conversationId: string, message: ConversationMessage) {
+  const next = new Map(messagesByConversation);
+  next.set(conversationId, [...(next.get(conversationId) ?? NO_MESSAGES), message]);
   return next;
 }
 
-function appendAssistantContent(messages: Map<string, ConversationMessage[]>, conversationId: string, streamId: string, content: string) {
-  const existing = messages.get(conversationId) ?? [];
+function appendAssistantContent(messagesByConversation: Map<string, ConversationMessage[]>, conversationId: string, streamId: string, content: string) {
+  const existing = messagesByConversation.get(conversationId) ?? NO_MESSAGES;
   const messageIndex = existing.findIndex((message) => message.id === streamId);
-  if (messageIndex < 0) return appendMessage(messages, conversationId, { id: streamId, role: "assistant", content });
+  if (messageIndex < 0) return appendMessage(messagesByConversation, conversationId, { id: streamId, role: "assistant", content });
 
-  const next = new Map(messages);
+  const next = new Map(messagesByConversation);
   next.set(conversationId, existing.map((message, index) =>
     index === messageIndex ? { ...message, content: message.content + content } : message,
   ));
   return next;
 }
 
-function appendThinking(messages: Map<string, ConversationMessage[]>, conversationId: string, streamId: string, thinking: string) {
-  const existing = messages.get(conversationId) ?? [];
+function appendThinking(messagesByConversation: Map<string, ConversationMessage[]>, conversationId: string, streamId: string, thinking: string) {
+  const existing = messagesByConversation.get(conversationId) ?? NO_MESSAGES;
   const messageIndex = existing.findIndex((message) => message.id === streamId);
   if (messageIndex < 0) {
-    return appendMessage(messages, conversationId, { id: streamId, role: "assistant", content: "", thinking });
+    return appendMessage(messagesByConversation, conversationId, { id: streamId, role: "assistant", content: "", thinking });
   }
 
-  const next = new Map(messages);
+  const next = new Map(messagesByConversation);
   next.set(conversationId, existing.map((message, index) =>
     index === messageIndex ? { ...message, thinking: (message.thinking ?? "") + thinking } : message,
   ));
@@ -120,7 +123,8 @@ function interactionFromEvent(event: ProductEvent): PendingInteraction | null {
 export const useConversationStore = create<ConversationState>()((set, get) => ({
   conversations: [],
   currentConversationId: null,
-  messages: new Map(),
+  messagesByConversation: new Map(),
+  getMessages: (conversationId) => get().messagesByConversation.get(conversationId) ?? NO_MESSAGES,
   activeStreamIds: new Map(),
   pendingInteractions: new Map(),
   loading: false,
@@ -132,7 +136,9 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
       const id = await productConversationService.createConversation();
       set((state) => ({
         currentConversationId: id,
-        messages: state.messages.has(id) ? state.messages : new Map(state.messages).set(id, []),
+        messagesByConversation: state.messagesByConversation.has(id)
+          ? state.messagesByConversation
+          : new Map(state.messagesByConversation).set(id, NO_MESSAGES),
       }));
       await get().loadConversations();
       return id;
@@ -147,7 +153,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
   sendMessage: async (conversationId, text) => {
     set((state) => ({
       error: null,
-      messages: appendMessage(state.messages, conversationId, {
+      messagesByConversation: appendMessage(state.messagesByConversation, conversationId, {
         id: crypto.randomUUID(),
         role: "user",
         content: text,
@@ -186,7 +192,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
         set((state) => {
           const activeStreamIds = new Map(state.activeStreamIds);
           const streamId = getOrCreateStreamId(activeStreamIds, conversationId);
-          return { activeStreamIds, messages: appendAssistantContent(state.messages, conversationId, streamId, text) };
+          return { activeStreamIds, messagesByConversation: appendAssistantContent(state.messagesByConversation, conversationId, streamId, text) };
         });
         break;
       case "Reasoning":
@@ -194,7 +200,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
         set((state) => {
           const activeStreamIds = new Map(state.activeStreamIds);
           const streamId = getOrCreateStreamId(activeStreamIds, conversationId);
-          return { activeStreamIds, messages: appendThinking(state.messages, conversationId, streamId, text) };
+          return { activeStreamIds, messagesByConversation: appendThinking(state.messagesByConversation, conversationId, streamId, text) };
         });
         break;
       case "MessageCompleted":
@@ -206,12 +212,12 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
         break;
       case "ToolStarted":
       case "ToolCompleted":
-        if (text) set((state) => ({ messages: appendMessage(state.messages, conversationId, { id: crypto.randomUUID(), role: "tool", content: text }) }));
+        if (text) set((state) => ({ messagesByConversation: appendMessage(state.messagesByConversation, conversationId, { id: crypto.randomUUID(), role: "tool", content: text }) }));
         break;
       case "StatusUpdate":
       case "Progress":
       case "Error":
-        if (text) set((state) => ({ messages: appendMessage(state.messages, conversationId, { id: crypto.randomUUID(), role: "status", content: text }) }));
+        if (text) set((state) => ({ messagesByConversation: appendMessage(state.messagesByConversation, conversationId, { id: crypto.randomUUID(), role: "status", content: text }) }));
         break;
       case "ApprovalRequired":
       case "ClarificationRequired":

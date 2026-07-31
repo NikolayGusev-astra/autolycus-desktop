@@ -3,8 +3,10 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { MessageBubble } from "./MessageBubble";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { useConversationStore } from "../../stores/conversationStore";
+import { useConversationStore, type ConversationMessage } from "../../stores/conversationStore";
 import type { Message } from "../../lib/types";
+
+const NO_MESSAGES: ConversationMessage[] = [];
 
 /** Empty-state greeting derived from the agent's soul (soul.md). Falls back to
  * a sensible default. The user can customize this via onboarding/Settings. */
@@ -54,7 +56,7 @@ export function MessageList({ conversationId }: { conversationId: string | null 
   const parentRef = useRef<HTMLDivElement>(null);
   const legacyMessages = useGatewayStore((s) => s.messages);
   const productMessages = useConversationStore((state) =>
-    conversationId ? state.messages.get(conversationId) ?? [] : [],
+    conversationId ? state.messagesByConversation.get(conversationId) ?? NO_MESSAGES : NO_MESSAGES,
   );
   const messages: Message[] = conversationId
     ? productMessages.map((message) => ({

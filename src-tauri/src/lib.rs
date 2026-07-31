@@ -52,12 +52,19 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
+
+/// Last successful smart briefing time, keyed by profile. This lives for the
+/// desktop process lifetime so external cron invocations share one cooldown.
+static LAST_BRIEFING_TIME: OnceLock<Arc<Mutex<HashMap<String, Instant>>>> = OnceLock::new();
+
+const SMART_BRIEFING_COOLDOWN: Duration = Duration::from_secs(50 * 60);
 
 // ── Re-exports ───────────────────────────────────────────────────────────
 
@@ -2165,6 +2172,34 @@ async fn generate_smart_briefing_cmd(
 ) -> Result<briefing::BriefingResult, String> {
     let hermes_home = home_or_resolve(&state)?;
     let days = days.unwrap_or(7);
+    let profile_name = profile.as_deref().unwrap_or("default").to_owned();
+    let last_briefing_time =
+        LAST_BRIEFING_TIME.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
+
+    if let Some(last_generated) = last_briefing_time
+        .lock()
+        .map_err(|_| "Smart briefing cooldown state is unavailable")?
+        .get(&profile_name)
+        .copied()
+    {
+        let elapsed = last_generated.elapsed();
+        if elapsed < SMART_BRIEFING_COOLDOWN {
+            tracing::warn!(
+                profile = %profile_name,
+                elapsed_secs = elapsed.as_secs(),
+                "Skipping smart briefing because its cooldown is active"
+            );
+            let cached = briefing::get_cached_briefing(&hermes_home, profile.as_deref(), 0.0);
+            return Ok(briefing::BriefingResult {
+                session_id: cached.session_id,
+                source: "briefing_agent".into(),
+                started_at: cached.generated_at,
+                title: cached.title,
+                preview: cached.text.lines().take(4).collect::<Vec<_>>().join("\n"),
+                formatted: cached.text,
+            });
+        }
+    }
 
     // Build the briefing prompt and send it through the WS transport — the
     // agent has direct access to email (himalaya MCP), Jira MCP, chat
@@ -2242,6 +2277,11 @@ async fn generate_smart_briefing_cmd(
             ],
         )
     });
+
+    last_briefing_time
+        .lock()
+        .map_err(|_| "Smart briefing cooldown state is unavailable")?
+        .insert(profile_name, Instant::now());
 
     Ok(briefing::BriefingResult {
         session_id: real_session_id,

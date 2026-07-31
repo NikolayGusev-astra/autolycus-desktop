@@ -207,7 +207,11 @@ export function App() {
       );
       if (!productEvent) return;
 
-      useConversationStore.getState().handleProductEvent(productEvent);
+      try {
+        useConversationStore.getState().handleProductEvent(productEvent);
+      } catch (error) {
+        console.error("Failed to handle product event:", error);
+      }
 
       if (productEvent.type === "InteractionExpired" && typeof productEvent.request_id === "string") {
         setExpiredInteraction("This request expired.");
