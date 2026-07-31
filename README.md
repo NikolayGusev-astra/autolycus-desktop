@@ -90,12 +90,16 @@ gh workflow run release.yml
 
 The project produces two executables from the same crate:
 
-| Binary | Role |
-|--------|------|
-| `steersman-desktop` | The main Tauri application — React UI, WebSocket transport, runtime supervisor, conversation service, integration management. |
-| `steersman-mcp-server` | A bundled MCP stdio server (JSON-RPC 2.0 over stdin/stdout). It ships **inside the installer**, placed next to the main executable. It is **not** a standalone product and is never installed separately. |
+| Binary | Role | Optional? |
+|--------|------|-----------|
+| `steersman-desktop` | The main Tauri application — React UI, WebSocket transport, runtime supervisor, conversation service, integration management. | No — this is the app itself. |
+| `steersman-mcp-server` | An MCP stdio server that lets the Hermes agent write back to the Steersman database (create tasks, goals, link sessions, search history, assemble meeting briefings). | **Yes** — without it, the app works fine, but the agent cannot create or modify productivity data from chat. |
 
-`steersman-mcp-server` is a write-back bridge: the Hermes agent launches it as a subprocess and calls its tools to create and update tasks, goals, link chat sessions, search conversation history, and assemble meeting context briefings — all operating on the local Steersman database. Registration is explicit: open Settings → MCP → Register Steersman, which writes the binary path into `config.yaml` under `mcp_servers.steersman:`. Design details are in [ADR-008](docs/plans/ADR-008-steersman-mcp-server.md).
+### Why is `steersman-mcp-server` a separate file?
+
+The MCP protocol requires the server to run as a **separate process** that the MCP client (Hermes gateway) launches and communicates with over stdin/stdout pipes. This is a protocol constraint — it cannot be compiled into the main executable.
+
+The binary ships **inside the installer**, placed next to the main executable. Registration is explicit: Settings → MCP → Register Steersman writes the path into `config.yaml`. Design details are in [ADR-008](docs/plans/ADR-008-steersman-mcp-server.md).
 
 All 20 features ported from [fathah/hermes-desktop](https://github.com/fathah/hermes-desktop):
 
