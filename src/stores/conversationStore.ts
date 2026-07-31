@@ -12,7 +12,14 @@ export interface ConversationMessage {
   thinking?: string;
 }
 
-const NO_MESSAGES: ConversationMessage[] = [];
+export const NO_MESSAGES: ConversationMessage[] = [];
+
+export function selectProductMessages(
+  messagesByConversation: Map<string, ConversationMessage[]>,
+  conversationId: string | null,
+): ConversationMessage[] {
+  return conversationId ? messagesByConversation.get(conversationId) ?? NO_MESSAGES : NO_MESSAGES;
+}
 
 export type InteractionKind = "approval" | "clarification" | "secret" | "privilege";
 
@@ -39,7 +46,7 @@ interface ConversationState {
   sendMessage: (conversationId: string, text: string) => Promise<void>;
   loadConversations: () => Promise<void>;
   setCurrentConversation: (id: string) => void;
-  handleProductEvent: (event: ProductEvent) => void;
+  handleProductEvent: (event: unknown) => void;
   removePendingInteraction: (conversationId: string, requestId: string) => void;
   cancelInteraction: (conversationId: string, requestId: string, kind: InteractionKind) => Promise<void>;
   abort: () => Promise<void>;
@@ -57,6 +64,37 @@ function eventText(event: ProductEvent): string {
       : typeof event.result === "string"
         ? event.result
         : "";
+}
+
+function isProductEventType(type: unknown): type is ProductEvent["type"] {
+  switch (type) {
+    case "MessageDelta":
+    case "MessageCompleted":
+    case "Reasoning":
+    case "Thinking":
+    case "ToolStarted":
+    case "ToolCompleted":
+    case "ApprovalRequired":
+    case "ClarificationRequired":
+    case "SecretRequired":
+    case "PrivilegeRequired":
+    case "Error":
+    case "StatusUpdate":
+    case "Progress":
+    case "InteractionExpired":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isProductEvent(event: unknown): event is ProductEvent {
+  return typeof event === "object"
+    && event !== null
+    && "type" in event
+    && isProductEventType(event.type)
+    && "conversation_id" in event
+    && typeof event.conversation_id === "string";
 }
 
 function appendMessage(messagesByConversation: Map<string, ConversationMessage[]>, conversationId: string, message: ConversationMessage) {
@@ -183,6 +221,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
   setCurrentConversation: (id) => set({ currentConversationId: id }),
 
   handleProductEvent: (event) => {
+    if (!isProductEvent(event)) return;
     const conversationId = event.conversation_id || get().currentConversationId;
     if (!conversationId) return;
     const text = eventText(event);

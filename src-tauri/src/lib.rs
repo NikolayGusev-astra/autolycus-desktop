@@ -66,6 +66,21 @@ static LAST_BRIEFING_TIME: OnceLock<Arc<Mutex<HashMap<String, Instant>>>> = Once
 
 const SMART_BRIEFING_COOLDOWN: Duration = Duration::from_secs(50 * 60);
 
+fn smart_briefing_cooldown_active(
+    last_briefing_time: &Arc<Mutex<HashMap<String, Instant>>>,
+    profile_name: &str,
+) -> Result<bool, String> {
+    let last_generated = last_briefing_time
+        .lock()
+        .map_err(|_| "Smart briefing cooldown state is unavailable")?
+        .get(profile_name)
+        .copied();
+
+    Ok(last_generated
+        .map(|generated| generated.elapsed() < SMART_BRIEFING_COOLDOWN)
+        .unwrap_or(false))
+}
+
 // ── Re-exports ───────────────────────────────────────────────────────────
 
 pub use capability_router::*;
@@ -2176,29 +2191,20 @@ async fn generate_smart_briefing_cmd(
     let last_briefing_time =
         LAST_BRIEFING_TIME.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
 
-    if let Some(last_generated) = last_briefing_time
-        .lock()
-        .map_err(|_| "Smart briefing cooldown state is unavailable")?
-        .get(&profile_name)
-        .copied()
-    {
-        let elapsed = last_generated.elapsed();
-        if elapsed < SMART_BRIEFING_COOLDOWN {
-            tracing::warn!(
-                profile = %profile_name,
-                elapsed_secs = elapsed.as_secs(),
-                "Skipping smart briefing because its cooldown is active"
-            );
-            let cached = briefing::get_cached_briefing(&hermes_home, profile.as_deref(), 0.0);
-            return Ok(briefing::BriefingResult {
-                session_id: cached.session_id,
-                source: "briefing_agent".into(),
-                started_at: cached.generated_at,
-                title: cached.title,
-                preview: cached.text.lines().take(4).collect::<Vec<_>>().join("\n"),
-                formatted: cached.text,
-            });
-        }
+    if smart_briefing_cooldown_active(last_briefing_time, &profile_name)? {
+        tracing::warn!(
+            profile = %profile_name,
+            "Skipping smart briefing because its cooldown is active"
+        );
+        let cached = briefing::get_cached_briefing(&hermes_home, profile.as_deref(), 0.0);
+        return Ok(briefing::BriefingResult {
+            session_id: cached.session_id,
+            source: "briefing_agent".into(),
+            started_at: cached.generated_at,
+            title: cached.title,
+            preview: cached.text.lines().take(4).collect::<Vec<_>>().join("\n"),
+            formatted: cached.text,
+        });
     }
 
     // Build the briefing prompt and send it through the WS transport — the
@@ -4735,6 +4741,7 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use serde_json::{json, Value};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
     use tokio::net::TcpListener;
@@ -4864,6 +4871,35 @@ mod tests {
         assert!(conversations
             .iter()
             .any(|conversation| conversation.id == conversation_id));
+    }
+
+    #[test]
+    fn smart_briefing_cooldown_uses_cached_result_without_repeating_mock_backend() {
+        let profile = format!("cooldown-test-{}", uuid::Uuid::new_v4());
+        let cooldowns = LAST_BRIEFING_TIME.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
+        let backend_requests = AtomicUsize::new(0);
+        let request_briefing = || {
+            if smart_briefing_cooldown_active(cooldowns, &profile).unwrap() {
+                return "cached briefing";
+            }
+
+            backend_requests.fetch_add(1, Ordering::SeqCst);
+            cooldowns
+                .lock()
+                .unwrap()
+                .insert(profile.clone(), Instant::now());
+            "generated briefing"
+        };
+
+        assert_eq!(request_briefing(), "generated briefing");
+        assert_eq!(request_briefing(), "cached briefing");
+        assert_eq!(backend_requests.load(Ordering::SeqCst), 1);
+        assert!(
+            cooldowns.lock().unwrap().contains_key(&profile),
+            "a successful request must update LAST_BRIEFING_TIME"
+        );
+
+        cooldowns.lock().unwrap().remove(&profile);
     }
 
     #[tokio::test]
