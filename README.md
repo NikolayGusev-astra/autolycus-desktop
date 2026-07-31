@@ -26,7 +26,7 @@ Steersman Desktop is a single-user Tauri application: the React frontend calls a
 |-------|------|
 | Frontend | React 19 + TypeScript, Vite, Tailwind CSS 4, Zustand |
 | Backend | Rust + Tauri 2, tokio, keyring-rs, serde, ssh2 |
-| CI/CD | GitHub Actions (Linux AppImage/deb, Windows MSI) |
+| CI/CD | GitHub Actions (Linux AppImage/deb, Windows MSI/NSIS, macOS DMG) |
 
 ## Download
 
@@ -35,6 +35,7 @@ Steersman Desktop is a single-user Tauri application: the React frontend calls a
 | Linux | AppImage | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
 | Linux | deb | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
 | Windows | NSIS / MSI | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
+| macOS | DMG / Universal app.zip | [releases](https://github.com/NikolayGusev-astra/autolycus-desktop/releases) |
 
 ## Development
 
@@ -85,7 +86,16 @@ Open Integrations, select Jira, enter its server URL and credentials, enable the
 gh workflow run release.yml
 ```
 
-## Porting Status
+## Binaries
+
+The project produces two executables from the same crate:
+
+| Binary | Role |
+|--------|------|
+| `steersman-desktop` | The main Tauri application — React UI, WebSocket transport, runtime supervisor, conversation service, integration management. |
+| `steersman-mcp-server` | A bundled MCP stdio server (JSON-RPC 2.0 over stdin/stdout). It ships **inside the installer**, placed next to the main executable. It is **not** a standalone product and is never installed separately. |
+
+`steersman-mcp-server` is a write-back bridge: the Hermes agent launches it as a subprocess and calls its tools to create and update tasks, goals, link chat sessions, search conversation history, and assemble meeting context briefings — all operating on the local Steersman database. Registration is explicit: open Settings → MCP → Register Steersman, which writes the binary path into `config.yaml` under `mcp_servers.steersman:`. Design details are in [ADR-008](docs/plans/ADR-008-steersman-mcp-server.md).
 
 All 20 features ported from [fathah/hermes-desktop](https://github.com/fathah/hermes-desktop):
 

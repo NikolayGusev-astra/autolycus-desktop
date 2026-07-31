@@ -11,12 +11,16 @@
 
 - [ ] Run `cargo build --release` in `src-tauri`.
 - [ ] Run `npm run build` from the repository root.
+- [ ] Verify both binaries exist: `steersman-desktop(.exe)` and `steersman-mcp-server(.exe)` in `target/release/`.
+- [ ] Verify installers contain both binaries (NSIS, MSI, AppImage, DMG).
 
 ## Smoke test
 
 - [ ] Launch the packaged application.
 - [ ] Confirm the gateway starts and reports ready.
 - [ ] Create a conversation and send a test message.
+- [ ] Register the Steersman MCP server (Settings → MCP → Register Steersman).
+- [ ] Verify the agent can call `steersman_*` tools (e.g., create a task from chat).
 
 ## Integration test
 
