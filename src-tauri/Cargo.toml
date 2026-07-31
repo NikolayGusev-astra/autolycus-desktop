@@ -17,6 +17,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "product_api_e2e"
 path = "tests/e2e/product_api.rs"
 
+[[test]]
+name = "real_hermes_e2e"
+path = "tests/e2e/real_hermes.rs"
+
 [features]
 default = []
 

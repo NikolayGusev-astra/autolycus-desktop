@@ -6,6 +6,8 @@
 - [ ] `cargo clippy --lib -q` and `cargo fmt --check` are clean.
 - [ ] Review warnings and remove dead code.
 - [ ] Scan the diff and diagnostics for secret values.
+- [ ] Run real Hermes E2E tests against a live gateway:
+      `cargo test --manifest-path src-tauri/Cargo.toml --test real_hermes_e2e -- --ignored --test-threads=1`
 
 ## Build
 

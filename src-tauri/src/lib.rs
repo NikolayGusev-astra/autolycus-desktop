@@ -104,7 +104,8 @@ pub use sessions::{SessionMessage, SessionStats, SessionSummary};
 pub use ssh::SshState;
 pub use ws_transport::{
     build_ws_url, ensure_ws_connection, redacted_ws_url, submit_prompt_on_connection, to_ws_url,
-    EmitFn, EndpointIdentity, EndpointSnapshot, GatewayAuth, HealthStatus, WsState,
+    EmitFn, EndpointIdentity, EndpointSnapshot, GatewayAuth, HealthStatus, RoutedChatEvent,
+    WsState,
 };
 
 // ── App State ─────────────────────────────────────────────────────────────

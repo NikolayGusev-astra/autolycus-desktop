@@ -18,9 +18,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// Desktop contract version this build implements. Bumping the range is a
 /// deliberate release decision: a lower value means "this desktop supports
 /// Hermes back to contract N", a higher value means "requires Hermes with
-/// at least contract N". The single supported version today is 4.
+/// at least contract N". Supported range is 4–5.
 pub const MIN_HERMES_DESKTOP_CONTRACT: u32 = 4;
-pub const MAX_HERMES_DESKTOP_CONTRACT: u32 = 4;
+pub const MAX_HERMES_DESKTOP_CONTRACT: u32 = 5;
 
 /// Result of a compatibility handshake against the connected Hermes backend.
 ///

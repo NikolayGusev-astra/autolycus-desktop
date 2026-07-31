@@ -3515,17 +3515,19 @@ mod tests {
         ));
         // In range.
         assert!(matches!(RC::evaluate(4), RC::Compatible { contract: 4 }));
-        // Above maximum.
+        assert!(matches!(RC::evaluate(5), RC::Compatible { contract: 5 }));
+        // Above maximum (6+).
         assert!(matches!(
-            RC::evaluate(5),
+            RC::evaluate(6),
             RC::DesktopUpgradeRequired {
-                received: 5,
-                maximum: 4
+                received: 6,
+                maximum: 5
             }
         ));
         // is_compatible only for Compatible.
         assert!(!RC::Unknown.is_compatible());
         assert!(RC::evaluate(4).is_compatible());
+        assert!(RC::evaluate(5).is_compatible());
         assert!(!RC::evaluate(3).is_compatible());
     }
 
