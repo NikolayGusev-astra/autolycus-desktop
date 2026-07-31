@@ -112,7 +112,7 @@ describe("conversationStore", () => {
   });
 
   it("creates one UUID-backed stream and appends later deltas", () => {
-    vi.spyOn(crypto, "randomUUID").mockReturnValue("stream-uuid");
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000000");
     useConversationStore.setState({ currentConversationId: "conversation-1" });
     const { handleProductEvent } = useConversationStore.getState();
 
@@ -120,7 +120,7 @@ describe("conversationStore", () => {
     handleProductEvent({ type: "MessageDelta", conversation_id: "conversation-1", text: "lo" });
 
     expect(useConversationStore.getState().getMessages("conversation-1")).toEqual([
-      { id: "stream-uuid", role: "assistant", content: "Hello" },
+      { id: "00000000-0000-0000-0000-000000000000", role: "assistant", content: "Hello" },
     ]);
     expect(crypto.randomUUID).toHaveBeenCalledTimes(1);
   });
@@ -128,7 +128,7 @@ describe("conversationStore", () => {
   it("finalizes a stream when MessageCompleted arrives", () => {
     useConversationStore.setState({
       currentConversationId: "conversation-1",
-      activeStreamIds: new Map([["conversation-1", "stream-uuid"]]),
+      activeStreamIds: new Map([["conversation-1", "00000000-0000-0000-0000-000000000000"]]),
     });
 
     useConversationStore.getState().handleProductEvent({ type: "MessageCompleted", conversation_id: "conversation-1" });
