@@ -11,12 +11,14 @@ use serde_json::{json, Value};
 use steersman_desktop_lib::{
     AssistantCapabilityInvoker, CapabilityId, CapabilityIntegrationSource,
     CapabilityInvocationInput, CapabilityInvocationResult, CapabilityRouter,
-    CapabilityRoutingError, CapabilityRoutingPreference, ConnectionMode, ConversationId,
-    ConversationService, CredentialBackend, DefaultRoutingPolicy, EmitFn, EndpointIdentity,
-    EndpointSnapshot, InMemoryConversationRepository, IntegrationCommandError,
-    IntegrationDefinitionId, IntegrationInstance, IntegrationInstanceId, IntegrationManagement,
-    IntegrationSecretStore, IntegrationStatus, OsSecretStore, ProductError, RuntimeKey,
-    RuntimeSupervisor, SessionRegistry, SetupValueDto, StaticCapabilityRegistry,
+    CapabilityRoutingError, CapabilityRoutingPreference, ConfigureIntegrationRequest,
+    ConfiguredFieldValue, ConnectionMode, ConversationId, ConversationService, CredentialBackend,
+    DefaultRoutingPolicy, EmitFn, EndpointIdentity, EndpointSnapshot, FakeCatalogRepository,
+    FakeInstanceRepository, FakeRuntimePort, FakeSecretStore, InMemoryConversationRepository,
+    IntegrationActor, IntegrationCommandError, IntegrationDefinitionId, IntegrationInstance,
+    IntegrationInstanceId, IntegrationInstanceRepository, IntegrationManagement,
+    IntegrationSecretStore, IntegrationService, IntegrationStatus, OsSecretStore, ProductError,
+    RuntimeKey, RuntimeSupervisor, SessionRegistry, SetupValueDto, StaticCapabilityRegistry,
 };
 use tokio::{net::TcpListener, sync::Mutex as AsyncMutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -192,6 +194,111 @@ async fn os_secret_store_round_trips_without_logging_values() {
     assert!(!include_str!("../../src/integration_service.rs").contains("value = %value"));
     store.delete_instance_secrets(&id).await.unwrap();
     let _ = std::fs::remove_dir_all(home);
+}
+
+fn gmail_request(display_name: &str) -> ConfigureIntegrationRequest {
+    ConfigureIntegrationRequest {
+        definition_id: IntegrationDefinitionId("gmail".into()),
+        instance_id: None,
+        display_name: display_name.into(),
+        fields: vec![
+            ConfiguredFieldValue {
+                key: "email".into(),
+                value: "acceptance@example.test".into(),
+            },
+            ConfiguredFieldValue {
+                key: "app_password".into(),
+                value: "e2e-secret-must-not-leak".into(),
+            },
+        ],
+        management: None,
+        enabled_capabilities: vec![CapabilityId("email.read".into())],
+    }
+}
+
+#[tokio::test]
+async fn integration_lifecycle_uses_fake_runtime_and_keeps_secrets_out_of_dtos() {
+    let events = Arc::new(AsyncMutex::new(Vec::new()));
+    let instances = Arc::new(FakeInstanceRepository::with_events(Arc::clone(&events)));
+    let secrets = Arc::new(FakeSecretStore::with_events(Arc::clone(&events)));
+    let runtime = Arc::new(FakeRuntimePort::with_events(Arc::clone(&events)));
+    let service = IntegrationService::new(
+        Arc::new(FakeCatalogRepository::new()),
+        instances.clone(),
+        secrets.clone(),
+        runtime,
+    );
+    let actor = IntegrationActor::default();
+
+    let configured = service
+        .configure_integration(&actor, gmail_request("Acceptance Gmail"))
+        .await
+        .unwrap();
+    assert_eq!(configured.status, IntegrationStatus::Ready);
+    assert!(configured
+        .configured_fields
+        .iter()
+        .all(|field| field.value.is_none()));
+    assert!(!serde_json::to_string(&configured)
+        .unwrap()
+        .contains("e2e-secret-must-not-leak"));
+
+    let enabled = service
+        .enable_integration(&actor, &configured.id)
+        .await
+        .unwrap();
+    assert_eq!(enabled.status, IntegrationStatus::Ready);
+    let tested = service
+        .test_integration(&actor, &configured.id)
+        .await
+        .unwrap();
+    assert_eq!(tested.status, IntegrationStatus::Ready);
+    let refreshed = service
+        .refresh_integration_status(&actor, &configured.id)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status, IntegrationStatus::Ready);
+    let disabled = service
+        .disable_integration(&actor, &configured.id)
+        .await
+        .unwrap();
+    assert_eq!(disabled.status, IntegrationStatus::Disabled);
+    assert!(secrets
+        .has_secret(&configured.id, "app_password")
+        .await
+        .unwrap());
+    service
+        .remove_integration(&actor, &configured.id)
+        .await
+        .unwrap();
+    assert!(instances.get(&configured.id).await.is_err());
+
+    let events = events.lock().await;
+    let configure = events
+        .iter()
+        .position(|event| event.starts_with("runtime.configure:"))
+        .unwrap();
+    let first_health = events
+        .iter()
+        .position(|event| event.starts_with("runtime.health:"))
+        .unwrap();
+    let stop = events
+        .iter()
+        .rposition(|event| event.starts_with("runtime.stop:"))
+        .unwrap();
+    let delete_secret = events
+        .iter()
+        .rposition(|event| event.starts_with("secret.delete:"))
+        .unwrap();
+    let delete_instance = events
+        .iter()
+        .rposition(|event| event.starts_with("instance.delete:"))
+        .unwrap();
+    assert!(configure < first_health);
+    assert!(stop < delete_secret && delete_secret < delete_instance);
+    assert!(events
+        .iter()
+        .all(|event| !event.contains("e2e-secret-must-not-leak")));
 }
 
 struct OneIntegration(IntegrationInstance);

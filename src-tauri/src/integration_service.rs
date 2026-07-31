@@ -1480,6 +1480,36 @@ mod tests {
             .iter()
             .any(|event| event.starts_with("secret.delete:")));
     }
+
+    #[tokio::test]
+    async fn runtime_failure_restores_existing_instance() {
+        let (service, instances, secrets, runtime, _) = service();
+        let original = service
+            .configure_integration(&user(), request("original"))
+            .await
+            .unwrap();
+        let mut update = request("updated");
+        update.instance_id = Some(original.id.clone());
+        runtime
+            .fail_at("configure", IntegrationCommandError::RuntimeUnavailable)
+            .await;
+
+        assert_eq!(
+            service
+                .configure_integration(&user(), update)
+                .await
+                .unwrap_err(),
+            IntegrationCommandError::RuntimeUnavailable
+        );
+
+        let restored = instances.get(&original.id).await.unwrap();
+        assert_eq!(restored.display_name, "original");
+        assert_eq!(restored.status, IntegrationStatus::Ready);
+        assert!(secrets
+            .has_secret(&original.id, "app_password")
+            .await
+            .unwrap());
+    }
     #[tokio::test]
     async fn secrets_are_absent_from_dtos_and_debug() {
         let (service, _, _, _, _) = service();

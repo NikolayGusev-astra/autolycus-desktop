@@ -224,6 +224,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
     if (!isProductEvent(event)) return;
     const conversationId = event.conversation_id || get().currentConversationId;
     if (!conversationId) return;
+    if (get().currentConversationId && conversationId !== get().currentConversationId) return;
     const text = eventText(event);
 
     switch (event.type) {
